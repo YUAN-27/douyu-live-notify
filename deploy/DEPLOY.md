@@ -324,7 +324,9 @@ docker logs napcat 2>&1 | grep -nE '二维码|qrcode|txz\.qq\.com' | tail -20
 [warn] 二维码解码URL: https://txz.qq.com/p?k=xxxxxxxxxxxxxxxx&f=xxxxxxxxxxxxx
 ```
 
-把 **URL 原文**复制到本地（`k=` / `f=` 的值都要完整，别截断），生成二维码图片：
+把 **URL 原文**复制到**你自己的电脑**上（`k=` / `f=` 的值都要完整，别截断），生成二维码图片：
+
+> `qr_make.py` 在**仓库根目录**，不在本部署包里 —— 它跑在你自己的机器上，不用传到服务器。
 
 ```bash
 python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"
