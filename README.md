@@ -156,11 +156,14 @@ betard  →  show_status: 1,  videoLoop: 1
 deploy/
 ├── DEPLOY.md              完整部署手册（先看这个）
 ├── AGENT_PROMPT.md        想让 AI agent 帮你部署？把这份提示词丢给它
+├── RESUME_PROMPT.md       预检判定内存不足、处理完之后接着部署的续跑提示词
 ├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1）
-├── .env.example           WebUI token 模板
+├── .env.example           WebUI token / 容器内存上限模板
 ├── config.example.json    配置模板
-├── preflight-check.sh     部署前环境预检（只读）
+├── preflight-check.sh     部署前环境预检（只读，含内存判定）
 ├── setup-docker-mirror.sh 探测可用的 Docker 镜像源
+├── mem-report.sh          内存被谁占了（只读，含 OOM 历史）
+├── add-swap.sh            加/删 swap（幂等、可撤销，小内存机器用）
 ├── install-watch.sh       安装 watch.py 与 systemd 单元
 └── douyu-watch.{service,timer}
 ```
@@ -168,6 +171,8 @@ deploy/
 用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
 （只读，不改任何东西）看环境，然后照 `DEPLOY.md` 一步步走。
 **如果你想让 AI agent 来部署，直接把 `AGENT_PROMPT.md` 里那份提示词丢给它。**
+小内存服务器（NapCat 是 Electron 应用，常驻 0.3~0.7GB）要先看预检的内存判定；
+判定不足、处理完之后，用 `RESUME_PROMPT.md` 续跑。
 
 ---
 
