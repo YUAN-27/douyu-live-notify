@@ -34,15 +34,22 @@ services:
     #   设了上限 → 内核只在**这个容器的 cgroup 内部**杀进程。
     #              NapCat 自己重启（restart: always），网页毫发无损。
     #
-    # 900m 对「只推开播提醒」这一个用途是宽松值，正常不会触顶。
-    # 部署稳定几天后，照 docker stats 的实测峰值再决定是收紧还是删掉。
+    # ⚠️ 那道上限**必须 ≤ 宿主机可用内存**，否则等于没设：
+    #    机器只剩 800MB 可用、上限却写 900m，容器照样能一个人吃光内存，
+    #    又把宿主机拖进全局 OOM。这是最容易搞反的一点。
+    #
+    # 默认 700m。按下面这个公式在 .env 里改（NAPCAT_MEM_LIMIT），别改本文件：
+    #     上限 ≈ 宿主机可用内存 × 0.8   （留 20% 给系统和其他服务）
+    #   可用 800MB → 700m ／ 可用 1.5GB → 1200m ／ 可用 3GB → 2000m
+    # 部署稳定几天后，照 docker stats 的实测峰值再收紧或放宽。
     #
     # ⚠️ 部署后**必须验证它真的生效**（返回 0 说明没生效，需要改用 mem_limit 写法）：
     #      docker inspect napcat --format '{{.HostConfig.Memory}}'
+    #      700m → 734003200
     deploy:
       resources:
         limits:
-          memory: 900m
+          memory: "${NAPCAT_MEM_LIMIT:-700m}"
 
     environment:
       # 用宿主机当前用户身份运行，避免挂载目录出现权限问题。

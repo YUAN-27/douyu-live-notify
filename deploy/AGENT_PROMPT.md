@@ -105,10 +105,26 @@ bash mem-report.sh
 | 情况 | 通常的走法 |
 |---|---|
 | 占用大头是可回收缓存 | 直接继续部署 |
-| 可用 400~800MB，且无 OOM 历史 | 加 swap：`sudo bash add-swap.sh`（幂等、可撤销） |
+| 可用 400~800MB，且无 OOM 历史 | 路线 A 两步：**A-1 加 swap** + **A-2 收紧容器上限** |
 | 可用 < 400MB 且有 OOM 历史，**或用户自己的网页就是最大进程** | 多半得换掉推送通道（不再用 NapCat），必须用户确认 |
 
+路线 A 的两步（**必须都做，只做一样等于没解决**）：
+
+```bash
+# A-1  加 swap（加的是「不被杀」的余量）。幂等，可撤销 --remove。
+sudo bash add-swap.sh          # 默认 2G
+
+# A-2  收紧容器上限（改的是「出事时谁死」）
+#      值 = 宿主机可用内存 × 0.8，**不含 swap**
+#      可用 800MB → 700m
+sed -i 's/^NAPCAT_MEM_LIMIT=.*/NAPCAT_MEM_LIMIT=700m/' /opt/napcat/.env
+cd /opt/napcat && docker compose up -d
+```
+
+> ⚠️ 上限若高于宿主机可用内存，这道安全网就完全失效了。**别把 swap 算进上限里。**
+
 **在用户明确说「继续」之前，不要执行 `add-swap.sh`，也不要往下走阶段 2。**
+（若用户已经预先批准走路线 A，则直接执行 A-1 + A-2，然后继续阶段 2。）
 
 > 为什么这里要停：`add-swap.sh` 会改动 `/etc/fstab` 和内核参数（`vm.swappiness`），
 > 属于系统性变更；而「是否接受在 1.5GB 机器上跑一个 Electron 应用」是产品决策。
@@ -164,14 +180,17 @@ ss -lntp | grep -E ':(3000|6099)'
 
 ```bash
 docker inspect napcat --format 'Memory={{.HostConfig.Memory}}'
+free -m | awk '/^Mem:/{print "available: "$7" MB"}'
 ```
 
-- 返回字节数（`900m` → `943718400`）= 生效
-- 返回 `0` = 没生效 → 把 compose 里那段 `deploy:` 换成 `mem_limit: 900m`，
+- 返回字节数与 `.env` 里的 `NAPCAT_MEM_LIMIT` 一致（`700m` → `734003200`）= 生效
+- 返回 `0` = 没生效 → 把 compose 里那段 `deploy:` 换成 `mem_limit: 700m`，
   再 `docker compose up -d`，然后重新验证
+- **返回值比「可用内存」大** = 安全网白设了 → 把 `NAPCAT_MEM_LIMIT` 收到「可用内存 × 0.8」
 
 > 这道上限的作用：内存失控时内核只在**这个容器内部**杀进程，NapCat 自己重启
 > （`restart: always`），同一台机器上其他服务不受牵连。小内存机器上它很重要。
+> **关键是上限必须 ≤ 宿主机可用内存** —— 高于可用内存就等于没设。
 > 另外记录一下它实际吃多少，回报时要带上：`docker stats napcat --no-stream`
 
 ---

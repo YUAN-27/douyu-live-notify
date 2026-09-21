@@ -61,6 +61,18 @@ openssl rand -hex 16
 
 **结论：可用内存低于 ~800MB 就是真有风险，不是保守估计。**
 
+但别只看「可用」这一个数 —— **swap 也算，只是要打折**：
+
+```
+NapCat 预算 = 可用内存 + swap可用量 × 0.5  （需要 0.3~0.7 GB）
+```
+
+swap 只算半个，因为它慢一个数量级：能兜住不被杀，但高峰时 NapCat 会明显变慢。
+`preflight-check.sh` 会直接把这个预算算给你。
+
+> 加了 swap 之后**别急着把容器上限也放宽** —— 上限的取法是
+> 「可用内存 × 0.8」，**不含 swap**。原因见下面第二节。
+
 ### 第一步：查清是谁占了内存
 
 ```bash
@@ -108,8 +120,8 @@ sudo bash add-swap.sh          # 默认 2G
 
 | mem-report 的结果 | 建议 |
 |---|---|
-| 可用 ≥ 900MB，或大头是**可回收缓存** | 直接部署，不必加 swap |
-| 可用 400~800MB，且**没有** OOM 历史 | 路线 A（加 swap）就够 |
+| 可用 ≥ 900MB，或大头是**可回收缓存** | 直接部署，不必加 swap；上限按「可用 × 0.8」设 |
+| 可用 400~800MB，且**没有** OOM 历史 | 路线 A 两步都做（A-1 加 swap + A-2 上限收到 ~700m） |
 | 可用 < 400MB，且**已有** OOM 历史 | 先路线 C 查大头；压不下来就走路线 B |
 | **个人网页本身就是这台机器 RSS 最大的进程** | **务必走路线 B** —— 硬塞 NapCat 很可能让 OOM killer 挑中你的网页 |
 
@@ -274,11 +286,14 @@ ss -lntp | grep -E '3000|6099'
 
 ```bash
 docker inspect napcat --format 'Memory={{.HostConfig.Memory}}'
+# 期望等于 .env 里 NAPCAT_MEM_LIMIT 的字节数：700m → 734003200
+# 顺便确认它 ≤ 宿主机当前可用内存：free -m | awk '/^Mem:/{print $7" MB available"}'
 ```
 
-- 返回一个字节数（`900m` → `943718400`）= **生效**
-- 返回 `0` = **没生效**。把 compose 里那段 `deploy:` 换成旧写法 `mem_limit: 900m`，
-  再 `docker compose up -d`
+- 返回的字节数与 `NAPCAT_MEM_LIMIT` **一致** = **生效**
+- 返回 `0` = **没生效**（多半是 compose 版本旧）。把 compose 里那段 `deploy:` 换成
+  旧写法 `mem_limit: 700m`，再 `docker compose up -d`
+- 返回的数**比可用内存还大** = 安全网白设了，把 `NAPCAT_MEM_LIMIT` 收到「可用内存 × 0.8」
 
 > 这道上限的作用在第 0.3 节讲过：内存失控时，内核只在**容器内部**杀进程，
 > NapCat 自己重启，同一台机器上的网页不受牵连。小内存机器上它是刚需。

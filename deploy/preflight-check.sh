@@ -34,16 +34,43 @@ try:
     print("  可用内存 : %.2f GB" % avail)
     print("  Swap     : %.2f GB 总量 / %.2f GB 可用" % (swap_total, swap_free))
     print()
+    # 预算 = 可用内存 + swap 可用量的一半。
+    # 为什么 swap 只算半个：它慢一个数量级，能兜底但不等价于内存。
+    budget = avail + swap_free * 0.5
+    print("  NapCat 预算: 可用 %.2f GB + swap 折半 %.2f GB = %.2f GB（需要 0.3~0.7 GB）"
+          % (avail, swap_free * 0.5, budget))
+    print()
+    # 「可用内存 × 0.8」= 给系统和其他服务留 20% 的那条经验线（不含 swap）。
+    suggest = int(avail * 0.8 * 1024)
     if avail >= 1.5:
-        print("  判定：[OK] 可用内存充足，NapCat 跑得下")
+        print("  判定：[OK] 可用内存充足，NapCat（0.3~0.7 GB）跑得下")
     elif avail >= 0.8:
-        print("  判定：[注意] 勉强够。NapCat 高峰可能触发 OOM，建议观察 free -h")
+        print("  判定：[注意] 可用 %.2f GB，勉强够（NapCat 需要 0.3~0.7 GB）" % avail)
+        if swap_free >= 1.0:
+            print("          已有 %.2f GB swap 可用 → 可以部署。" % swap_free)
+        else:
+            print("          没有 swap 兜底 → 先加：sudo bash add-swap.sh")
+        print("          必做：确认 .env 的 NAPCAT_MEM_LIMIT ≈ 可用内存 × 0.8（本例约 %dm）"
+              % suggest)
+    elif budget >= 1.2:
+        print("  判定：[注意] 物理内存偏紧（可用 %.2f GB），但 swap 兜得住" % avail)
+        print("          预算 %.2f GB ≥ 1.2 GB → 可以部署。代价是高峰时 NapCat 会变慢。" % budget)
+        print("          必做：容器上限 NAPCAT_MEM_LIMIT 再收一档，给同机其他服务留余量")
     else:
-        print("  判定：[不足] 可用内存 < 800MB，不足以安全承载 NapCat。")
+        print("  判定：[不足] 可用 %.2f GB、swap 可用 %.2f GB，不足以安全承载 NapCat。"
+              % (avail, swap_free))
     if avail < 1.5:
-        print("  下一步：先跑 mem-report.sh 查清内存被谁占了（含历史 OOM 记录），")
-        print("          再决定加 swap（add-swap.sh）还是换掉推送通道。")
-        print("          具体决策路径见 DEPLOY.md 的 0.3 节。")
+        print()
+        print("  下一步（完整决策路径见 DEPLOY.md 的 0.3 节）：")
+        # 第 1 条按 swap 现状给，避免「已判定可以部署、却又让你去加 swap」的自相矛盾
+        if swap_free < 1.0:
+            print("    1) 加 swap 兜底（幂等、可撤销）：sudo bash add-swap.sh")
+        else:
+            print("    1) swap 已够（%.2f GB 可用），无需再加" % swap_free)
+        print("    2) 想查内存被谁占了、有没有 OOM 历史 → mem-report.sh（只读）")
+        print("    3) 容器上限 NAPCAT_MEM_LIMIT（在 .env 里）取「可用内存 × 0.8」左右")
+        print("       ⚠️ 明显高于可用内存就等于没设：容器一个人吃光，宿主机照样被拖进 OOM")
+        print("    4) 若有 OOM 历史、或占用大头就是同机那个网页 → 改走零内存推送通道")
 except Exception as e:
     print("  读取 /proc/meminfo 失败：%s" % e)
 PY
@@ -137,5 +164,7 @@ done
 
 echo
 echo "=============================================================="
-echo " 预检结束。若内存判定为「不足」或目标目录被占用，先处理再继续部署。"
+echo " 预检结束。"
+echo "   内存判定为「不足」→ 按上面「下一步」的四条走，或看 DEPLOY.md 的 0.3 节"
+echo "   目标目录被占用   → 先确认那是不是别的项目，别覆盖"
 echo "=============================================================="
