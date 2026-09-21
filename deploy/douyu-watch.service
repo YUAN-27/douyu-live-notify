@@ -1,0 +1,30 @@
+[Unit]
+Description=斗鱼开播提醒 · 单次检查（由 douyu-watch.timer 每分钟拉起）
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# state_YOUR_ROOM_ID.json 是相对 watch.py 所在目录落盘的（脚本里用 __file__ 定位），
+# 所以 WorkingDirectory 不影响状态读写；留着是为了排错时路径直观。
+WorkingDirectory=/opt/douyu-live-notify
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/watch.py --tick
+
+# 每次调用只跑几秒，给足余量；卡住也别无限等
+TimeoutStartSec=120
+
+# 让 systemd 自动创建 /var/log/douyu-watch（省掉手动建目录和权限问题）
+LogsDirectory=douyu-watch
+
+# 输出进独立日志。这一行里带 loop= 字段，
+# 是事后复验「轮播 vs 真人直播」的唯一依据，别删。
+StandardOutput=append:/var/log/douyu-watch/tick.log
+StandardError=append:/var/log/douyu-watch/tick.log
+
+# 最小权限
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true

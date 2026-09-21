@@ -1,0 +1,7 @@
+# 统一用 LF。本项目含 shell 脚本和 systemd 单元，
+# 一旦被转成 CRLF，在 Linux 上会报 `$'\r': command not found`。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.zip binary

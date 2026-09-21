@@ -1,0 +1,33 @@
+{
+  "_comment": "复制成 config.json 再改。room_id 要填真实房间号（不是靓号），填法见 watch.py 文件头。",
+
+  "room_id": "YOUR_ROOM_ID",
+  "room_url": "",
+
+  "interval_seconds": 45,
+  "jitter_seconds": 8,
+  "confirm_rounds": 2,
+
+  "notify_on_end": false,
+  "treat_loop_as_live": false,
+  "log_heartbeat": true,
+
+  "channels": ["onebot"],
+
+  "onebot": {
+    "base": "http://127.0.0.1:3000",
+    "token": "YOUR_ONEBOT_TOKEN",
+    "target_type": "group",
+    "target_id": "YOUR_GROUP_ID",
+    "at_all": false,
+    "at_users": []
+  },
+
+  "qq_official": {
+    "app_id": "",
+    "client_secret": "",
+    "target_type": "c2c",
+    "group_openid": "",
+    "user_openid": ""
+  }
+}

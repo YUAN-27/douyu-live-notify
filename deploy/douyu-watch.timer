@@ -1,0 +1,14 @@
+[Unit]
+Description=每分钟检查一次斗鱼直播间是否开播
+
+[Timer]
+# 开机 2 分钟后再开始，别和启动期的其他任务抢资源
+OnBootSec=2min
+# 上一次执行结束后再等 1 分钟，比 OnCalendar 更不容易堆叠
+OnUnitActiveSec=1min
+# 实际触发允许有 10 秒误差，systemd 可以据此合并唤醒、省电
+AccuracySec=10s
+Unit=douyu-watch.service
+
+[Install]
+WantedBy=timers.target

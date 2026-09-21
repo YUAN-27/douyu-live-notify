@@ -1,0 +1,44 @@
+# NapCatQQ —— 只为 douyu-live-notify 服务的 OneBot 实现
+#
+# ⚠️ 安全红线（务必照抄，不要改成 0.0.0.0）
+#   1. 端口只发布到 127.0.0.1 —— 公网访问不到。就算云安全组配错了也炸不出去。
+#   2. 绝不用默认/空 token。
+#   3. 用 QQ 小号，不要用主号。
+#   背景：2025-09 有人批量扫描「暴露在公网 + 默认 token」的 NapCat，
+#        拿它去大量 QQ 群发违法信息，导致被波及的账号和群聊被**永久封禁**。
+#
+# 用法：
+#   把本文件和同目录的 .env 一起放到 /opt/napcat/，然后：
+#     cd /opt/napcat && docker compose up -d
+#     docker compose logs --tail=50
+#   （.env 里已经生成好了 WEBUI_TOKEN，不用自己改）
+
+services:
+  napcat:
+    # 国内服务器拉不动 Docker Hub 时，换成镜像源，例如：
+    #   image: docker.1ms.run/mlikiowa/napcat-docker:latest
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+
+    environment:
+      # 用宿主机当前用户身份运行，避免挂载目录出现权限问题。
+      # 在 .env 里写 NAPCAT_UID=$(id -u) / NAPCAT_GID=$(id -g)
+      NAPCAT_UID: "${NAPCAT_UID:-0}"
+      NAPCAT_GID: "${NAPCAT_GID:-0}"
+      # WebUI 登录密码。
+      # 这里的 :? 是故意的：如果 .env 没放到位，compose 会直接报错退出，
+      # 而不是悄悄用默认值跑起来（默认值 + 公网 = 2025 年那次封号事件的成因）。
+      WEBUI_TOKEN: "${WEBUI_TOKEN:?missing WEBUI_TOKEN - did you copy the .env file ?}"
+
+    ports:
+      # 冒号左边写 127.0.0.1，就是「只绑回环地址」：
+      # 宿主机上的 watch.py 连得上，公网连不上。
+      - "127.0.0.1:3000:3000"   # OneBot v11 正向 HTTP —— watch.py 用它发消息
+      - "127.0.0.1:6099:6099"   # WebUI —— 扫码登录、看日志、改配置
+    # 3001 是 WebSocket，本方案不用，刻意不发布
+
+    volumes:
+      - ./napcat/config:/app/napcat/config   # NapCat 自身配置（含 onebot11_<QQ号>.json）
+      - ./ntqq:/app/.config/QQ               # QQ 登录态，容器重启免重新扫码
+      - ./napcat/logs:/app/napcat/logs       # 运行日志

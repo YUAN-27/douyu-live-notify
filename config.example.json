@@ -1,0 +1,34 @@
+{
+  "_comment": "复制本文件为 config.json 再改。room_id 要填真实房间号（不是靓号），填法见 watch.py 文件头。",
+
+  "room_id": "",
+  "room_url": "",
+
+  "interval_seconds": 45,
+  "jitter_seconds": 8,
+  "confirm_rounds": 2,
+
+  "notify_on_end": false,
+  "treat_loop_as_live": false,
+  "log_heartbeat": true,
+
+  "_channels_comment": "可选：console（只打日志）/ onebot（NapCat 等）/ qq_official（官方机器人）。可以多选。",
+  "channels": ["console"],
+
+  "onebot": {
+    "base": "http://127.0.0.1:3000",
+    "token": "填你在 OneBot 端设置的 token，没有就留空",
+    "target_type": "group",
+    "target_id": "群号（target_type 为 private 时填对方 QQ 号），纯数字",
+    "at_all": false,
+    "at_users": []
+  },
+
+  "qq_official": {
+    "app_id": "",
+    "client_secret": "",
+    "target_type": "c2c",
+    "group_openid": "群聊时填群的 openid，不是群号",
+    "user_openid": "单聊时填对方的 user_openid，不是 QQ 号"
+  }
+}
