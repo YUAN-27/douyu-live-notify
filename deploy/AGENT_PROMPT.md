@@ -369,11 +369,13 @@ curl -s -H "Authorization: Bearer $T" http://127.0.0.1:3000/get_group_list
 sudo bash install-watch.sh
 ```
 
-它会：把 `watch.py` / `selftest.py` 放进 `/opt/douyu-live-notify/`、装好 systemd 单元，
-但**故意不启动定时器** —— 等验证通过再开。
+它会：把 `watch.py` / `selftest.py` / `watchdog.py` 放进 `/opt/douyu-live-notify/`、
+装好 systemd 单元（含看门狗）与 `/etc/tmpfiles.d` 规则，
+并放一份 `/etc/default/douyu-watchdog` 配置模板，
+但**故意不启动任何定时器** —— 等验证通过再开。
 
-它不会覆盖已经填好的 `config.json`，重复执行是安全的。
-装完它会打印这两个文件的 sha256 前 16 位 —— 和打包方给的指纹对一下，
+它不会覆盖已经填好的 `config.json` 和 `/etc/default/douyu-watchdog`，重复执行是安全的。
+装完它会打印这三个文件的 sha256 前 16 位 —— 和打包方给的指纹对一下，
 对不上说明手上的包不是最新的，先停下换包，别急着往下走。
 
 > 如果它报「找不到 watch.py / selftest.py」：说明 `install-watch.sh` 和这两个文件
@@ -469,6 +471,115 @@ tail -5 /var/log/douyu-watch/tick.log
 
 ---
 
+## 阶段 9 · 装看门狗（保证「出事你能知道」）
+
+不装看门狗的话，整套东西有两个**静默失败**：NapCat 掉线后 `watch.py` 照跑照判定、
+只是消息发不出去（日志里一行 `[error]`，程序看起来完全正常）；
+定时器被禁或进程被 OOM 杀掉则表现为「什么都没发生」而不是「报错」。
+半夜开播你会第二天才知道。设计细节见 `WATCHDOG.md`。
+
+```bash
+cd /opt/douyu-live-notify
+
+# ① 离线自检（不联网、不碰 docker）
+python3 watchdog.py --selftest
+```
+
+**期望**：`结果：34 项通过，0 项失败（共 34 项）`。
+
+```bash
+# ② 只读体检一遍，确认它看得懂当前环境（不告警、不重启任何东西）
+python3 watchdog.py --status
+```
+
+**期望**：心跳应为 `ok`（日志新鲜且序号在前进），NapCat 应为 `online`。
+若显示 `no_log` → 阶段 8 的定时器还没开，先回去开。
+
+```bash
+# ③ 认一下容器名对不对（默认 napcat，和 docker-compose.yml 的 container_name 一致）
+docker ps --format '{{.Names}}' | grep -x napcat
+```
+
+### ④ 之后停下：告警通道必须由用户决定，不要自己发挥
+
+看门狗要发告警，就必须知道发到哪。**这一步不要替用户做决定、也不要凭空编一个地址。**
+
+关键：NapCat 掉线时它自己发不出消息，所以**必须至少配一条不经过 NapCat 的通道**，
+否则「掉线告警」等于没说。可用通道见 `watchdog.env.example` 里的说明。
+
+**把下面这段发给用户，然后停止执行、等用户答复：**
+
+> 看门狗已经装好并通过自检。现在需要你决定告警发到哪里（这一步之后它才会真的叫你）：
+>
+> - **A. 手机推送（推荐，最省事）**：装 Bark（iOS）或 Server酱（微信），
+>   把 App 给你的地址发我，我填进配置。
+> - **B. 群机器人**：飞书 / 钉钉 / 企业微信群里加一个自定义机器人，
+>   把 webhook 地址发我（顺带确认机器人关键词设了「斗鱼」）。
+> - **C. 邮件**：给我一个邮箱地址（服务器上需要已装好 msmtp 或 sendmail）。
+> - **D. 先只用 NapCat 私聊**：把**你的主 QQ 号**给我（不是机器人小号）。
+>   ⚠️ 这条通道依赖 NapCat 在线 —— **NapCat 掉线时它一定发不出来**，
+>   所以它覆盖不了最需要叫醒你的那种故障。
+>
+> 另外请确认一件事：`AUTO_RESTART` 默认是开着的，也就是**掉线时看门狗会自动
+> `docker restart napcat`**。它敢开的前提是「重启免扫码自动登录」已经验收通过 ——
+> 要我现在顺便做一次这个验收吗？（步骤见下）
+
+### ⑤ 用户答复后：填配置 + 验证通道
+
+```bash
+nano /etc/default/douyu-watchdog       # 按用户给的地址填 ALERT_WEBHOOK / KIND 等
+chmod 600 /etc/default/douyu-watchdog
+python3 watchdog.py --test-alert       # 期望：用户真的收到一条测试告警
+```
+
+**必须由用户确认收到，这一关才算过。**
+
+### ⑥ 重启免扫码验收（必做，一次就够）
+
+这是「长期无人值守」这个假设的**唯一验证点**，别等主播开播那晚才发现不成立：
+
+```bash
+docker restart napcat && sleep 45
+docker logs napcat 2>&1 | tail -40        # 关键：不该再出现二维码
+curl -s -H "Authorization: Bearer <OneBot token>" http://127.0.0.1:3000/get_login_info
+```
+
+**判过** = 返回 `"status":"ok"` + 机器人 QQ 号，且日志无新二维码。
+**若又出二维码** → `ACCOUNT` 没生效或登录态没落到 `/opt/napcat/ntqq`，停下报回来：
+
+```bash
+docker inspect napcat --format '{{range .Config.Env}}{{println .}}{{end}}' | grep ACCOUNT
+```
+
+### ⑦ 验证看门狗真的会叫（不做这一步等于没装）
+
+```bash
+systemctl stop douyu-watch.timer       # 故意制造「监控停摆」
+# 等 8 分钟以上（陈旧阈值 7 分钟）
+tail -30 /var/log/douyu-watch/watchdog.log
+python3 watchdog.py --status
+systemctl list-timers douyu-watch.timer   # 应该已被自动拉起
+```
+
+**期望**：出现一条「监控已停摆」告警 → 看门狗自动把定时器拉起来 → 下一轮发「已恢复」通知。
+这一步不影响 QQ，可以放心做。做完确认定时器确实回来了。
+
+> 如果用户同意，还可以做「掉线检测」验证：`docker stop napcat`，
+> 等 6~8 分钟，应看到告警 + 自动 `docker restart napcat`。
+> ⚠️ 这会让机器人短暂断线，**别在主播正在播、用户正等通知的时候做**。
+
+### ⑧ 启用
+
+```bash
+systemctl enable --now douyu-watchdog.timer
+systemctl list-timers douyu-watchdog.timer
+tail -20 /var/log/douyu-watch/watchdog.log
+```
+
+`AUTO_RESTART=0` 可关掉全部自愈只留告警。**没通过 ⑥ 就必须先设 0。**
+
+---
+
 ## 出错时的原则
 
 - **不要反复重试同一条失败的命令**
@@ -479,7 +590,7 @@ tail -5 /var/log/douyu-watch/tick.log
 
 ---
 
-## 最后回报这六项
+## 最后回报这几项
 
 1. 阶段 1 的预检输出（全文，尤其**内存**和**容器 `restart=` 策略**）
 2. 内存不足时：`mem-report.sh` 的**完整输出**（重点第 2、6 节）
@@ -487,4 +598,6 @@ tail -5 /var/log/douyu-watch/tick.log
    以及 `docker inspect napcat --format 'Memory={{.HostConfig.Memory}}'` 的返回值
 4. 阶段 7 第 ④ 关：**群里是否真的收到了测试消息**（需用户确认）
 5. 阶段 8 的 `systemctl list-timers douyu-watch.timer` 输出，加上 `docker stats napcat --no-stream`
-6. 任何**跳过、失败或你不确定**的地方 —— 直接说，不要掩盖
+6. 阶段 9：`watchdog.py --selftest` 的**最后一行**、`watchdog.py --status` 的**完整输出**、
+   **告警发到了哪个通道、用户是否真的收到**、以及「停摆验证」的结果
+7. 任何**跳过、失败或你不确定**的地方 —— 直接说，不要掩盖

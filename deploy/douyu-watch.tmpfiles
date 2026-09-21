@@ -18,3 +18,7 @@
 #
 # 语法：类型 路径 权限 属主 属组 年龄
 d /var/log/douyu-watch 0755 root root -
+
+# 看门狗的状态目录。存 state.json / status.json / alerts.log，
+# 里面有 NapCat 的重启次数和告警历史，权限收成 0700（只有 root 能看）。
+d /var/lib/douyu-watchdog 0700 root root -

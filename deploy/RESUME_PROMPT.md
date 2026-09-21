@@ -75,7 +75,9 @@ bash preflight-check.sh
 
 ## 第 3 步 · 继续往下做
 
-严格按 `AGENT_PROMPT.md` 的**阶段 2 → 阶段 8** 依次执行，不要跳步。
+严格按 `AGENT_PROMPT.md` 的**阶段 2 → 阶段 9** 依次执行，不要跳步。
+（阶段 9 是装看门狗 —— 别省。没有它，NapCat 掉线和监控停摆都是静默的，
+你只会「什么都没发生」，而不会收到报错。）
 
 其中**四道验证关卡一道都不能跳**：
 
@@ -95,6 +97,19 @@ bash preflight-check.sh
 > ④ 之前先确认小号**已加入目标群**：`curl .../get_group_list` 里能看到群号。
 > 看不到就是没加，这是群聊发送失败最常见的原因。
 
+阶段 9 的三道关：
+
+| # | 命令 | 期望 |
+|---|---|---|
+| ⑤ | `python3 watchdog.py --selftest` | `结果：34 项通过，0 项失败（共 34 项）` |
+| ⑥ | `python3 watchdog.py --status` | 心跳 `ok`、NapCat `online` |
+| ⑦ | `python3 watchdog.py --test-alert` | **用户真的收到一条测试告警**（必须由人确认） |
+
+> 阶段 9 里有一处**必须停下让用户决定**：告警发到哪个通道。
+> 相关背景要说清楚 —— NapCat 掉线时它自己发不出消息，所以
+> **必须至少配一条不经过 NapCat 的通道**（`ALERT_WEBHOOK`），否则掉线告警等于没说。
+> 别自己替用户编一个地址。
+
 ---
 
 ## 出错时的原则（不变）
@@ -113,5 +128,7 @@ bash preflight-check.sh
 2. 是否执行了 `add-swap.sh`；`swapon --show` 与 `free -h` 的输出
 3. `ss -lntp | grep -E ':(3000|6099)'` → 确认只绑 `127.0.0.1`
 4. `docker inspect napcat --format '{{.HostConfig.Memory}}'` → 期望 `734003200`（即 700m）
+5. 阶段 9：`watchdog.py --selftest` 最后一行、`watchdog.py --status` 完整输出、
+   **告警发到了哪个通道、用户是否真收到**、以及「停摆验证」（故意停掉定时器等 8 分钟）的结果
 5. **群里是否真的收到了测试消息**（由人确认）
 6. 任何**跳过、失败或你不确定**的地方 —— 直接说，不要掩盖

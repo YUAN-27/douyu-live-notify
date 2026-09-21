@@ -477,10 +477,11 @@ sudo bash install-watch.sh
 
 脚本会：
 - 检查 python3
-- 放 `watch.py` / `selftest.py` 到 `/opt/douyu-live-notify/`（已有同名文件先备份）
-- 打印这两个文件的 sha256 前 16 位（用来确认不是旧版）
+- 放 `watch.py` / `selftest.py` / `watchdog.py` 到 `/opt/douyu-live-notify/`（已有同名文件先备份）
+- 打印这三个文件的 sha256 前 16 位（用来确认不是旧版）
 - 放 `config.json`（**若已存在绝不覆盖**）
-- 装好 systemd 单元，但**不启动定时器**（等你验证通过再开）
+- 装好 systemd 单元（含看门狗），但**不启动任何定时器**（等你验证通过再开）
+- 放一份 `/etc/default/douyu-watchdog`（看门狗告警配置模板，权限 600，**已存在不覆盖**）
 - 最后打印后续步骤清单
 
 **`config.json` 里 `treat_loop_as_live` 保持 `false`**（轮播不算开播，理由见第 1 节）。
@@ -534,7 +535,92 @@ systemctl list-timers douyu-watch.timer
 
 ---
 
-## 9. 第七步：观察运行状态
+## 9. 第八步：装看门狗（强烈建议，别跳）
+
+到这一步你已经有一个「每分钟检查一次」的东西了。但它有两个**静默失败**：
+
+- **掉线无感知**：NapCat 被踢下线后，`watch.py` 每分钟照跑照判定，只是消息发不出去，
+  日志里留一行 `[error]`。程序看起来完全正常，整条链路已经断了。
+- **停摆无感知**：定时器被禁、文件被改坏、进程被 OOM 杀掉 —— 结果都是「什么都没发生」，
+  而不是「报错」。半夜开播，你第二天才知道没提醒。
+
+看门狗每 2 分钟独立体检一次，把这两类静默失败变成一条能看见的告警，能自愈的自己动手。
+完整设计见 **`WATCHDOG.md`**。最短路径：
+
+```bash
+cd /opt/douyu-live-notify
+
+# a) 先离线自检（不联网、不碰 docker）
+python3 watchdog.py --selftest          # 期望：34 项通过，0 项失败（共 34 项）
+
+# b) 配告警通道 —— 唯一需要你花几分钟决定的事
+nano /etc/default/douyu-watchdog
+```
+
+**必须至少配一条「不经过 NapCat」的通道**，否则「掉线告警」等于没说
+（NapCat 掉线时它自己发不出消息）。推荐二选一：
+
+| 选哪个 | 怎么填 |
+|---|---|
+| Bark（iOS）/ Server酱（微信） | `ALERT_WEBHOOK=<App里给你的地址>` + `ALERT_WEBHOOK_KIND=bark`（或 `serverchan`） |
+| 飞书 / 钉钉 / 企业微信群机器人 | `ALERT_WEBHOOK=<机器人地址>` + `ALERT_WEBHOOK_KIND=feishu`（或 `dingtalk` / `wecom`） |
+
+```bash
+# c) 验证通道真的通（手机/群里应该收到一条）
+python3 watchdog.py --test-alert
+
+# d) 只读看一眼当前是否健康（不告警、不重启任何东西）
+python3 watchdog.py --status
+
+# e) 确认无误后启用
+systemctl enable --now douyu-watchdog.timer
+tail -f /var/log/douyu-watch/watchdog.log
+```
+
+> ⚠️ **`AUTO_RESTART` 默认是 1**（掉线会自动 `docker restart napcat`）。
+> 敢开它的前提是下面「重启免扫码验收」已经通过。**没验过就先设 `AUTO_RESTART=0`。**
+> 反复重启有硬闸门：连续 3 轮不通才动手、两次之间隔 15 分钟、一天最多 6 次，到顶转人工。
+
+### 重启免扫码验收（必做，一次就够）
+
+这是「长期无人值守」这个假设的**唯一验证点**，别等主播开播那晚才发现不成立：
+
+```bash
+docker restart napcat && sleep 45
+docker logs napcat 2>&1 | tail -40        # 关键：不该再出现二维码
+curl -s -H "Authorization: Bearer YOUR_ONEBOT_TOKEN" http://127.0.0.1:3000/get_login_info
+```
+
+**判过** = 返回 `"status":"ok"` + 你的 QQ 号，且日志里没有新二维码。
+**若又出二维码** → `ACCOUNT` 没生效或登录态没落到 `/opt/napcat/ntqq`，停下排查：
+
+```bash
+docker inspect napcat --format '{{range .Config.Env}}{{println .}}{{end}}' | grep ACCOUNT
+```
+
+### 看门狗装完必须验证它真的会叫
+
+**不验证的看门狗等于没加** —— 它可能在最需要的时候哑掉。最少做验证 A（不影响 QQ）：
+
+```bash
+systemctl stop douyu-watch.timer      # 故意让它停摆
+# 等 8 分钟以上（阈值 7 分钟）
+tail -20 /var/log/douyu-watch/watchdog.log
+python3 watchdog.py --status
+```
+
+**应该看到**：一条「监控已停摆」告警 → 自动把定时器拉起来 → 下一轮发「已恢复」。
+验证 B（`docker stop napcat`，会短暂断线）和验证 C 见 `WATCHDOG.md` 第五节。
+
+### 一条命令看健康
+
+```bash
+cd /opt/douyu-live-notify && python3 watchdog.py --status
+```
+
+---
+
+## 10. 第九步：观察运行状态
 
 ```bash
 systemctl status douyu-watch.timer
@@ -559,7 +645,7 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 
 ---
 
-## 10. 日常运维
+## 11. 日常运维
 
 | 想做什么 | 命令 |
 |---|---|
@@ -569,7 +655,13 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | 重置状态 | `rm -f /opt/douyu-live-notify/state_YOUR_ROOM_ID.json` |
 | 看 NapCat 日志 | `docker logs napcat -f --tail=50` |
 | QQ 掉线 | 先 `docker restart napcat`（多数情况自动快速登录回来）；日志里又出现二维码才需要重扫 |
-| 服务报 `209/STDOUT` + `Failed at step STDOUT` | `/var/log/douyu-watch` 不存在，systemd 打开输出文件失败（报错完全不提日志目录，极易误判成 python 问题） | `systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf`（install-watch.sh 已装该规则；开机自动重建） |
+| **一条命令看健康** | `cd /opt/douyu-live-notify && python3 watchdog.py --status` |
+| **看看门狗日志** | `tail -f /var/log/douyu-watch/watchdog.log` |
+| **看告警历史（永不丢的那份）** | `tail -50 /var/lib/douyu-watchdog/alerts.log` |
+| **改告警通道 / 阈值** | 编辑 `/etc/default/douyu-watchdog` → `systemctl restart douyu-watchdog.timer` |
+| **验证告警通道通不通** | `python3 watchdog.py --test-alert` |
+| **补一条丢失的开播通知** | `python3 watchdog.py --recover-notify`（主播仍在播时用，会先备份状态文件） |
+| 服务报 `209/STDOUT` + `Failed at step STDOUT` | `/var/log/douyu-watch` 不存在，systemd 打开输出文件失败 —— 报错完全不提日志目录，极易误判成 python 问题。修：`systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf`（install-watch.sh 已装该规则，开机自动重建） |
 | 更新 watch.py | 覆盖后跑 `python3 selftest.py` 确认没坏 |
 | 清空日志 | `truncate -s 0 /var/log/douyu-watch/tick.log` |
 | **查内存被谁占了** | `bash mem-report.sh`（只读，包含历史 OOM 记录） |
@@ -582,7 +674,7 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 
 ---
 
-## 11. 排错速查表
+## 12. 排错速查表
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
@@ -608,15 +700,18 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 - **延迟 = 定时器间隔 × confirm_rounds**。每分钟一次 + 确认 2 次 → 最慢约 2 分钟发现开播。
 - **轮播判定还有个小缺口**：还没在**真人开播时**亲眼确认 `videoLoop` 变回 `0`。证据很硬（三组对照），但严格说仍是推断。**心跳日志记着 `loop=` 值，下次真人开播看一眼即可定案。**
 - **消息送达不保证**。QQ 风控可能静默丢消息（日志显示成功但收不到），**别把这个提醒当唯一信息来源**。
-- **没有掉线检测，通知失败也不补发**。机器人掉线时你不会收到任何提示；而且发送失败只打印
-  一行 `[error]`，状态却已经落盘，**那条开播通知就永久丢了**。掉线本身分三种，只有「容器崩了」
-  能自动恢复：
+- **掉线检测靠看门狗，补发仍要手动一次**。掉线本身分三种，「能不能自动恢复」是根因决定的，
+  看门狗只能把「掉过线」这件事告诉你、并在能自愈时自愈：
 
   | 情形 | 能自动恢复吗 |
   |---|---|
   | 容器 / 进程崩了 | 能。`restart: always` + 登录态 + `ACCOUNT` 快速登录 |
-  | 幽灵假死（腾讯侧断链，本地不报错也不出二维码） | 不能，要人工处理 |
-  | 登录态失效（换设备 / 改密 / 手机端把服务器顶下线） | 不能，必须重新扫码 |
+  | 幽灵假死（腾讯侧断链，本地不报错也不出二维码） | **看门狗能发现并自动重启**（容器在跑但接口无响应） |
+  | 登录态失效（换设备 / 改密 / 手机端把服务器顶下线） | 不能，必须重新扫码。看门狗会识别出「容器日志里出现二维码」，**不会白重启**，直接告警要人处理 |
+
+  没装看门狗时，掉线你收不到任何提示。装了之后，另一种静默失败也一并解决：
+  **通知发送失败**只打印一行 `[error]`、状态却已落盘 —— 看门狗会立刻告警，
+  但那条消息**仍然需要你手动补**（`python3 watchdog.py --recover-notify`，主播仍在播时有效）。
 
   自查是否在线：`curl -s -H "Authorization: Bearer YOUR_ONEBOT_TOKEN" http://127.0.0.1:3000/get_login_info`
   （返回你的 QQ 号才算真在线）。**别在手机 QQ 上登录这个小号**，那会把服务器端顶下线。

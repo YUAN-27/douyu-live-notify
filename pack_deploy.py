@@ -38,16 +38,24 @@ REQUIRED = [
     "douyu-watch.service",
     "douyu-watch.timer",
     "douyu-watch.tmpfiles",
+    "watchdog.py",
+    "douyu-watchdog.service",
+    "douyu-watchdog.timer",
+    "watchdog.env.example",
     "preflight-check.sh",
     "setup-docker-mirror.sh",
     "add-swap.sh",
     "mem-report.sh",
     "DEPLOY.md",
     "AGENT_PROMPT.md",
+    "WATCHDOG.md",
 ]
 
 # 从仓库根塞进包的源文件（不在 deploy/ 里）
 FROM_ROOT = ["watch.py", "selftest.py"]
+
+# 这些文件在 deploy/ 里，装到服务器上时要打印指纹
+FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py"]
 
 # 文本文件统一转 LF 的扩展名
 TEXT_EXT = {".sh", ".py", ".md", ".json", ".yml", ".yaml", ".service", ".timer",
@@ -140,8 +148,12 @@ def main():
     print("    sudo bash install-watch.sh")
     print("")
     print("指纹（sha256 前 16 位）—— 服务器装完会打印同样的值，可用来确认不是旧版：")
-    for name in FROM_ROOT:
-        print("    %-16s  %s" % (sha16(entries[name]), name))
+    for rel in FINGERPRINT:
+        key = os.path.basename(rel) if rel.startswith("deploy/") else rel
+        if key in entries:
+            print("    %-16s  %s" % (sha16(entries[key]), rel))
+        else:
+            print("    %-16s  %s（!! 包里没有，指纹打不出来）" % ("-", rel), file=sys.stderr)
     return 0
 
 

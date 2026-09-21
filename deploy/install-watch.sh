@@ -80,10 +80,21 @@ for f in watch.py selftest.py; do
   echo "已放入 $APP_DIR/$f"
 done
 
+# 看门狗在 deploy/ 里，和本脚本同层（不在仓库根的源文件目录），所以从 $UNIT_DIR 取
+if [[ -f "$UNIT_DIR/watchdog.py" ]]; then
+  if [[ -f "$APP_DIR/watchdog.py" ]]; then
+    cp -a "$APP_DIR/watchdog.py" "$APP_DIR/watchdog.py.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+  cp -a "$UNIT_DIR/watchdog.py" "$APP_DIR/watchdog.py"
+  echo "已放入 $APP_DIR/watchdog.py"
+else
+  echo "⚠️ 没找到 watchdog.py（症状：日志里会少一路掉线告警）"
+fi
+
 # 打印指纹：以后怀疑「服务器上是不是旧版」，和仓库里的对一下 sha256 前 16 位即可
 if command -v sha256sum >/dev/null 2>&1; then
   echo "指纹（sha256 前 16 位）："
-  ( cd "$APP_DIR" && sha256sum watch.py selftest.py ) \
+  ( cd "$APP_DIR" && sha256sum watch.py selftest.py watchdog.py 2>/dev/null ) \
     | awk '{ f = $2; sub(/^\*/, "", f); printf "  %s  %s\n", substr($1, 1, 16), f }'
 fi
 
@@ -105,19 +116,46 @@ fi
 # ---- 装 systemd 单元 ----
 install -m 644 "$UNIT_DIR/douyu-watch.service" /etc/systemd/system/douyu-watch.service
 install -m 644 "$UNIT_DIR/douyu-watch.timer"   /etc/systemd/system/douyu-watch.timer
-systemctl daemon-reload
 echo "已安装 douyu-watch.service / douyu-watch.timer"
 
-# ---- 日志目录兜底 ----
+# 看门狗单元。装上但**不 enable** —— 和主定时器一样，等你验证过再开。
+if [[ -f "$UNIT_DIR/douyu-watchdog.service" && -f "$UNIT_DIR/douyu-watchdog.timer" ]]; then
+  install -m 644 "$UNIT_DIR/douyu-watchdog.service" /etc/systemd/system/douyu-watchdog.service
+  install -m 644 "$UNIT_DIR/douyu-watchdog.timer"   /etc/systemd/system/douyu-watchdog.timer
+  echo "已安装 douyu-watchdog.service / douyu-watchdog.timer（尚未启用）"
+fi
+
+# 看门狗的告警通道配置。**已存在绝不覆盖** —— 里面是你要填的 webhook 密钥。
+if [[ ! -f /etc/default/douyu-watchdog && -f "$UNIT_DIR/watchdog.env.example" ]]; then
+  install -m 600 "$UNIT_DIR/watchdog.env.example" /etc/default/douyu-watchdog
+  echo "已放入 /etc/default/douyu-watchdog（告警通道配置，现在还是空的，见下面【7】）"
+elif [[ -f /etc/default/douyu-watchdog ]]; then
+  # 里面是 webhook 密钥，权限必须是 600（显式再设一次，不依赖 install 的 -m）
+  chmod 600 /etc/default/douyu-watchdog
+  echo "/etc/default/douyu-watchdog 已存在，保持不动"
+fi
+
+# 把权限打出来核实 —— 这个文件里有 webhook 密钥，权限错了要当场看见，
+# 而不是等到某天发现别的用户能读它
+if command -v stat >/dev/null 2>&1 && [[ -f /etc/default/douyu-watchdog ]]; then
+  echo "  /etc/default/douyu-watchdog 权限：$(stat -c '%a %U:%G' /etc/default/douyu-watchdog)（应为 600 root:root）"
+fi
+
+systemctl daemon-reload
+
+# ---- 目录兜底 ----
 # unit 里是 StandardOutput=append:/var/log/douyu-watch/tick.log。目录不存在时，
 # 服务会在「打开输出文件」这一步就失败（209/STDOUT），而不是自动建目录。
 # 这个失败早于 ExecStartPre，所以只能用 tmpfiles.d 在开机阶段建，不能靠 ExecStartPre。
+# 规则里同时包含看门狗的 /var/lib/douyu-watchdog。
 if [[ -f "$UNIT_DIR/douyu-watch.tmpfiles" ]]; then
   install -m 644 "$UNIT_DIR/douyu-watch.tmpfiles" /etc/tmpfiles.d/douyu-watch.conf
   systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf 2>/dev/null || true
-  echo "已安装 /etc/tmpfiles.d/douyu-watch.conf（保证 /var/log/douyu-watch 开机就存在）"
+  echo "已安装 /etc/tmpfiles.d/douyu-watch.conf（保证 /var/log/douyu-watch 与 /var/lib/douyu-watchdog 开机就存在）"
 fi
 mkdir -p /var/log/douyu-watch
+mkdir -p /var/lib/douyu-watchdog
+chmod 700 /var/lib/douyu-watchdog
 
 cat <<'EOF'
 
@@ -151,10 +189,42 @@ cat <<'EOF'
     journalctl -u douyu-watch -f          # 看执行日志
     tail -f /var/log/douyu-watch/tick.log # 看心跳（含 loop= 字段）
 
+【7】看门狗（可选，但强烈建议：没有它，掉线和停摆都是静默的）
+    a) 先离线自检，确认脚本本身没问题
+       cd /opt/douyu-live-notify && python3 watchdog.py --selftest
+
+    b) 配告警通道 —— 这是唯一需要你花几分钟决定的事。
+       关键：NapCat 掉线时它自己发不出消息，所以必须有一条**不经过 NapCat** 的通道。
+       nano /etc/default/douyu-watchdog
+         至少填一项：ALERT_WEBHOOK（推荐）或 ALERT_ONEBOT_PRIVATE（你的主 QQ 号）
+       然后验证通道真的通：
+         python3 watchdog.py --test-alert
+
+    c) 先只读看一眼当前是否健康（不告警、不重启任何东西）
+       python3 watchdog.py --status
+
+    d) 确认无误后启用
+       systemctl enable --now douyu-watchdog.timer
+       systemctl list-timers douyu-watchdog.timer
+       tail -f /var/log/douyu-watch/watchdog.log
+
+    ⚠️ AUTO_RESTART 默认是 1（掉线会自动 docker restart napcat）。
+       敢开它的前提是「重启免扫码自动登录」已经验收通过（见 DEPLOY.md）。
+       没验过就先在 /etc/default/douyu-watchdog 里设 AUTO_RESTART=0。
+
 【回滚】
-    systemctl disable --now douyu-watch.timer
-    rm -f /etc/systemd/system/douyu-watch.{service,timer}
+    # 只回滚看门狗：
+    systemctl disable --now douyu-watchdog.timer
+    rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     systemctl daemon-reload
+    # 全部回滚：
+    systemctl disable --now douyu-watch.timer douyu-watchdog.timer
+    rm -f /etc/systemd/system/douyu-watch.{service,timer}
+    rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
+    systemctl daemon-reload
+    # 注意：不回滚 /var/log/douyu-watch（日志留着排错）和
+    #       /var/lib/douyu-watchdog（告警历史留着）、/etc/default/douyu-watchdog（你的密钥）
+    #       确认不再用的时候自己删。
 
 ===============================================================
 EOF

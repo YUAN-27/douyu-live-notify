@@ -1,0 +1,32 @@
+[Unit]
+Description=斗鱼开播提醒 · 看门狗（体检 watch.py 与 NapCat，必要时自愈）
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# watchdog.py 自己会用 config.json 的绝对路径，WorkingDirectory 只影响排错时看路径
+WorkingDirectory=/opt/douyu-live-notify
+
+# 告警通道配置（webhook URL、你的主 QQ 号等）从这里读。
+# 前面的 - 表示「文件不存在也不报错」—— 没配也能跑，只是告警只落本地日志。
+EnvironmentFile=-/etc/default/douyu-watchdog
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/watchdog.py
+
+# 正常情况下几秒就跑完。万一卡住（比如 docker 命令挂住），别无限等
+TimeoutStartSec=300
+
+# 日志目录的兜底在 /etc/tmpfiles.d/douyu-watch.conf，不在 LogsDirectory。
+# 理由见 douyu-watch.service 里的详细说明（目录不存在时会在重定向阶段就失败）。
+StandardOutput=append:/var/log/douyu-watch/watchdog.log
+StandardError=append:/var/log/douyu-watch/watchdog.log
+
+# ⚠️ 加固到 ProtectSystem=strict 就过头了：看门狗要靠
+#    docker（/var/run/docker.sock）和 systemctl（dbus）去修东西，
+#    过度沙箱会让「负责修故障的组件」自己先失败。
+#    所以只做这些不影响功能的限制，并且特地不加 NoNewPrivileges。
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true

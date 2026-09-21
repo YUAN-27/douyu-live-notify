@@ -1,0 +1,15 @@
+[Unit]
+Description=每 2 分钟体检一次：watch.py 是否在跑、NapCat 是否在线
+
+[Timer]
+# 开机后晚一点再开始：watch.py 那边 OnBootSec=2min，给它先跑两轮，
+# 否则看门狗上电第一眼就报「监控没在跑」，白白告警一次
+OnBootSec=5min
+# 上一次执行结束后再等 2 分钟
+OnUnitActiveSec=2min
+# 允许 30 秒误差，systemd 可以据此合并唤醒
+AccuracySec=30s
+Unit=douyu-watchdog.service
+
+[Install]
+WantedBy=timers.target
