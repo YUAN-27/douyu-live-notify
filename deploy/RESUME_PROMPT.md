@@ -86,6 +86,12 @@ bash preflight-check.sh
 | ③ | `python3 watch.py --once` | **`判定：未开播`** ← 房间在轮播，这是**正确**结果，不是故障 |
 | ④ | `python3 watch.py --test-notify` | **QQ 群里真的出现一条测试消息**（必须由人亲眼确认） |
 
+> ① 显示 **18 项** 而不是 24 项，说明 `/opt/douyu-live-notify/` 里是**旧版**文件
+> （少了「配置校验」那 6 项）。这不是故障，但必须先换文件：解压最新的 `deploy.zip`，
+> 在 `deploy/` 里重跑 `sudo bash install-watch.sh`（**不会覆盖已填好的 `config.json`**），
+> 再重跑 ①。换完 `install-watch.sh` 会打印 `watch.py` / `selftest.py` 的 sha256 前 16 位，
+> 和打包方给的指纹对一下即可确认。
+
 > ④ 之前先确认小号**已加入目标群**：`curl .../get_group_list` 里能看到群号。
 > 看不到就是没加，这是群聊发送失败最常见的原因。
 

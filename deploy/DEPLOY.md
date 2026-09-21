@@ -449,15 +449,17 @@ curl -s -H "Authorization: Bearer $T" http://127.0.0.1:3000/get_group_list
 
 ## 7. 第五步：部署 watch.py
 
-把部署包里的 `watch.py` / `selftest.py` / `config.json` / `douyu-watch.service` / `douyu-watch.timer` / `install-watch.sh` 传到服务器同一目录，然后：
+把 `deploy.zip` 解开，`deploy/` 里已经同时有 `watch.py` / `selftest.py` / `config.json` / `douyu-watch.service` / `douyu-watch.timer` / `install-watch.sh`，**它们必须在同一层**（脚本是从自己所在目录往上找源文件的）。直接：
 
 ```bash
+unzip -o deploy.zip && cd deploy
 sudo bash install-watch.sh
 ```
 
 脚本会：
 - 检查 python3
 - 放 `watch.py` / `selftest.py` 到 `/opt/douyu-live-notify/`（已有同名文件先备份）
+- 打印这两个文件的 sha256 前 16 位（用来确认不是旧版）
 - 放 `config.json`（**若已存在绝不覆盖**）
 - 装好 systemd 单元，但**不启动定时器**（等你验证通过再开）
 - 最后打印后续步骤清单
@@ -478,6 +480,11 @@ cd /opt/douyu-live-notify
 python3 selftest.py && tail -3 selftest_result.txt
 ```
 **期望**：`结果：24 项通过，0 项失败（共 24 项）`。
+
+> 显示 **18 项** 就说明 `/opt/douyu-live-notify/` 里躺着的是旧版
+> （少了「配置校验」那 6 项）。重新解压最新的 `deploy.zip`，
+> 在 `deploy/` 里跑一次 `sudo bash install-watch.sh` 换掉文件 ——
+> 它不会覆盖你填好的 `config.json` —— 然后再重跑 ①。
 
 ```bash
 # ② 斗鱼接口体检：两个接口各打一次，打印原始数据

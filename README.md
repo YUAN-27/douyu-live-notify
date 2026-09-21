@@ -103,6 +103,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python watch.py --probe <号>` | 体检指定房间，打印两个接口的原始返回 |
 | `python watch.py --test-notify` | 往配置的通道发一条测试消息 |
 | `python selftest.py` | 不联网的逻辑自检（24 项），改完代码先跑它 |
+| `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py`，并归一为 LF） |
 | `python qr_make.py --url "<日志里的二维码链接>"` | 把 NapCat 登录二维码在本地变成可扫的图片（见下方「扫码登录」） |
 
 ---
@@ -159,6 +160,8 @@ deploy/
 ├── AGENT_PROMPT.md        想让 AI agent 帮你部署？把这份提示词丢给它
 ├── RESUME_PROMPT.md       预检判定内存不足、处理完之后接着部署的续跑提示词
 ├── SCAN_QR_WITHOUT_SSH.md 扫码登录的替代做法（不必开 SSH 隧道）
+├── watch.py               主程序（部署包里有副本，源头在仓库根目录）
+├── selftest.py            逻辑自检（部署包里有副本，源头在仓库根目录）
 ├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1）
 ├── .env.example           WebUI token / 容器内存上限模板
 ├── config.example.json    配置模板
@@ -175,6 +178,21 @@ deploy/
 **如果你想让 AI agent 来部署，直接把 `AGENT_PROMPT.md` 里那份提示词丢给它。**
 小内存服务器（NapCat 是 Electron 应用，常驻 0.3~0.7GB）要先看预检的内存判定；
 判定不足、处理完之后，用 `RESUME_PROMPT.md` 续跑。
+
+### 打部署包（别手打 zip）
+
+```bash
+python pack_deploy.py        # 生成 deploy.zip
+```
+
+包里必须同时有 `watch.py`、`selftest.py` 和 `install-watch.sh`，而且三者在同一层 ——
+`install-watch.sh` 是从自己所在目录往上找源文件的，少一个就会报「找不到 watch.py」。
+手动 `zip -r deploy.zip deploy/` 很容易漏掉仓库根目录那两个 .py，所以这件事交给脚本做，
+缺文件时它会直接报错、不生成包。它还会把文本文件统一转成 LF（Windows 上工作区常是 CRLF，
+带进包里的 shell 脚本到 Linux 上会报 `$'\r': command not found`）。
+
+装完之后 `install-watch.sh` 会打印 `watch.py` / `selftest.py` 的 sha256 前 16 位，
+以后怀疑「服务器上是不是旧版」，和仓库里的对一下即可。
 
 ### 扫码登录 QQ（不需要 SSH 隧道）
 

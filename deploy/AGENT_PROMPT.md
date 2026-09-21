@@ -345,6 +345,14 @@ sudo bash install-watch.sh
 它会：把 `watch.py` / `selftest.py` 放进 `/opt/douyu-live-notify/`、装好 systemd 单元，
 但**故意不启动定时器** —— 等验证通过再开。
 
+它不会覆盖已经填好的 `config.json`，重复执行是安全的。
+装完它会打印这两个文件的 sha256 前 16 位 —— 和打包方给的指纹对一下，
+对不上说明手上的包不是最新的，先停下换包，别急着往下走。
+
+> 如果它报「找不到 watch.py / selftest.py」：说明 `install-watch.sh` 和这两个文件
+> 不在同一层（手动 `zip` 很容易漏掉仓库根目录的两个 .py）。用 `python pack_deploy.py`
+> 重新打包，它保证三者在同一层，缺文件时直接报错不出包。
+
 然后填 `config.json`：
 
 ```bash
@@ -367,6 +375,11 @@ python3 selftest.py && tail -3 selftest_result.txt
 
 **期望**：`结果：24 项通过，0 项失败（共 24 项）`
 （关键是 **`0 项失败`**；有失败时这条命令会返回非 0 退出码）
+
+⚠️ **显示 18 项 = 服务器上的是旧版**（少了「配置校验」那 6 项，
+里面包含 room_id 填错时的可照做提示）。不要继续往后走，
+先解压最新的 `deploy.zip`、重跑阶段 6 的 `install-watch.sh` 把文件换掉
+（它不会覆盖已填好的 `config.json`），再回来重跑 ①。
 
 ```bash
 # ② 斗鱼接口体检
