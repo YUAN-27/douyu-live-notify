@@ -1,0 +1,32 @@
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 代码声明支持 3.9+，就在 3.9 上真跑一遍
+        python-version: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 编译检查
+        run: python -m py_compile watch.py selftest.py
+
+      - name: 逻辑自检（不联网，24 项断言）
+        run: python selftest.py
+
+      - name: 打印自检报告
+        if: always()
+        run: tail -20 selftest_result.txt || echo "（没有生成结果文件）"

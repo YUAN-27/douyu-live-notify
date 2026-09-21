@@ -165,8 +165,9 @@ deploy/
 └── douyu-watch.{service,timer}
 ```
 
-推荐流程：先跑 `bash preflight-check.sh`（只读，不改任何东西）看环境，
-然后照 `DEPLOY.md` 走。**如果你让 AI agent 来部署，直接用 `AGENT_PROMPT.md` 里那份提示词。**
+用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
+（只读，不改任何东西）看环境，然后照 `DEPLOY.md` 一步步走。
+**如果你想让 AI agent 来部署，直接把 `AGENT_PROMPT.md` 里那份提示词丢给它。**
 
 ---
 

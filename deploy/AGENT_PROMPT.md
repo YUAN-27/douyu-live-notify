@@ -55,12 +55,16 @@ openssl rand -hex 16
 
 ---
 
-## 阶段 1 · 解压 + 预检（只读，不改任何东西）
+## 阶段 1 · 就位 + 预检（只读，不改任何东西）
+
+把 `deploy/` 目录整个传到服务器，然后：
 
 ```bash
-command -v unzip >/dev/null || apt update && apt install -y unzip
-unzip -o deploy.zip
+# 传的是整个目录：直接进
 cd deploy
+# 传的是压缩包：
+#   unzip -o deploy.zip && cd deploy
+
 chmod +x *.sh
 bash preflight-check.sh
 ```
