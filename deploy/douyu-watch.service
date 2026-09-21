@@ -15,7 +15,13 @@ ExecStart=/usr/bin/python3 /opt/douyu-live-notify/watch.py --tick
 # 每次调用只跑几秒，给足余量；卡住也别无限等
 TimeoutStartSec=120
 
-# 让 systemd 自动创建 /var/log/douyu-watch（省掉手动建目录和权限问题）
+# 让 systemd 创建 /var/log/douyu-watch。
+# ⚠️ 实测 Ubuntu 24.04 上它不足以兜底：目录不存在时，下面 append: 那两行会在
+#    「打开输出文件」阶段直接失败（报 209/STDOUT），日志里只有
+#    "Failed at step STDOUT ...: No such file or directory"，看不出跟日志目录有关。
+#    所以真正的兜底是 /etc/tmpfiles.d/douyu-watch.conf（开机就建目录），
+#    install-watch.sh 会一并装好。手动重建：
+#      systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf
 LogsDirectory=douyu-watch
 
 # 输出进独立日志。这一行里带 loop= 字段，

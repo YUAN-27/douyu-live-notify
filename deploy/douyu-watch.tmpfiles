@@ -1,0 +1,20 @@
+# douyu-watch 的日志目录兜底规则。
+#
+# 安装到 /etc/tmpfiles.d/douyu-watch.conf，由 install-watch.sh 负责拷贝。
+#
+# 为什么需要它：unit 里写了
+#     LogsDirectory=douyu-watch
+#     StandardOutput=append:/var/log/douyu-watch/tick.log
+# 实测在 Ubuntu 24.04 上，如果 /var/log/douyu-watch 不存在，
+# 服务会在**打开输出文件**这一步就失败，报 `209/STDOUT`，而不是自动建目录 ——
+# 日志里只有一行 "Failed at step STDOUT spawning ...: No such file or directory"，
+# 看不出跟日志目录有关，很容易误判成 python 的问题。
+#
+# 这个失败发生在重定向阶段，早于 ExecStartPre 执行，所以**不能靠 ExecStartPre 兜底**
+# （它同样会被重定向，同样失败）。用 tmpfiles.d 在开机阶段就把目录建好才可靠。
+#
+# 手动重建（不重启机器时）：
+#     systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf
+#
+# 语法：类型 路径 权限 属主 属组 年龄
+d /var/log/douyu-watch 0755 root root -

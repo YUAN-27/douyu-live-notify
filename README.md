@@ -162,16 +162,21 @@ deploy/
 ├── SCAN_QR_WITHOUT_SSH.md 扫码登录的替代做法（不必开 SSH 隧道）
 ├── watch.py               主程序（部署包里有副本，源头在仓库根目录）
 ├── selftest.py            逻辑自检（部署包里有副本，源头在仓库根目录）
-├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1）
-├── .env.example           WebUI token / 容器内存上限模板
+├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1，ACCOUNT 必填）
+├── .env.example           WebUI token / 机器人 QQ 号 / 容器内存上限模板
 ├── config.example.json    配置模板
 ├── preflight-check.sh     部署前环境预检（只读，含内存判定）
 ├── setup-docker-mirror.sh 探测可用的 Docker 镜像源
 ├── mem-report.sh          内存被谁占了（只读，含 OOM 历史）
 ├── add-swap.sh            加/删 swap（幂等、可撤销，小内存机器用）
 ├── install-watch.sh       安装 watch.py 与 systemd 单元
-└── douyu-watch.{service,timer}
+├── douyu-watch.{service,timer}  systemd 每分钟拉起 watch.py --tick
+└── douyu-watch.tmpfiles   日志目录兜底（装到 /etc/tmpfiles.d/）
 ```
+
+> `.env` 里的 **`ACCOUNT`（机器人 QQ 号）是必填的**。镜像靠它给 QQ 传 `-q` 走快速登录；
+> 不填的话容器每次重启都可能退回「等你扫码」，做不到长期无人值守。漏填时 compose
+> 会直接拒绝启动 —— 这是故意的，好过悄悄退回扫码（那种失败你几天后才会发现）。
 
 用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
 （只读，不改任何东西）看环境，然后照 `DEPLOY.md` 一步步走。

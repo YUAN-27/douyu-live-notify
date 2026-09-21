@@ -37,6 +37,7 @@ REQUIRED = [
     "config.example.json",
     "douyu-watch.service",
     "douyu-watch.timer",
+    "douyu-watch.tmpfiles",
     "preflight-check.sh",
     "setup-docker-mirror.sh",
     "add-swap.sh",

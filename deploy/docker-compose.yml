@@ -52,6 +52,15 @@ services:
           memory: "${NAPCAT_MEM_LIMIT:-700m}"
 
     environment:
+      # 机器人 QQ 号。
+      # 镜像的 entrypoint 靠它决定用哪种登录方式：
+      #     if [ -n "${ACCOUNT}" ]; then  qq --no-sandbox -q $ACCOUNT   # 快速登录（免扫码）
+      #     else                          qq --no-sandbox               # 退回扫二维码
+      # 不填 → 容器每次重启都可能退回等你扫码，做不到长期无人值守。
+      # 首次登录填了也没关系：-q 找不到可用会话时照样出二维码给你扫。
+      # 这里用 :? 让它成为必填项 —— 漏填时 compose 直接拒绝启动，
+      # 而不是悄悄退回扫码（那种失败你几天后才会发现）。
+      ACCOUNT: "${ACCOUNT:?missing ACCOUNT - 在 .env 里填机器人 QQ 号，否则重启会退回扫码}"
       # 用宿主机当前用户身份运行，避免挂载目录出现权限问题。
       # 在 .env 里写 NAPCAT_UID=$(id -u) / NAPCAT_GID=$(id -g)
       NAPCAT_UID: "${NAPCAT_UID:-0}"

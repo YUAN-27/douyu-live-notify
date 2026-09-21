@@ -34,7 +34,7 @@ bash preflight-check.sh
 |---|---|---|
 | `YOUR_ROOM_ID` | 斗鱼房间的**真实 room_id**（不是靓号，见第 1 节） | `config.json` → `room_id` |
 | `YOUR_GROUP_ID` | 接收提醒的 QQ 群号 | `config.json` → `onebot.target_id` |
-| `YOUR_BOT_QQ` | 你用来发消息的 QQ 小号 | 只用于核对，不用写进配置 |
+| `YOUR_BOT_QQ` | 你用来发消息的 QQ 小号 | `.env` → `ACCOUNT`（**必填**，漏填容器直接拒绝启动） |
 | `YOUR_ONEBOT_TOKEN` | OneBot 的鉴权 token，自己生成一个随机串 | `config.json` → `onebot.token` |
 | `YOUR_WEBUI_TOKEN` | NapCat WebUI 的登录密码 | `.env` → `WEBUI_TOKEN` |
 
@@ -266,11 +266,24 @@ mkdir -p /opt/napcat && cd /opt/napcat
 
 把部署包里的 **`docker-compose.yml`** 和 **`.env`** 放到 `/opt/napcat/`（`.env` 就是同名文件，注意别被改名）。
 
+`.env` 里的 **`ACCOUNT` 必须填成机器人 QQ 号**，不能留空 —— 镜像的 entrypoint
+靠它给 QQ 传 `-q` 走快速登录，不填就会每次重启退回「等你扫码」：
+
+```bash
+grep '^ACCOUNT=' /opt/napcat/.env      # 必须是你的机器人 QQ 号，不能是空
+```
+
 ```bash
 cd /opt/napcat
 docker compose up -d
 docker compose ps
 docker compose logs --tail=50
+```
+
+**确认 ACCOUNT 真的传进容器了**（填了没生效等于没填）：
+
+```bash
+docker inspect napcat --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^ACCOUNT='
 ```
 
 **检查端口绑定**：
@@ -367,8 +380,14 @@ python qr_make.py --b64str "<把上面那一长串粘进来>"
 docker logs napcat 2>&1 | tail -20
 ```
 
-> 登录态持久化在 `/opt/napcat/ntqq`，**容器重启不用重新扫码**。
-> 掉线恢复：`docker restart napcat`，再重新扫码。
+> 登录态持久化在 `/opt/napcat/ntqq`，加上 `.env` 里的 `ACCOUNT`，
+> **容器重启会自动快速登录，不用重新扫码**。部署完务必实测一次：
+> `docker restart napcat` → 等 30~60 秒 → `get_login_info` 返回你的 QQ 号，
+> 且日志里**没有**新的二维码。这一步是在你在场、能扫码的时候做的，
+> 别等到主播真开播那晚才发现登录态恢复不了。
+>
+> 自动登录救不了两种情况（见第 12 节的边界说明）：**手机端登录同一个号**把服务器顶下线、
+> 或 QQ 侧会话被作废（换设备 / 改密）。这两种都要重新扫码。
 
 ---
 
@@ -549,7 +568,8 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | 改配置 | 编辑 `config.json`，不用重启（每次 tick 都重读） |
 | 重置状态 | `rm -f /opt/douyu-live-notify/state_YOUR_ROOM_ID.json` |
 | 看 NapCat 日志 | `docker logs napcat -f --tail=50` |
-| QQ 掉线 | `docker restart napcat`，再扫码 |
+| QQ 掉线 | 先 `docker restart napcat`（多数情况自动快速登录回来）；日志里又出现二维码才需要重扫 |
+| 服务报 `209/STDOUT` + `Failed at step STDOUT` | `/var/log/douyu-watch` 不存在，systemd 打开输出文件失败（报错完全不提日志目录，极易误判成 python 问题） | `systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf`（install-watch.sh 已装该规则；开机自动重建） |
 | 更新 watch.py | 覆盖后跑 `python3 selftest.py` 确认没坏 |
 | 清空日志 | `truncate -s 0 /var/log/douyu-watch/tick.log` |
 | **查内存被谁占了** | `bash mem-report.sh`（只读，包含历史 OOM 记录） |
@@ -575,6 +595,7 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | 判定一直「直播中」 | `treat_loop_as_live` 被改回 true | 改回 `false` |
 | 群里一直没消息 | 定时器没开 / 主播没真开播 | `systemctl list-timers`；看 `tick.log` 的 `loop=` 值 |
 | 日志里报 `[error] onebot 通知失败` | NapCat 挂了或配置被改 | `docker logs napcat` |
+| **机器人掉线，通知静默丢了** | 本项目**没有掉线检测**；且发送失败只打印一行 `[error]`，而状态已落盘 → **那条开播通知不会补发** | 见第 12 节。每天扫一眼：`grep -c '\[error\]' /var/log/douyu-watch/tick.log` |
 | **机器人莫名掉线，重启又好了** | 被内核 OOM killer 杀掉。它**不写应用日志**，所以看起来毫无征兆 | `bash mem-report.sh` 看第 6 节；`sudo bash add-swap.sh` |
 | **同机的网页突然挂了，自身日志无异常** | 很可能也是 OOM killer 杀的 —— 全局 OOM **按 RSS 从大到小挑牺牲品**，网页占得多就先死 | `journalctl -k \| grep -i oom`；给 NapCat 加内存上限（第 4 步已默认加）；或改走零内存推送通道（0.3 路线 B） |
 | `docker inspect napcat --format '{{.HostConfig.Memory}}'` 返回 0 | compose 的 `deploy.resources.limits` 没被识别 | 换成旧写法 `mem_limit: 900m`，再 `docker compose up -d` |
@@ -587,4 +608,16 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 - **延迟 = 定时器间隔 × confirm_rounds**。每分钟一次 + 确认 2 次 → 最慢约 2 分钟发现开播。
 - **轮播判定还有个小缺口**：还没在**真人开播时**亲眼确认 `videoLoop` 变回 `0`。证据很硬（三组对照），但严格说仍是推断。**心跳日志记着 `loop=` 值，下次真人开播看一眼即可定案。**
 - **消息送达不保证**。QQ 风控可能静默丢消息（日志显示成功但收不到），**别把这个提醒当唯一信息来源**。
+- **没有掉线检测，通知失败也不补发**。机器人掉线时你不会收到任何提示；而且发送失败只打印
+  一行 `[error]`，状态却已经落盘，**那条开播通知就永久丢了**。掉线本身分三种，只有「容器崩了」
+  能自动恢复：
+
+  | 情形 | 能自动恢复吗 |
+  |---|---|
+  | 容器 / 进程崩了 | 能。`restart: always` + 登录态 + `ACCOUNT` 快速登录 |
+  | 幽灵假死（腾讯侧断链，本地不报错也不出二维码） | 不能，要人工处理 |
+  | 登录态失效（换设备 / 改密 / 手机端把服务器顶下线） | 不能，必须重新扫码 |
+
+  自查是否在线：`curl -s -H "Authorization: Bearer YOUR_ONEBOT_TOKEN" http://127.0.0.1:3000/get_login_info`
+  （返回你的 QQ 号才算真在线）。**别在手机 QQ 上登录这个小号**，那会把服务器端顶下线。
 - **协议端合规风险自负**。脚本只是把消息 POST 给 OneBot 端点。

@@ -160,11 +160,30 @@ sudo bash setup-docker-mirror.sh
 ```bash
 mkdir -p /opt/napcat
 cp docker-compose.yml /opt/napcat/
-# 用阶段 0 生成的 token 替换掉 .env.example 里的占位符
-sed "s/YOUR_WEBUI_TOKEN/<阶段0生成的token>/" .env.example > /opt/napcat/.env
+# 用阶段 0 生成的 token、机器人 QQ 号填好 .env（ACCOUNT 必填，见下方说明）
+sed -e "s/YOUR_WEBUI_TOKEN/<阶段0生成的token>/" \
+    -e "s/^ACCOUNT=$/ACCOUNT=<机器人QQ号>/" .env.example > /opt/napcat/.env
+grep -E '^(ACCOUNT|WEBUI_TOKEN)=' /opt/napcat/.env   # ACCOUNT 不能是空的
 cd /opt/napcat
 docker compose up -d
 docker compose ps
+```
+
+**`ACCOUNT` 为什么必填**：镜像的 entrypoint 里是这样分支的 ——
+
+```bash
+if [ -n "${ACCOUNT}" ]; then  gosu napcat /opt/QQ/qq --no-sandbox -q $ACCOUNT   # 快速登录
+else                          gosu napcat /opt/QQ/qq --no-sandbox               # 退回扫码
+```
+
+不填的话，容器每次重启都可能退回「等你扫码」，做不到长期无人值守。
+compose 里用 `${ACCOUNT:?}` 把它设成了必填 —— 漏填会**直接拒绝启动**，这是故意的：
+比悄悄退回扫码好，后者你几天后才会发现。
+
+**确认它真的传进容器了**（填了没生效等于没填）：
+
+```bash
+docker inspect napcat --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^ACCOUNT='
 ```
 
 **必须验证端口只绑回环：**
@@ -328,6 +347,14 @@ curl -s -H "Authorization: Bearer $T" http://127.0.0.1:3000/get_group_list
 **期望**：
 - 第 1 条返回 `"status":"ok"`，`user_id` 是那个小号的 QQ 号
 - 第 2 条里**能找到目标群号**
+
+> 上面这次 `docker restart napcat` 同时就是「**重启免扫码**」的验收 —— 这是整个
+> 「长期无人值守」假设的唯一验证点，务必现在做完（趁用户在场、扫码方便）：
+>
+> - `docker logs napcat 2>&1 | tail -40` 里**不应该再出现二维码**
+> - 第 1 条能返回 QQ 号 = 自动快速登录成功
+> - 若又出现二维码 → 说明 `ACCOUNT` 没生效（回阶段 3 核对）或登录态没落到
+>   `/opt/napcat/ntqq`。**停下报告**，别等到主播真开播那晚才发现。
 
 **如果第 2 条里没有目标群号** → 停下报告。这几乎只有一个原因：
 小号还没加进那个群。这是本步骤最常见的失败。

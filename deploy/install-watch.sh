@@ -108,6 +108,17 @@ install -m 644 "$UNIT_DIR/douyu-watch.timer"   /etc/systemd/system/douyu-watch.t
 systemctl daemon-reload
 echo "已安装 douyu-watch.service / douyu-watch.timer"
 
+# ---- 日志目录兜底 ----
+# unit 里是 StandardOutput=append:/var/log/douyu-watch/tick.log。目录不存在时，
+# 服务会在「打开输出文件」这一步就失败（209/STDOUT），而不是自动建目录。
+# 这个失败早于 ExecStartPre，所以只能用 tmpfiles.d 在开机阶段建，不能靠 ExecStartPre。
+if [[ -f "$UNIT_DIR/douyu-watch.tmpfiles" ]]; then
+  install -m 644 "$UNIT_DIR/douyu-watch.tmpfiles" /etc/tmpfiles.d/douyu-watch.conf
+  systemd-tmpfiles --create /etc/tmpfiles.d/douyu-watch.conf 2>/dev/null || true
+  echo "已安装 /etc/tmpfiles.d/douyu-watch.conf（保证 /var/log/douyu-watch 开机就存在）"
+fi
+mkdir -p /var/log/douyu-watch
+
 cat <<'EOF'
 
 ==================== 装完了，接下来按顺序做 ====================
