@@ -615,13 +615,14 @@ docker inspect napcat --format '{{range .Config.Env}}{{println .}}{{end}}' | gre
 
 ```bash
 systemctl stop douyu-watch.timer      # 故意让它停摆
-# 等 8 分钟以上（阈值 7 分钟）
+# 等 10 分钟以上（阈值 7 分钟 + 看门狗每 2 分钟一轮 → 最坏要 9 分钟才轮到）
 tail -20 /var/log/douyu-watch/watchdog.log
 python3 watchdog.py --status
 ```
 
 **应该看到**：一条「监控已停摆」告警 → 自动把定时器拉起来 → 下一轮发「已恢复」。
-验证 B（`docker stop napcat`，会短暂断线）和验证 C 见 `WATCHDOG.md` 第五节。
+验证 C（零风险版掉线检测，不动真容器）和验证 B（`docker stop napcat`，会短暂断线）
+见 `WATCHDOG.md` 第五节。
 
 ### 一条命令看健康
 

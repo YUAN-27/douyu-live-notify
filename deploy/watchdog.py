@@ -1336,6 +1336,46 @@ def selftest():
     check(os.path.exists(alog) and "正文" in open(alog, encoding="utf-8").read(),
           "告警无论如何都会落到本地 alerts.log")
 
+    print("-- dry-run 的语义（这条坑过：dry-run 时告警不会真发）--")
+    dry_log = os.path.join(tmpdir, "dry-tick.log")
+    with open(dry_log, "w", encoding="utf-8", newline="\n") as fp:
+        fp.write("[12:00:00] #7 未开播 | loop=1\n")
+
+    class _DryArgs(object):
+        app_dir = tmpdir
+        tick_log = dry_log
+        state_dir = os.path.join(tmpdir, "dry-state")
+        config = os.path.join(tmpdir, "no-such-config.json")
+        container = "napcat-not-here"
+        onebot_base = "http://127.0.0.1:3000"
+        onebot_token = "t"
+        stale = None
+        stuck_rounds = None
+        auto_restart = None
+
+    dry_calls = []
+
+    def dry_runner(cmd, timeout=60):
+        if cmd[:3] == ["docker", "inspect", "-f"]:
+            return 1, "Error: No such object: napcat-not-here"
+        return 1, "(stub)"
+
+    def dry_http(url, **kw):
+        dry_calls.append(url)
+        return True, {"code": 200}
+
+    os.environ["ALERT_WEBHOOK"] = "pushplus|https://www.pushplus.plus/send?token=TK"
+    try:
+        _v, dlines = run_once(_DryArgs(), runner=dry_runner, http=dry_http,
+                              napcat_probe=None, dry_run=True)
+    finally:
+        os.environ.pop("ALERT_WEBHOOK", None)
+    djoined = "\n".join(dlines)
+    check("[dry-run] 本应发送告警" in djoined, "dry-run 会把该发的告警标成「本应发送」")
+    check(not dry_calls, "dry-run 下告警真的不投递（别拿它验证通道是否打得通）")
+    check(not os.path.exists(os.path.join(tmpdir, "dry-state", "state.json")),
+          "dry-run 不写状态文件（不会污染真实的连续失败计数）")
+
     shutil.rmtree(tmpdir, ignore_errors=True)
     print()
     total = passed[0] + len(failures)
@@ -1359,7 +1399,8 @@ def main(argv=None):
     p.add_argument("--recover-notify", action="store_true",
                    help="补救一条丢失的开播通知（主播仍在播时用，会先备份状态文件）")
     p.add_argument("--selftest", action="store_true", help="离线自检")
-    p.add_argument("--dry-run", action="store_true", help="不真的动手，只报告打算做什么")
+    p.add_argument("--dry-run", action="store_true",
+                   help="演练：不真的动手、也不发告警，只报告打算做什么")
     p.add_argument("--version", action="version", version="watchdog " + VERSION)
 
     p.add_argument("--app-dir", default=None)

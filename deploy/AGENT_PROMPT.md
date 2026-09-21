@@ -593,7 +593,7 @@ docker inspect napcat --format '{{range .Config.Env}}{{println .}}{{end}}' | gre
 
 ```bash
 systemctl stop douyu-watch.timer       # 故意制造「监控停摆」
-# 等 8 分钟以上（陈旧阈值 7 分钟）
+# 等 10 分钟以上（陈旧阈值 7 分钟 + 看门狗每 2 分钟一轮 → 最坏 9 分钟才轮到）
 tail -30 /var/log/douyu-watch/watchdog.log
 python3 watchdog.py --status
 systemctl list-timers douyu-watch.timer   # 应该已被自动拉起
@@ -602,9 +602,39 @@ systemctl list-timers douyu-watch.timer   # 应该已被自动拉起
 **期望**：出现一条「监控已停摆」告警 → 看门狗自动把定时器拉起来 → 下一轮发「已恢复」通知。
 这一步不影响 QQ，可以放心做。做完确认定时器确实回来了。
 
-> 如果用户同意，还可以做「掉线检测」验证：`docker stop napcat`，
-> 等 6~8 分钟，应看到告警 + 自动 `docker restart napcat`。
-> ⚠️ 这会让机器人短暂断线，**别在主播正在播、用户正等通知的时候做**。
+**再做一次「零风险版掉线检测」**（不动真容器，验证「到阈值才动手」这条决策链，
+以及告警真的送得出去）：
+
+```bash
+cd /opt/douyu-live-notify
+for i in 1 2 3; do
+  sudo bash -c 'set -a; . /etc/default/douyu-watchdog; set +a; \
+    python3 /opt/douyu-live-notify/watchdog.py \
+      --container napcat-does-not-exist --state-dir /tmp/wd-verify'
+  echo "--- 第 $i 轮 ---"
+done
+sudo rm -rf /tmp/wd-verify      # 必须清掉，别留下假的故障计数
+```
+
+**期望（实测行为）**：
+- 第 1 轮：`动作: NapCat 异常第 1 次（满 3 次才动手），本轮先观察` +
+  `已告警：NapCat 容器没在运行（送达：webhook(pushplus)）`
+- 第 2 轮：`[重复告警已抑制]`
+- 第 3 轮：`动作: 自动重启（容器没在运行）：docker restart napcat-does-not-exist 失败`
+  ← 说明自愈命令真的被执行了，只是容器名不存在所以失败（这就是「零风险」）
+
+**⚠️ 两个坑**：
+1. **别加 `--dry-run`** —— 加了之后告警**完全不会发**（只打印「本应发送告警」），
+   这一步就白做了。要验证投递就必须不加。
+2. `--state-dir /tmp/wd-verify` **不能省**，否则会往真实状态文件写假的失败计数。
+
+> 告诉用户：这一步他会收到一条「NapCat 容器没在运行」的告警，**那是合成出来的，忽略即可**；
+> 它正好证明真出事时叫得醒他。
+
+> 想更彻底的话可以做验证 B：`docker stop napcat`，等 8 分钟，应看到告警 + 自动
+> `docker restart napcat`。⚠️ **仅当用户手边能进服务器时做** —— `docker stop` 是手动停止，
+> `restart: always` 不会把它拉起来，球全在看门狗这边；万一自愈失败，容器就一直停着。
+> **别在主播正在播、用户正等通知的时候做。**
 
 ### ⑧ 启用
 
