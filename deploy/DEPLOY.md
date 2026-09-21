@@ -309,6 +309,43 @@ docker stats napcat --no-stream
 
 ## 5. 第三步：扫码登录 QQ
 
+**不需要 SSH 隧道。** NapCat 会把二维码打进容器日志，取出来在本地生成图片扫即可。
+（想走 WebUI 也行，见本节末尾的方式 B。）
+
+### 方式 A · 从日志取二维码（推荐，依赖最少）
+
+```bash
+docker logs napcat 2>&1 | grep -nE '二维码|qrcode|txz\.qq\.com' | tail -20
+```
+
+会看到类似这样一行：
+
+```
+[warn] 二维码解码URL: https://txz.qq.com/p?k=xxxxxxxxxxxxxxxx&f=xxxxxxxxxxxxx
+```
+
+把 **URL 原文**复制到本地（`k=` / `f=` 的值都要完整，别截断），生成二维码图片：
+
+```bash
+python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"
+# 得到 qr.png → 用**小号 YOUR_BOT_QQ** 的手机 QQ 扫它
+```
+
+> ⏱ 二维码有效期只有约 1~2 分钟，**拿到就马上扫**。过期就重新生成一次：
+> `docker restart napcat && sleep 20`，再取一次日志（此时还没登录，重启不丢任何东西）。
+> ⚠️ 这个 URL 本质是**一次性登录凭据**，别贴到公开群或论坛。
+
+**日志里没有 URL** 时，改为取图片文件（路径可能是 `/app/napcat/cache/qrcode.png`）：
+
+```bash
+docker exec napcat sh -c 'base64 -w0 /app/napcat/cache/qrcode.png'   # 输出很长，要完整复制
+python qr_make.py --b64str "<把上面那一长串粘进来>"
+```
+
+完整说明、其他取图方式与排错见 **`SCAN_QR_WITHOUT_SSH.md`**。
+
+### 方式 B · SSH 隧道 + WebUI（可选，以后看配置方便些）
+
 1. 本地电脑开 SSH 隧道（另开一个终端，让它挂着）：
    ```bash
    ssh -N -L 6099:127.0.0.1:6099 root@服务器IP
@@ -318,7 +355,11 @@ docker stats napcat --no-stream
 4. 进入「登录」页面 → 用**小号 `YOUR_BOT_QQ`** 的手机 QQ 扫码
 5. 日志出现「登录成功」即完成
 
-验证：
+> **22 端口连不上时不要卡在这里**，直接走方式 A。
+> 这个隧道是可选的便利，**不是部署的前置条件** ——
+> 扫码、配 OneBot、跑测试都不需要它。排查清单见 `SCAN_QR_WITHOUT_SSH.md` 附录。
+
+### 确认登录成功
 
 ```bash
 docker logs napcat 2>&1 | tail -20

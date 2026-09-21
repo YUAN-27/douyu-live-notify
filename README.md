@@ -103,6 +103,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python watch.py --probe <号>` | 体检指定房间，打印两个接口的原始返回 |
 | `python watch.py --test-notify` | 往配置的通道发一条测试消息 |
 | `python selftest.py` | 不联网的逻辑自检（24 项），改完代码先跑它 |
+| `python qr_make.py --url "<日志里的二维码链接>"` | 把 NapCat 登录二维码在本地变成可扫的图片（见下方「扫码登录」） |
 
 ---
 
@@ -157,6 +158,7 @@ deploy/
 ├── DEPLOY.md              完整部署手册（先看这个）
 ├── AGENT_PROMPT.md        想让 AI agent 帮你部署？把这份提示词丢给它
 ├── RESUME_PROMPT.md       预检判定内存不足、处理完之后接着部署的续跑提示词
+├── SCAN_QR_WITHOUT_SSH.md 扫码登录的替代做法（不必开 SSH 隧道）
 ├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1）
 ├── .env.example           WebUI token / 容器内存上限模板
 ├── config.example.json    配置模板
@@ -173,6 +175,30 @@ deploy/
 **如果你想让 AI agent 来部署，直接把 `AGENT_PROMPT.md` 里那份提示词丢给它。**
 小内存服务器（NapCat 是 Electron 应用，常驻 0.3~0.7GB）要先看预检的内存判定；
 判定不足、处理完之后，用 `RESUME_PROMPT.md` 续跑。
+
+### 扫码登录 QQ（不需要 SSH 隧道）
+
+NapCat 会把登录二维码打进**容器日志**，所以不必开 SSH 隧道、也不必让 WebUI 接触网络：
+
+```bash
+docker logs napcat 2>&1 | grep -nE '二维码|txz\.qq\.com' | tail -20
+```
+
+找到那行 `二维码解码URL: https://txz.qq.com/p?k=...&f=...`，在**你自己的电脑**上：
+
+```bash
+python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"    # 生成 qr.png
+```
+
+用手机 QQ 扫它。**二维码只有约 1~2 分钟有效期**，拿到就马上扫。
+
+> 那个 URL 本质是**一次性登录凭据**。用 `qr_make.py` 在本地转换，就不会把它交给第三方二维码网站。
+> 日志里没有 URL 时改为取图片：`docker exec napcat sh -c 'base64 -w0 /app/napcat/cache/qrcode.png'`，
+> 再用 `python qr_make.py --b64str "<粘贴>"` 还原。完整说明见 `deploy/SCAN_QR_WITHOUT_SSH.md`。
+
+`qr_make.py` 是本项目里**唯一需要额外依赖**的脚本（`pip install qrcode pillow`），
+而且只有「从 URL 生成」这条路径需要 —— `--b64str` 路径纯标准库。
+不想装也行：把那个 URL 贴到任意在线二维码工具即可（用完即弃，别留在页面上）。
 
 ---
 
