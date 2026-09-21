@@ -18,9 +18,7 @@ bash preflight-check.sh
 
 **重点看三项：**
 
-- **内存判定为「不足」** → 先加 swap 或加内存。NapCat 是 Electron 应用，常驻约 400MB~1GB，
-  小内存机器容易被 OOM killer 打死 —— 表现是「机器人莫名掉线，重启又好了」，很难查。
-  脚本会直接打印加 swap 的命令。
+- **内存判定为「不足」** → 这是个**能卡住整个部署的硬门槛**，不要硬上。走 0.3 节。
 - **`/opt/napcat` 或 `/opt/douyu-live-notify` 已被占用** → 换个目录名，别覆盖别人的东西。
 - **容器自启策略不是 `always` / `unless-stopped`** → 记下容器名。第 2 步要重启 Docker，
   这类容器不会自己起来（脚本会自动拉起，但你要留意它的报告）。
@@ -48,6 +46,76 @@ openssl rand -hex 16
 
 `config.json` 和 `.env` 的模板分别是 `config.example.json`、`.env.example`，
 复制一份再改（脚本也会自动处理）。
+
+---
+
+## 0.3 内存判定「不足」怎么办（能卡住整个部署的硬门槛）
+
+先把流传的两个极端数字纠正掉，别照抄任何一个：
+
+| 说法 | 出处 | 可不可信 |
+|---|---|---|
+| 「内存低至 50~100MB」 | NapCat 官方首页 | ❌ 那是 NapCat **自身框架层**的占用，**不含**它承载的 QQ NT 进程 |
+| 「跑起来 500MB~1GB」 | 社区实测博客（含同机 NoneBot2） | ⚠️ 偏高，但比 50MB 接近现实 |
+| **300~700MB** | 综合判断：Docker 镜像本身 570MB，内含完整无头 QQ NT | ✅ **按这个做容量规划** |
+
+**结论：可用内存低于 ~800MB 就是真有风险，不是保守估计。**
+
+### 第一步：查清是谁占了内存
+
+```bash
+bash mem-report.sh
+```
+
+只读，不写任何东西。它会给出：谁在占内存、有没有 swap、**历史上有没有被 OOM 杀过**、
+容器有没有内存上限、以及 PSI 内存压力值。**重点看它第 2 节和第 6 节。**
+
+### 第二步：按结果选一条路
+
+**路线 A · 加 swap（最省事，多数情况够用）**
+
+```bash
+sudo bash add-swap.sh          # 默认 2G
+```
+
+脚本会创建 swapfile、**验证真的生效**、写进 `/etc/fstab`（重启后仍在），并显式设置
+`vm.swappiness`。幂等，重复跑安全。撤销：`sudo bash add-swap.sh --remove`。
+
+> **为什么 swappiness 用 60，而不是网上到处传的 10？**
+> swappiness 越低，内核越**不愿意**换出匿名页（= 进程真正占着的内存），转而去丢文件缓存。
+> 那些教程让你设成 10，针对的是「数据库要最低延迟」的场景。
+> 你这台机器正相反：最大的一块匿名内存是**长期空闲的 NapCat**（只在开播时醒一下），
+> 而真正需要低延迟的是**同机的个人网页**。所以我们要的恰恰是「把空闲的 NapCat 换出去，
+> 把物理内存让给网页」。方向搞反会更糟。
+
+**路线 B · 换掉推送通道，让内存问题直接消失**
+
+如果接收提醒的群**不一定非得是 QQ**，最干净的解法是根本不在本机跑 NapCat：
+企业微信 / 钉钉 / 飞书 群机器人、Telegram Bot、Bark、ntfy —— 这些全是**纯 HTTP webhook**，
+内存占用 ≈ 0，本质上就是一条 `curl`。`watch.py` 的通知器是可插拔的（`channels` 配置项），
+加一个通道约 20 行代码，能彻底绕开小内存限制。**代价**：收消息的群得换个地方。
+
+> 顺带提一句另一个方向：更「纯协议」的 QQ 实现如 Lagrange.Core（C#，不依赖 Electron）
+> 内存确实更低，但它需要 .NET 10 运行时 + 签名服务，且刚经历 V1 退役、正在做协议迁移，
+> 运维复杂度反而更高。本项目的定位是「部署简单」，所以不默认推荐 —— 但值得知道它存在。
+
+**路线 C · 先把占用压下来再决定**
+
+如果 `mem-report.sh` 第 2 节显示占用大头是**可以调的东西**（Node 应用没设 heap 上限、
+跑着用不上的数据库、日志缓冲过大……），把它压下来再走路线 A，效果最好。
+
+### 决策速查
+
+| mem-report 的结果 | 建议 |
+|---|---|
+| 可用 ≥ 900MB，或大头是**可回收缓存** | 直接部署，不必加 swap |
+| 可用 400~800MB，且**没有** OOM 历史 | 路线 A（加 swap）就够 |
+| 可用 < 400MB，且**已有** OOM 历史 | 先路线 C 查大头；压不下来就走路线 B |
+| **个人网页本身就是这台机器 RSS 最大的进程** | **务必走路线 B** —— 硬塞 NapCat 很可能让 OOM killer 挑中你的网页 |
+
+> 最后一种情况值得单独强调，因为它反直觉：全局 OOM killer 是**按内存占用从大到小挑牺牲品**的。
+> 如果网页占得比 NapCat 多，**被杀的会是网页**，NapCat 反而活下来。
+> compose 文件里那道 `deploy.resources.limits.memory` 就是为了防这个 —— 见第 4 节。
 
 ---
 
@@ -201,6 +269,26 @@ ss -lntp | grep -E '3000|6099'
 
 **必须是** `127.0.0.1:3000` 和 `127.0.0.1:6099`。
 如果看到 `0.0.0.0:3000` 或 `*:3000`，说明端口发布写错了，**立刻停下改 compose 文件**。
+
+**顺手验证内存安全网真的生效了**（compose 里那段 `deploy.resources.limits.memory`）：
+
+```bash
+docker inspect napcat --format 'Memory={{.HostConfig.Memory}}'
+```
+
+- 返回一个字节数（`900m` → `943718400`）= **生效**
+- 返回 `0` = **没生效**。把 compose 里那段 `deploy:` 换成旧写法 `mem_limit: 900m`，
+  再 `docker compose up -d`
+
+> 这道上限的作用在第 0.3 节讲过：内存失控时，内核只在**容器内部**杀进程，
+> NapCat 自己重启，同一台机器上的网页不受牵连。小内存机器上它是刚需。
+> 机器内存 ≥4GB 的话，把那段删掉即可。
+
+**观察它实际吃多少**（部署当天看一次，之后偶尔看）：
+
+```bash
+docker stats napcat --no-stream
+```
 
 ---
 
@@ -399,6 +487,11 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | QQ 掉线 | `docker restart napcat`，再扫码 |
 | 更新 watch.py | 覆盖后跑 `python3 selftest.py` 确认没坏 |
 | 清空日志 | `truncate -s 0 /var/log/douyu-watch/tick.log` |
+| **查内存被谁占了** | `bash mem-report.sh`（只读，包含历史 OOM 记录） |
+| **看 swap 用量** | `free -h; swapon --show` |
+| **加 / 撤 swap** | `sudo bash add-swap.sh` / `sudo bash add-swap.sh --remove` |
+| **看 NapCat 实际吃多少内存** | `docker stats napcat --no-stream` |
+| **机器人莫名掉线** | 多半是 OOM，先 `bash mem-report.sh` 看第 6 节 |
 
 日志一个月几 MB，不着急清理。
 
@@ -417,6 +510,9 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | 判定一直「直播中」 | `treat_loop_as_live` 被改回 true | 改回 `false` |
 | 群里一直没消息 | 定时器没开 / 主播没真开播 | `systemctl list-timers`；看 `tick.log` 的 `loop=` 值 |
 | 日志里报 `[error] onebot 通知失败` | NapCat 挂了或配置被改 | `docker logs napcat` |
+| **机器人莫名掉线，重启又好了** | 被内核 OOM killer 杀掉。它**不写应用日志**，所以看起来毫无征兆 | `bash mem-report.sh` 看第 6 节；`sudo bash add-swap.sh` |
+| **同机的网页突然挂了，自身日志无异常** | 很可能也是 OOM killer 杀的 —— 全局 OOM **按 RSS 从大到小挑牺牲品**，网页占得多就先死 | `journalctl -k \| grep -i oom`；给 NapCat 加内存上限（第 4 步已默认加）；或改走零内存推送通道（0.3 路线 B） |
+| `docker inspect napcat --format '{{.HostConfig.Memory}}'` 返回 0 | compose 的 `deploy.resources.limits` 没被识别 | 换成旧写法 `mem_limit: 900m`，再 `docker compose up -d` |
 
 ---
 

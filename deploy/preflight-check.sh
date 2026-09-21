@@ -15,12 +15,12 @@ echo "=============================================================="
 
 # ---------- 1. 内存 ----------
 echo
-echo "【1】内存 —— NapCat 是 Electron 应用，常驻约 400MB~1GB"
+echo "【1】内存 —— NapCat 跑在 QQ NT（Electron）之上，按 300~700MB 做容量规划"
+echo "      （官网说的「50~100MB」只是它自身框架层，不含 QQ NT 进程，别按那个规划）"
 echo "--------------------------------------------------------------"
 free -h 2>/dev/null || echo "  free 命令不可用"
 echo
 python3 - <<'PY' 2>/dev/null || true
-import re
 try:
     mem = {}
     for line in open("/proc/meminfo"):
@@ -39,13 +39,11 @@ try:
     elif avail >= 0.8:
         print("  判定：[注意] 勉强够。NapCat 高峰可能触发 OOM，建议观察 free -h")
     else:
-        print("  判定：[警告] 可用内存不足 800MB。先查清个人网页占了多少，")
-        print("        再决定是加内存、加 swap，还是把 NapCat 换成更轻的方案")
-    if swap_total == 0 and avail < 1.5:
-        print("  建议：没配 swap。加 1~2GB swap 能显著降低被 OOM killer 打死的概率：")
-        print("        fallocate -l 2G /swapfile && chmod 600 /swapfile")
-        print("        mkswap /swapfile && swapon /swapfile")
-        print("        echo '/swapfile none swap sw 0 0' >> /etc/fstab")
+        print("  判定：[不足] 可用内存 < 800MB，不足以安全承载 NapCat。")
+    if avail < 1.5:
+        print("  下一步：先跑 mem-report.sh 查清内存被谁占了（含历史 OOM 记录），")
+        print("          再决定加 swap（add-swap.sh）还是换掉推送通道。")
+        print("          具体决策路径见 DEPLOY.md 的 0.3 节。")
 except Exception as e:
     print("  读取 /proc/meminfo 失败：%s" % e)
 PY

@@ -21,6 +21,29 @@ services:
     container_name: napcat
     restart: always
 
+    # ── 内存安全网（小内存机器务必看这段，>4GB 的机器可以删掉）────────────
+    # 容器里跑的是**完整的 QQ NT（Electron）**，实测常驻 300~700MB。
+    # 官方首页说「内存低至 50~100MB」，那指的是 NapCat 自身框架层，
+    # 不含它承载的 QQ NT 进程 —— 别按 50MB 做容量规划。
+    #
+    # 这里设上限**不是为了省内存**，而是为了决定「内存失控时谁死」：
+    #
+    #   不设上限 → NapCat 吃满宿主机内存，触发**全局** OOM killer。
+    #              全局 OOM 按 RSS 从大到小挑牺牲品，很可能杀掉你的个人网页。
+    #
+    #   设了上限 → 内核只在**这个容器的 cgroup 内部**杀进程。
+    #              NapCat 自己重启（restart: always），网页毫发无损。
+    #
+    # 900m 对「只推开播提醒」这一个用途是宽松值，正常不会触顶。
+    # 部署稳定几天后，照 docker stats 的实测峰值再决定是收紧还是删掉。
+    #
+    # ⚠️ 部署后**必须验证它真的生效**（返回 0 说明没生效，需要改用 mem_limit 写法）：
+    #      docker inspect napcat --format '{{.HostConfig.Memory}}'
+    deploy:
+      resources:
+        limits:
+          memory: 900m
+
     environment:
       # 用宿主机当前用户身份运行，避免挂载目录出现权限问题。
       # 在 .env 里写 NAPCAT_UID=$(id -u) / NAPCAT_GID=$(id -g)
