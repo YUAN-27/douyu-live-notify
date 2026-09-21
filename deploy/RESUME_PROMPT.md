@@ -83,16 +83,15 @@ bash preflight-check.sh
 
 | # | 命令 | 期望 |
 |---|---|---|
-| ① | `python3 selftest.py` | `结果：24 项通过，0 项失败（共 24 项）` |
+| ① | `python3 selftest.py` | 最后一行 `0 项失败`，退出码 0 |
 | ② | `python3 watch.py --probe <你的 room_id>` | 两个接口都成功，能看到主播名和 `videoLoop` 字段 |
 | ③ | `python3 watch.py --once` | **`判定：未开播`** ← 房间在轮播，这是**正确**结果，不是故障 |
 | ④ | `python3 watch.py --test-notify` | **QQ 群里真的出现一条测试消息**（必须由人亲眼确认） |
 
-> ① 显示 **18 项** 而不是 24 项，说明 `/opt/douyu-live-notify/` 里是**旧版**文件
-> （少了「配置校验」那 6 项）。这不是故障，但必须先换文件：解压最新的 `deploy.zip`，
-> 在 `deploy/` 里重跑 `sudo bash install-watch.sh`（**不会覆盖已填好的 `config.json`**），
-> 再重跑 ①。换完 `install-watch.sh` 会打印 `watch.py` / `selftest.py` 的 sha256 前 16 位，
-> 和打包方给的指纹对一下即可确认。
+> **别用项数判断版本** —— 项数会随版本增加，文档里的数字必然过时。
+> 要看版本，就比对 `install-watch.sh` 打印的 `watch.py` / `selftest.py`
+> sha256 前 16 位；对不上就是旧版 —— 解压最新的 `deploy.zip`，在 `deploy/` 里重跑
+> `sudo bash install-watch.sh`（**不会覆盖已填好的 `config.json`**），再重跑 ①。
 
 > ④ 之前先确认小号**已加入目标群**：`curl .../get_group_list` 里能看到群号。
 > 看不到就是没加，这是群聊发送失败最常见的原因。
@@ -101,7 +100,7 @@ bash preflight-check.sh
 
 | # | 命令 | 期望 |
 |---|---|---|
-| ⑤ | `python3 watchdog.py --selftest` | `结果：34 项通过，0 项失败（共 34 项）` |
+| ⑤ | `python3 watchdog.py --selftest` | 最后一行 `0 项失败`，退出码 0 |
 | ⑥ | `python3 watchdog.py --status` | 心跳 `ok`、NapCat `online` |
 | ⑦ | `python3 watchdog.py --test-alert` | **用户真的收到一条测试告警**（必须由人确认） |
 

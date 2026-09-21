@@ -169,8 +169,7 @@ cat <<'EOF'
 
 【2】逻辑自检（不联网、不发消息）
     cd /opt/douyu-live-notify && python3 selftest.py && tail -3 selftest_result.txt
-    期望最后一行：结果：24 项通过，0 项失败（共 24 项）
-    若显示 18 项 → 这份 watch.py / selftest.py 是旧版，重新解压最新的 deploy.zip
+    期望最后一行：0 项失败（项数随版本变，别拿它判断版本 —— 上面打印的指纹才准）
 
 【3】斗鱼侧体检（联网，验证接口还通）
     cd /opt/douyu-live-notify && python3 watch.py --probe YOUR_ROOM_ID

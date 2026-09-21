@@ -499,12 +499,13 @@ cd /opt/douyu-live-notify
 # ① 自检：逻辑检查，不联网、不发消息
 python3 selftest.py && tail -3 selftest_result.txt
 ```
-**期望**：`结果：24 项通过，0 项失败（共 24 项）`。
+**期望**：最后一行是 `0 项失败`，退出码 0。
 
-> 显示 **18 项** 就说明 `/opt/douyu-live-notify/` 里躺着的是旧版
-> （少了「配置校验」那 6 项）。重新解压最新的 `deploy.zip`，
-> 在 `deploy/` 里跑一次 `sudo bash install-watch.sh` 换掉文件 ——
-> 它不会覆盖你填好的 `config.json` —— 然后再重跑 ①。
+> **别用项数判断版本**：项数随版本增加，写在文档里的数字一定会过时（踩过这个坑）。
+> 要看版本，就比对第 5 步 `install-watch.sh` 打印的 `watch.py` / `selftest.py`
+> 的 sha256 前 16 位；对不上就是旧版 —— 重新解压最新的 `deploy.zip`，
+> 在 `deploy/` 里跑一次 `sudo bash install-watch.sh` 换掉文件
+> （**不覆盖你填好的 `config.json`**），然后再重跑 ①。
 
 ```bash
 # ② 斗鱼接口体检：两个接口各打一次，打印原始数据
@@ -551,19 +552,29 @@ systemctl list-timers douyu-watch.timer
 cd /opt/douyu-live-notify
 
 # a) 先离线自检（不联网、不碰 docker）
-python3 watchdog.py --selftest          # 期望：34 项通过，0 项失败（共 34 项）
+python3 watchdog.py --selftest          # 期望：0 项失败、退出码 0（项数随版本变，别拿它判版本）
 
 # b) 配告警通道 —— 唯一需要你花几分钟决定的事
 nano /etc/default/douyu-watchdog
 ```
 
 **必须至少配一条「不经过 NapCat」的通道**，否则「掉线告警」等于没说
-（NapCat 掉线时它自己发不出消息）。推荐二选一：
+（NapCat 掉线时它自己发不出消息）。推微信的话：
 
 | 选哪个 | 怎么填 |
 |---|---|
-| Bark（iOS）/ Server酱（微信） | `ALERT_WEBHOOK=<App里给你的地址>` + `ALERT_WEBHOOK_KIND=bark`（或 `serverchan`） |
-| 飞书 / 钉钉 / 企业微信群机器人 | `ALERT_WEBHOOK=<机器人地址>` + `ALERT_WEBHOOK_KIND=feishu`（或 `dingtalk` / `wecom`） |
+| **微信 · pushplus（推荐）** | `ALERT_WEBHOOK=pushplus\|https://www.pushplus.plus/send?token=<token>` |
+| 微信 · Server酱 | `ALERT_WEBHOOK=serverchan\|https://sctapi.ftqq.com/<SendKey>.send` |
+| 微信双通道（最稳） | 上面两条用 `;` 连起来写 |
+| 飞书 / 钉钉 / 企业微信群机器人 | `ALERT_WEBHOOK=feishu\|<机器人地址>`（或 `dingtalk` / `wecom`） |
+| Bark（iOS） | `ALERT_WEBHOOK=bark\|https://api.day.app/<key>` |
+
+> 推微信为什么优先 pushplus：**免费额度 200 次/天，且微信里能看到完整正文**；
+> Server酱 Turbo 免费只有 **5 条/天**，且免费版**只显示标题、正文看不到**。
+> 一次掉线持续 4 小时就会用掉 4 条，5 条/天是不够的。
+
+写法是 `类型|地址`；不写 `类型|` 就按 `ALERT_WEBHOOK_KIND` 走。
+多条用 `;` 分隔，一条失败不影响其余。
 
 ```bash
 # c) 验证通道真的通（手机/群里应该收到一条）

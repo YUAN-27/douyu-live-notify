@@ -132,16 +132,50 @@ Webhook 支持这几种（`ALERT_WEBHOOK_KIND`）：
 
 | kind | 适用 | 拿 webhook 地址 |
 |---|---|---|
-| `bark` | iOS 手机推送，最省事 | 装 Bark App，App 里直接给你一个 `https://api.day.app/<key>` |
-| `serverchan` | 微信推送（Server酱） | sct.ftqq.com 扫微信登录 → 拿 `https://sctapi.ftqq.com/<key>.send` |
+| `pushplus` | **微信推送，首选** | pushplus.plus 微信扫码登录 → **实名认证** → 复制 token，配成 `pushplus\|https://www.pushplus.plus/send?token=<token>` |
+| `serverchan` | 微信推送（Server酱） | sct.ftqq.com 扫微信登录 → 拿 `https://sctapi.ftqq.com/<SendKey>.send` |
+| `bark` | iOS 手机推送 | 装 Bark App，App 里直接给你一个 `https://api.day.app/<key>` |
+| `wecom` | 企业微信群 | 群 → 右键 → 添加群机器人 → 复制 webhook |
 | `feishu` | 飞书群 | 群 → 设置 → 群机器人 → 添加「自定义机器人」→ 复制 webhook |
 | `dingtalk` | 钉钉群 | 群 → 群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制 webhook |
-| `wecom` | 企业微信群 | 群 → 右键 → 添加群机器人 → 复制 webhook |
 | `telegram` | Telegram | 找 @BotFather 建 bot 拿 token，`https://api.telegram.org/bot<token>/sendMessage`；另填 `ALERT_TG_CHAT_ID` |
 | `generic` | 自建服务 / n8n / IFTTT | 会 POST `{"title","text","level","host","time"}` |
 
 飞书和钉钉的机器人**可能需要先设关键词**（比如「告警」「斗鱼」），
 否则会拒收 —— 我们的标题以「斗鱼提醒·看门狗」开头，关键词填「斗鱼」即可。
+
+### 想推到微信，选哪家
+
+两家都免费、都能进微信，差别很实在（2026-09 核实的官方口径）：
+
+| | pushplus 推送加 | Server酱 Turbo |
+|---|---|---|
+| 免费额度 | 实名后 **200 次/天** | **5 条/天** |
+| 微信里能看到 | 标题 + 完整正文 | **只有标题**，正文看不到 |
+| 要不要实名 | 要（手机号） | 不要 |
+
+**Server酱 免费版 5 条/天 对告警是不够的**：一次掉线持续 4 小时就发掉 4 条
+（同一问题每小时最多提醒一次），再加每天一条「一切正常」正好满额。所以推微信
+优先用 pushplus；**两个都配最稳**，一条挂了另一条照发。
+
+### 可以同时配多条
+
+`ALERT_WEBHOOK` 用 `;` 分开就能写多条，写法是 `类型|地址`：
+
+```bash
+# 微信双通道：pushplus 主力 + Server酱 兜底
+ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=你的token;serverchan|https://sctapi.ftqq.com/SCTxxxxxx.send
+```
+
+token 直接写在地址查询串里即可，看门狗会取出来塞进请求体；
+打印日志和写告警正文时会把查询串隐去，不会把 token 漏出去。
+
+> ⚠️ **Server酱有两个产品，SendKey 不通用、地址也不同**：
+> - Turbo（`SCT` 开头）→ `https://sctapi.ftqq.com/<SendKey>.send`
+> - 自定义域名（`sctp` 开头）→ `https://<uid>.push.ft07.com/send/<SendKey>.send`
+>   （`uid` 是 key 里 `sctp` 与 `t` 之间的那串数字）
+>
+> key 和域名对不上是发不出去的。看门狗在每轮启动检查里会直接指出来该用哪个地址。
 
 配置写在 `/etc/default/douyu-watchdog`（安装脚本会放一份模板，权限 600，**不会覆盖已有文件**）：
 
@@ -172,7 +206,7 @@ sudo systemctl restart douyu-watchdog.timer                    # 改完重启定
 
 ```bash
 cd /opt/douyu-live-notify
-python3 watchdog.py --selftest        # 期望：34 项通过，0 项失败（共 34 项）
+python3 watchdog.py --selftest        # 期望：0 项失败、退出码 0
 python3 watchdog.py --test-alert      # 手机/群里应该真的收到一条
 ```
 

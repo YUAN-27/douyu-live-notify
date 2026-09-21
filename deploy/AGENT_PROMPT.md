@@ -402,13 +402,14 @@ cd /opt/douyu-live-notify
 python3 selftest.py && tail -3 selftest_result.txt
 ```
 
-**期望**：`结果：24 项通过，0 项失败（共 24 项）`
-（关键是 **`0 项失败`**；有失败时这条命令会返回非 0 退出码）
+**期望**：最后一行是 `0 项失败`，命令退出码 0。
+（有失败时这条命令会返回非 0 退出码。）
 
-⚠️ **显示 18 项 = 服务器上的是旧版**（少了「配置校验」那 6 项，
-里面包含 room_id 填错时的可照做提示）。不要继续往后走，
-先解压最新的 `deploy.zip`、重跑阶段 6 的 `install-watch.sh` 把文件换掉
-（它不会覆盖已填好的 `config.json`），再回来重跑 ①。
+⚠️ **别拿项数判断版本** —— 项数会随版本增加，写在文档里的数字一定会过时
+（这一条踩过坑：曾按「24 项」判断新旧，把旧版当成了正常）。
+要确认版本，就看阶段 6 `install-watch.sh` 打印的 `watch.py` / `selftest.py`
+sha256 前 16 位；对不上就是旧版 —— 重新解压最新的 `deploy.zip`、重跑
+`install-watch.sh` 换文件（**不会覆盖已填好的 `config.json`**），再回来重跑 ①。
 
 ```bash
 # ② 斗鱼接口体检
@@ -485,7 +486,9 @@ cd /opt/douyu-live-notify
 python3 watchdog.py --selftest
 ```
 
-**期望**：`结果：34 项通过，0 项失败（共 34 项）`。
+**期望**：最后一行是 `0 项失败`，命令退出码 0。
+（项数会随版本增加，**别拿项数判断是不是旧版** —— 要确认版本就比对 sha256 指纹，
+`install-watch.sh` 会打印。）
 
 ```bash
 # ② 只读体检一遍，确认它看得懂当前环境（不告警、不重启任何东西）
@@ -509,16 +512,35 @@ docker ps --format '{{.Names}}' | grep -x napcat
 
 **把下面这段发给用户，然后停止执行、等用户答复：**
 
-> 看门狗已经装好并通过自检。现在需要你决定告警发到哪里（这一步之后它才会真的叫你）：
+> 看门狗已经装好并通过自检。现在需要你决定告警发到哪里（填完这一步它才会真的叫你）：
 >
-> - **A. 手机推送（推荐，最省事）**：装 Bark（iOS）或 Server酱（微信），
->   把 App 给你的地址发我，我填进配置。
-> - **B. 群机器人**：飞书 / 钉钉 / 企业微信群里加一个自定义机器人，
->   把 webhook 地址发我（顺带确认机器人关键词设了「斗鱼」）。
-> - **C. 邮件**：给我一个邮箱地址（服务器上需要已装好 msmtp 或 sendmail）。
-> - **D. 先只用 NapCat 私聊**：把**你的主 QQ 号**给我（不是机器人小号）。
->   ⚠️ 这条通道依赖 NapCat 在线 —— **NapCat 掉线时它一定发不出来**，
->   所以它覆盖不了最需要叫醒你的那种故障。
+> **想推到微信（最常见的选法）—— 两家都免费，但差别很大：**
+>
+> | | pushplus 推送加 | Server酱 Turbo |
+> |---|---|---|
+> | 免费额度 | 实名后 **200 次/天** | **5 条/天** |
+> | 微信里能看到 | 标题 + 完整正文 | **只有标题**，正文看不到 |
+> | 要不要实名 | 要（手机号） | 不要 |
+>
+> 免费 5 条/天对告警不够用 —— 一次掉线持续 4 小时就会发掉 4 条，再加每天一条
+> 「一切正常」正好满额。**所以推微信建议用 pushplus**，两个都配最稳。
+>
+> - **A. 微信（pushplus，推荐）**：你去 pushplus.plus 微信扫码登录 → **实名认证** →
+>   在「一对一推送」页复制 token 发我。我配成
+>   `pushplus|https://www.pushplus.plus/send?token=<你的token>`。
+>   （实名是平台要求，未实名调用会返回 905，发不出去。）
+> - **B. 微信（Server酱）**：sct.ftqq.com 微信扫码 → 在 SendKey 页复制 SendKey 发我。
+>   注意它有两个产品、SendKey 不通用：`SCT` 开头的用
+>   `https://sctapi.ftqq.com/<SendKey>.send`；`sctp` 开头的要用
+>   `https://<uid>.push.ft07.com/send/<SendKey>.send`。你只要把 key 发我，我来判断。
+> - **C. 群机器人**：飞书 / 钉钉 / 企业微信群里加一个自定义机器人，把 webhook 地址发我
+>   （顺带确认机器人关键词设了「斗鱼」；企业微信群机器人能在企业微信里收到，不需要认证）。
+> - **D. 邮件**：给我一个邮箱地址（服务器上需要已装好 msmtp 或 sendmail）。
+> - **E. 先只用 NapCat 私聊**：把**你的主 QQ 号**发我（不是机器人小号）。
+>   ⚠️ 这条依赖 NapCat 在线 —— **NapCat 掉线时它一定发不出来**，
+>   而「NapCat 掉线」恰恰是最需要叫醒你的那种故障。
+>
+> **以上账号都由你自己注册**（要扫码、要实名，我不便代办），把拿到的 token / 地址发我即可。
 >
 > 另外请确认一件事：`AUTO_RESTART` 默认是开着的，也就是**掉线时看门狗会自动
 > `docker restart napcat`**。它敢开的前提是「重启免扫码自动登录」已经验收通过 ——
@@ -527,12 +549,28 @@ docker ps --format '{{.Names}}' | grep -x napcat
 ### ⑤ 用户答复后：填配置 + 验证通道
 
 ```bash
-nano /etc/default/douyu-watchdog       # 按用户给的地址填 ALERT_WEBHOOK / KIND 等
+nano /etc/default/douyu-watchdog       # 按用户给的地址填 ALERT_WEBHOOK 等
 chmod 600 /etc/default/douyu-watchdog
 python3 watchdog.py --test-alert       # 期望：用户真的收到一条测试告警
 ```
 
-**必须由用户确认收到，这一关才算过。**
+填的时候按类型照抄（**类型前缀写进地址里，`ALERT_WEBHOOK_KIND` 就不用改了**）：
+
+```bash
+# 微信 · pushplus
+ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=用户给的token
+
+# 微信 · Server酱
+ALERT_WEBHOOK=serverchan|https://sctapi.ftqq.com/用户给的SendKey.send
+
+# 微信双通道（推荐：一条挂了另一条照发，用 ; 分隔）
+ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=xxx;serverchan|https://sctapi.ftqq.com/SCTxxx.send
+```
+
+`--test-alert` 会先打印「正在往哪个通道发」（token 已隐去），发送失败时会把
+接口原话带出来 —— pushplus 报 905 就是没实名，报 429 就是额度/限频用完了。
+
+**必须由用户确认收到，这一关才算过。** 若失败，把 `--test-alert` 的完整输出回报，不要自己换地址重试。
 
 ### ⑥ 重启免扫码验收（必做，一次就够）
 

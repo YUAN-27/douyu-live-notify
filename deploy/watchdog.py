@@ -34,8 +34,10 @@
 
 告警发到哪（都不填也能跑，但只有本地日志，半夜不会叫醒你）：
     ALERT_ONEBOT_PRIVATE  你的主 QQ 号。NapCat 在线时用私聊发（发到群会打扰群友）
-    ALERT_WEBHOOK         任意 webhook URL。**这是唯一在 NapCat 掉线时还能到达你的通道**
-    ALERT_WEBHOOK_KIND    generic / serverchan / bark / telegram / dingtalk / feishu / wecom
+    ALERT_WEBHOOK         告警地址，多条用 `;` 分隔，写法 `类型|地址`。
+                          **这是唯一在 NapCat 掉线时还能到达你的通道**
+    ALERT_WEBHOOK_KIND    地址里没写 `类型|` 时的默认类型。
+                          generic / serverchan / pushplus / bark / telegram / dingtalk / feishu / wecom
     ALERT_EMAIL           邮箱地址，走本机 msmtp 或 sendmail
     DAILY_OK_AT           例如 20:00，每天这个点后发一条「一切正常」（沉默 = 出事）
 """
@@ -405,20 +407,56 @@ def scan_log_tail(text, from_line):
 # 告警通道
 # --------------------------------------------------------------------------
 
-def build_payload(kind, title, body, host):
-    """按通道类型拼请求。返回 dict(url_path_suffix=..., json=..., data=..., method=..., content_type=...)"""
+# 各通道**成功**时的标志。写成白名单而不是「code 非 0 即失败」是踩过坑的：
+# bark 和 pushplus 成功时返回 code=200，用「非 0 即失败」会把成功判成失败，
+# 于是日志里一直报通道失败、人却被真的推送到了（或者反过来不敢用）。
+WEBHOOK_OK = {
+    "serverchan": ("code", ("0",)),
+    "pushplus": ("code", ("200",)),
+    "bark": ("code", ("200",)),
+    "dingtalk": ("errcode", ("0",)),
+    "wecom": ("errcode", ("0",)),
+    "feishu": ("code", ("0", "200")),
+    "telegram": (None, ()),        # 靠 ok:true 判定
+    "generic": (None, ()),         # 自建服务五花八门，只认传输层失败
+}
+
+# 告警正文里带的字段名。Server酱 desp 支持 Markdown，pushplus 必须显式指定
+# template=markdown，否则换行会被吞、微信里挤成一整段。
+WEBHOOK_ALIASES = {"wecom_bot": "wecom", "lark": "feishu", "sct": "serverchan", "wx": "wecom"}
+
+
+def build_payload(kind, title, body, host, params=None):
+    """按通道类型拼请求。
+
+    params：从 URL 查询串里解析出来的键值（例如 pushplus 的 token 放 query 里传）。
+    返回 dict(method=..., json=/data=/suffix=..., content_type=...)
+    """
     text = "%s\n%s" % (title, body)
-    kind = (kind or "generic").strip().lower()
+    params = params or {}
+    kind = WEBHOOK_ALIASES.get((kind or "generic").strip().lower(),
+                              (kind or "generic").strip().lower())
     if kind == "serverchan":
+        # title 里不能有换行，否则接口报「包含特殊字符」；正文放 desp，支持 Markdown
+        one_line = " ".join(str(title).split())
         return {"method": "POST", "data": urllib.parse.urlencode(
-            {"title": title[:100], "desp": body}), "content_type": "application/x-www-form-urlencoded"}
+            {"title": one_line[:100], "desp": body}),
+            "content_type": "application/x-www-form-urlencoded"}
+    if kind == "pushplus":
+        # token 走 query 传：ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=xxx
+        token = params.get("token") or params.get("sendkey") or ""
+        return {"method": "POST", "json": {
+            "token": token, "title": " ".join(str(title).split())[:100],
+            "content": body, "template": "markdown"}}
     if kind == "bark":
         return {"method": "POST", "suffix": "/%s/%s" % (
             urllib.parse.quote(title[:80]), urllib.parse.quote(body[:400])),
             "suffix_is_path": True}
-    if kind in ("dingtalk", "wecom", "wecom_bot"):
+    if kind == "wecom":
         return {"method": "POST", "json": {"msgtype": "text", "text": {"content": text}}}
-    if kind in ("feishu", "lark"):
+    if kind in ("dingtalk",):
+        return {"method": "POST", "json": {"msgtype": "text", "text": {"content": text}}}
+    if kind == "feishu":
         return {"method": "POST", "json": {"msg_type": "text", "content": {"text": text}}}
     if kind == "telegram":
         return {"method": "POST", "json": {"text": text}}
@@ -428,14 +466,85 @@ def build_payload(kind, title, body, host):
         "host": host, "time": now_text()}}
 
 
+def webhook_ok(kind, resp):
+    """按通道判定这次发送算不算成功。返回 (是否成功, 说明)。"""
+    kind = WEBHOOK_ALIASES.get((kind or "generic").strip().lower(),
+                              (kind or "generic").strip().lower())
+    if not isinstance(resp, dict):
+        return True, "已发送"
+    field, good = WEBHOOK_OK.get(kind, (None, ()))
+    if field and field in resp:
+        val = str(resp[field])
+        if val in good:
+            return True, "已发送"
+        # 失败时把接口说的话原样带出来，别让人去猜
+        msg = resp.get("message") or resp.get("msg") or resp.get("errmsg") or ""
+        hint = ""
+        if kind == "pushplus" and str(resp.get("code")) == "905":
+            hint = "（pushplus 未实名认证不能发消息，去 verify.pushplus.plus 实名）"
+        elif kind == "serverchan" and str(resp.get("code")) == "429":
+            hint = "（当天免费额度 5 条用完了，或触发限频）"
+        return False, "接口返回失败：%s %s%s" % (
+            json.dumps(resp, ensure_ascii=False)[:200], msg, hint)
+    if resp.get("ok") is False:
+        return False, "接口返回 ok=false：%s" % json.dumps(resp, ensure_ascii=False)[:200]
+    # 有的服务不返回状态字段，那就只看传输层有没有失败
+    for key in ("errcode", "error_code"):
+        if key in resp and str(resp[key]) not in ("0", "None"):
+            return False, "接口返回失败：%s" % json.dumps(resp, ensure_ascii=False)[:200]
+    return True, "已发送"
+
+
+def parse_webhook_specs(raw, default_kind="generic"):
+    """把 ALERT_WEBHOOK 解析成多条通道。
+
+    支持一条，也支持用 `;` 分开多条（systemd 的 EnvironmentFile 一个键只能写一行，
+    所以没法用换行分隔）。每条两种写法：
+        https://...                                  ← 用 ALERT_WEBHOOK_KIND
+        pushplus|https://www.pushplus.plus/send?token=xxx
+    为什么要支持多条：免费通道都有各自的天花板（Server酱 5 条/天、pushplus 200 条/天），
+    告警这种事不该只有一条腿。多配一条就多一份送达概率。
+    """
+    specs = []
+    for chunk in str(raw or "").replace("\n", ";").split(";"):
+        item = chunk.strip()
+        if not item:
+            continue
+        kind, url = default_kind or "generic", item
+        if "|" in item:
+            head, tail = item.split("|", 1)
+            if head.strip() and "://" not in head:
+                kind, url = head.strip(), tail.strip()
+        url = url.strip()
+        parsed = urllib.parse.urlsplit(url)
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+        # 把 token 之类留在 URL 上会写进日志，取出来单独用更干净；
+        # 但 query 本身保留不动，别的服务可能就靠它鉴权。
+        specs.append({"kind": (kind or "generic").lower(), "url": url, "params": params})
+    return specs
+
+
+def redact_url(url):
+    """打印/告警里用的是这个：不能把 ?token=... 原样写进日志和告警正文。"""
+    try:
+        p = urllib.parse.urlsplit(str(url))
+        return urllib.parse.urlunsplit(
+            (p.scheme, p.netloc, p.path, "<已隐去>" if p.query else "", ""))
+    except Exception:
+        return "<URL>"
+
+
 def send_webhook(url, kind, title, body, host, tg_chat_id="", timeout=10, http=http_json):
     """发一条 webhook。返回 (是否成功, 说明)。"""
     if not url:
         return False, "没有配置 webhook"
-    spec = build_payload(kind, title, body, host)
+    kind = WEBHOOK_ALIASES.get((kind or "generic").strip().lower(),
+                              (kind or "generic").strip().lower())
+    params = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+    spec = build_payload(kind, title, body, host, params=params)
     method = spec.get("method", "POST")
 
-    if (kind or "").strip().lower() == "telegram":
+    if kind == "telegram":
         target = url
         payload_json = dict(spec.get("json") or {})
         if tg_chat_id:
@@ -455,14 +564,7 @@ def send_webhook(url, kind, title, body, host, tg_chat_id="", timeout=10, http=h
 
     if not ok:
         return False, "请求失败：%s" % resp
-    if isinstance(resp, dict):
-        # 各家的成功标志不统一，看到明确的失败字段才算失败
-        for key in ("code", "errcode", "error_code", "Status"):
-            if key in resp and str(resp[key]) not in ("0", "None"):
-                return False, "接口返回失败：%s" % json.dumps(resp, ensure_ascii=False)[:200]
-        if resp.get("ok") is False:
-            return False, "接口返回 ok=false：%s" % json.dumps(resp, ensure_ascii=False)[:200]
-    return True, "已发送"
+    return webhook_ok(kind, resp)
 
 
 def send_email(to_addr, subject, body, runner=run_cmd):
@@ -500,8 +602,8 @@ def deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
                   dry_run=False, http=http_json, runner=run_cmd):
     """把一条告警送到所有配好的通道，并**无条件**落一行到本地 alerts.log。
 
-    channels = {"webhook":..., "webhook_kind":..., "tg":..., "email":..., "onebot_private":...,
-                "onebot_base":..., "onebot_token":...}
+    channels = {"webhook":..., "webhook_kind":..., "webhooks":[...], "tg":..., "email":...,
+                "onebot_private":..., "onebot_base":..., "onebot_token":...}
     返回 (已送达的通道列表, 说明列表)
     """
     host = hostname()
@@ -513,11 +615,14 @@ def deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
                                       channels["onebot_private"], text, http=http)
         (sent.append("onebot私聊") if ok else notes.append("onebot私聊：%s" % why))
 
-    if channels.get("webhook"):
-        ok, why = send_webhook(channels["webhook"], channels.get("webhook_kind"),
-                               title, body, host, tg_chat_id=channels.get("tg") or "",
-                               http=http)
-        (sent.append("webhook") if ok else notes.append("webhook：%s" % why))
+    specs = channels.get("webhooks")
+    if specs is None:
+        specs = parse_webhook_specs(channels.get("webhook"), channels.get("webhook_kind") or "generic")
+    for spec in specs:
+        label = "webhook(%s)" % spec["kind"]
+        ok, why = send_webhook(spec["url"], spec["kind"], title, body, host,
+                               tg_chat_id=channels.get("tg") or "", http=http)
+        (sent.append(label) if ok else notes.append("%s：%s" % (label, why)))
 
     if channels.get("email"):
         if dry_run:
@@ -526,7 +631,7 @@ def deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
             ok, why = send_email(channels["email"], "[斗鱼提醒·看门狗] " + title, body, runner=runner)
             (sent.append("邮件") if ok else notes.append("邮件：%s" % why))
 
-    if not sent and not channels.get("webhook") and not channels.get("email"):
+    if not sent and not specs and not channels.get("email"):
         notes.append("⚠️ 没有配置任何独立于 NapCat 的告警通道，"
                      "这条告警只落在了本机日志里 —— 半夜没人会看到")
 
@@ -610,6 +715,8 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
         "onebot_token": token,
         "webhook": cfg_get("ALERT_WEBHOOK"),
         "webhook_kind": cfg_get("ALERT_WEBHOOK_KIND"),
+        "webhooks": parse_webhook_specs(cfg_get("ALERT_WEBHOOK"),
+                                        cfg_get("ALERT_WEBHOOK_KIND") or "generic"),
         "tg": cfg_get("ALERT_TG_CHAT_ID"),
         "email": cfg_get("ALERT_EMAIL"),
     }
@@ -625,8 +732,32 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
             except ValueError:
                 warn_lines.append("⚠️ 环境变量 %s=%r 不是数字，已退回默认值 %s"
                                   % (key, raw, DEFAULTS[key]))
-    if cfg_get("ALERT_WEBHOOK") and not str(cfg_get("ALERT_WEBHOOK")).startswith(("http://", "https://")):
-        warn_lines.append("⚠️ ALERT_WEBHOOK 不是 http(s) 开头的 URL，webhook 通道会失败")
+    # ---- 告警通道的自检：配错了要当场说清怎么改，别等到出事才发现发不出去 ----
+    for spec in channels["webhooks"]:
+        url, kind = spec["url"], spec["kind"]
+        if not url.startswith(("http://", "https://")):
+            warn_lines.append("⚠️ ALERT_WEBHOOK 里这条不是 http(s) 地址，会发送失败：%s"
+                              % redact_url(url)[:80])
+            continue
+        if kind == "pushplus" and not (spec["params"].get("token") or spec["params"].get("sendkey")):
+            warn_lines.append("⚠️ pushplus 通道没带 token，请在地址里写成 "
+                              "pushplus|https://www.pushplus.plus/send?token=你的token")
+        if kind == "serverchan":
+            m = re.search(r"/([A-Za-z0-9]+)\.send", url)
+            key = m.group(1) if m else ""
+            is_sc3 = "push.ft07.com" in url
+            if not key:
+                warn_lines.append("⚠️ serverchan 地址里没找到 SendKey，应形如 "
+                                  "https://sctapi.ftqq.com/SCTxxxxxx.send")
+            elif key.lower().startswith("sctp") and not is_sc3:
+                warn_lines.append("⚠️ 这个 SendKey 是 Server酱³（SC3，sctp 开头）的，"
+                                  "配 sctapi.ftqq.com 发不出去；SC3 的地址形如 "
+                                  "https://<uid>.push.ft07.com/send/<你的key>.send，"
+                                  "其中 uid 是 key 里 sctp 与 t 之间的数字")
+            elif not key.lower().startswith("sctp") and is_sc3:
+                warn_lines.append("⚠️ push.ft07.com 是 Server酱³ 的地址，但 key 不像 SC3 的"
+                                  "（SC3 的 key 以 sctp 开头）。Turbo 版请用 "
+                                  "https://sctapi.ftqq.com/<SendKey>.send")
 
     stale = cfg_int("STALE_SECONDS", getattr(args, "stale", None))
     stuck_rounds = cfg_int("STUCK_ROUNDS", getattr(args, "stuck_rounds", None))
@@ -932,10 +1063,10 @@ def cmd_test_alert(args):
     token = cfg_get("ONEBOT_TOKEN", args.onebot_token) or (ob.get("token") or "")
     container = cfg_get("NAPCAT_CONTAINER", args.container)
     private = cfg_get("ALERT_ONEBOT_PRIVATE")
-    webhook = cfg_get("ALERT_WEBHOOK")
+    specs = parse_webhook_specs(cfg_get("ALERT_WEBHOOK"), cfg_get("ALERT_WEBHOOK_KIND") or "generic")
     email = cfg_get("ALERT_EMAIL")
 
-    if not (webhook or private or email):
+    if not (specs or private or email):
         print("一个告警通道都没配。看门狗照样会跑、会写本地日志，", flush=True)
         print("但深夜出事时没人叫得醒你。建议至少配一个 —— 见 deploy/WATCHDOG.md。", flush=True)
 
@@ -952,12 +1083,14 @@ def cmd_test_alert(args):
                                           "发出时间：" + now_text())
             notes.append("onebot 私聊：%s" % ("成功" if ok else why))
 
-    if webhook:
-        ok, why = send_webhook(webhook, cfg_get("ALERT_WEBHOOK_KIND"),
+    for spec in specs:
+        print("  正在往 %s 通道发：%s" % (spec["kind"], redact_url(spec["url"])), flush=True)
+        ok, why = send_webhook(spec["url"], spec["kind"],
                                "斗鱼提醒·看门狗 测试告警",
-                               "看到这条说明 webhook 通道是通的。发出时间：" + now_text(),
+                               "看到这条说明 %s 通道是通的。发出时间：%s"
+                               % (spec["kind"], now_text()),
                                hostname(), tg_chat_id=cfg_get("ALERT_TG_CHAT_ID"))
-        notes.append("webhook：%s" % ("成功" if ok else why))
+        notes.append("webhook(%s)：%s" % (spec["kind"], "成功" if ok else why))
 
     if email:
         ok, why = send_email(email, "[斗鱼提醒·看门狗] 测试告警",
@@ -1112,6 +1245,79 @@ def selftest():
 
     ok, why = send_webhook("https://example.com/hook", "generic", "t", "b", "h", http=http_400)
     check(not ok and "400" in why, "webhook 返回 400 → 判定失败并带上原因")
+
+    print("-- 微信推送：各家的成功码不一样，不能一刀切 --")
+
+    def resp_http(resp):
+        def _h(url, **kw):
+            return True, resp
+        return _h
+
+    SC = "https://sctapi.ftqq.com/SCTtest.send"
+    PP = "https://www.pushplus.plus/send?token=TK"
+    ok, why = send_webhook(SC, "serverchan", "t", "b", "h", http=resp_http({"code": 0}))
+    check(ok, "serverchan code=0 → 成功")
+    ok, why = send_webhook(SC, "serverchan", "t", "b", "h",
+                           http=resp_http({"code": 40001, "message": "标题包含特殊字符"}))
+    check(not ok and "特殊字符" in why, "serverchan 失败时把官方 message 原样带出来")
+    # 回归测试：bark / pushplus 成功时 code=200，早先统一按「code 非 0 即失败」判定，
+    # 会把这两个通道的成功判成失败 —— 于是人真的收到了消息，日志却在喊通道坏了。
+    ok, why = send_webhook("https://api.day.app/KEY", "bark", "t", "b", "h",
+                           http=resp_http({"code": 200, "message": "success"}))
+    check(ok, "bark code=200 → 成功（回归：以前会被误判为失败）")
+    ok, why = send_webhook(PP, "pushplus", "t", "b", "h",
+                           http=resp_http({"code": 200, "msg": "请求成功"}))
+    check(ok, "pushplus code=200 → 成功（回归：同上）")
+    ok, why = send_webhook(PP, "pushplus", "t", "b", "h",
+                           http=resp_http({"code": 905, "msg": "未实名认证"}))
+    check(not ok and "实名" in why, "pushplus 未实名(905) → 失败并直接告诉你怎么办")
+    DT = "https://oapi.dingtalk.com/robot/send?access_token=x"
+    ok, why = send_webhook(DT, "dingtalk", "t", "b", "h", http=resp_http({"errcode": 0}))
+    check(ok, "钉钉 errcode=0 → 成功")
+    ok, why = send_webhook(DT, "dingtalk", "t", "b", "h",
+                           http=resp_http({"errcode": 310000, "errmsg": "关键词不匹配"}))
+    check(not ok, "钉钉 errcode≠0 → 失败")
+
+    spec = build_payload("pushplus", "标题", "正文", "h", params={"token": "TK"})
+    check(spec["json"].get("token") == "TK" and spec["json"].get("template") == "markdown",
+          "pushplus：token 进 body，且显式写 markdown（不写的话微信里换行会被吞成一整段）")
+    form = urllib.parse.parse_qs(build_payload("serverchan", "第一行\n第二行", "正文", "h")["data"])
+    check("\n" not in form["title"][0],
+          "serverchan：标题里的换行被清掉（接口对含换行的 title 直接报错）")
+
+    print("-- 多通道（免费通道都有额度上限，别只留一条腿） --")
+    one = parse_webhook_specs("https://example.com/hook", "generic")
+    check(len(one) == 1 and one[0]["kind"] == "generic", "单条地址 → 用 ALERT_WEBHOOK_KIND 作为默认类型")
+    two = parse_webhook_specs("pushplus|https://www.pushplus.plus/send?token=TK;"
+                              " serverchan|https://sctapi.ftqq.com/SCTx.send")
+    check([s["kind"] for s in two] == ["pushplus", "serverchan"],
+          "分号分隔多条 → 各按 | 前缀认自己的类型（多余空格不影响）")
+    check(two[0]["params"].get("token") == "TK", "URL 查询串里的 token 被解析出来给 body 用")
+    check(-1 == redact_url("https://www.pushplus.plus/send?token=SECRET").find("SECRET"),
+          "打印 URL 时隐去查询串（token 不能进日志和告警正文）")
+
+    def multi_http(url, **kw):
+        return (True, {"code": 200}) if "pushplus" in url else (True, {"code": 0})
+
+    sent, notes = deliver_alert(
+        "t", "标题", "正文",
+        {"onebot_private": "", "email": "", "webhooks": parse_webhook_specs(
+            "pushplus|https://www.pushplus.plus/send?token=TK;"
+            "serverchan|https://sctapi.ftqq.com/SCTx.send")},
+        napcat_ok=False, state_dir=tmpdir, http=multi_http)
+    check(len(sent) == 2, "两条 webhook 都配了 → 两条都发出去")
+
+    def half_http(url, **kw):
+        return (True, {"code": 905}) if "pushplus" in url else (True, {"code": 0})
+
+    sent, notes = deliver_alert(
+        "t", "标题", "正文",
+        {"onebot_private": "", "email": "", "webhooks": parse_webhook_specs(
+            "pushplus|https://www.pushplus.plus/send?token=TK;"
+            "serverchan|https://sctapi.ftqq.com/SCTx.send")},
+        napcat_ok=False, state_dir=tmpdir, http=half_http)
+    check(len(sent) == 1 and any("pushplus" in n for n in notes),
+          "一条通道失败不影响另一条（只报失败那条）")
 
     print("-- 告警去重 --")
     h1 = alert_key_hash("napcat_down", "同一个问题")

@@ -105,9 +105,9 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python watch.py --tick` | 只检查一轮就退出（给 cron / 青龙 / 云函数用） |
 | `python watch.py --probe <号>` | 体检指定房间，打印两个接口的原始返回 |
 | `python watch.py --test-notify` | 往配置的通道发一条测试消息 |
-| `python selftest.py` | 不联网的逻辑自检（24 项），改完代码先跑它 |
+| `python selftest.py` | 不联网的逻辑自检，改完代码先跑它 |
 | `python deploy/watchdog.py --status` | **一条命令看健康**：watch.py 在跑吗、NapCat 在线吗（只读） |
-| `python deploy/watchdog.py --selftest` | 看门狗离线自检（34 项），不联网、不碰 docker |
+| `python deploy/watchdog.py --selftest` | 看门狗离线自检，不联网、不碰 docker |
 | `python deploy/watchdog.py --test-alert` | 验证告警通道真的通（部署后必做） |
 | `python deploy/watchdog.py --recover-notify` | 补一条丢失的开播通知（主播仍在播时用） |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py`，并归一为 LF） |
@@ -194,6 +194,10 @@ deploy/
 「什么都没发生」而不是「报错」。看门狗每 2 分钟独立体检，把这两类失败变成一条看得见的
 告警，能自愈的自己动手。**它有一条独立于 NapCat 的告警通道，所以掉线时也通知得到你** ——
 这也是它唯一需要你花几分钟配置的地方（`ALERT_WEBHOOK`）。详见 `WATCHDOG.md`。
+
+想推微信：优先用 **pushplus**（免费 200 次/天、微信里能看到完整正文），
+配法 `ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=<token>`；
+Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 —— 两个都用 `;` 连起来写即可。
 
 用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
 （只读，不改任何东西）看环境，然后照 `DEPLOY.md` 一步步走。
