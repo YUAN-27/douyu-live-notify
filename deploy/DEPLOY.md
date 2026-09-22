@@ -484,6 +484,14 @@ sudo bash install-watch.sh
 - 放一份 `/etc/default/douyu-watchdog`（看门狗告警配置模板，权限 600，**已存在不覆盖**）
 - 最后打印后续步骤清单
 
+> **重复执行会动到什么？** 三个 `.py` 会被**换成包里那份**，但替换前先备份成
+> `.bak.<时间戳>`；如果服务器上那份和包里的指纹不同，脚本会**明确打印出来**并给出
+> `diff` / 还原命令 —— 不会静默冲掉你手改的东西。`config.json` 和
+> `/etc/default/douyu-watchdog` 则是**从不覆盖**，所以群号、token、告警密钥、
+> 以及「报平安」的文案和颜文字（`DAILY_OK_TITLE` / `DAILY_OK_BODY` /
+> `DAILY_OK_KAOMOJI`）升级都不会丢。
+> 想这次先不动 `.py`、只看一眼差异：`sudo WD_KEEP_LOCAL=1 bash install-watch.sh`。
+
 **`config.json` 里 `treat_loop_as_live` 保持 `false`**（轮播不算开播，理由见第 1 节）。
 群号和 token 记得换成你自己的，见 0.2。想 @ 特定的人就往 `at_users` 里加 QQ 号，例如 `["你的QQ号"]`。
 

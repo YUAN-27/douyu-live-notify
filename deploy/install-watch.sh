@@ -4,10 +4,18 @@
 # 设计原则：
 #   - 幂等，可以重复执行
 #   - 绝不覆盖已有的 config.json（那里面有你填的群号和 token）
+#   - 绝不覆盖 /etc/default/douyu-watchdog（告警密钥 + 报平安文案的定制都放那儿）
+#   - 覆盖 .py 前先备份，并且**明确告诉你**它被换掉了（不搞静默冲掉）
 #   - 不自动 enable 定时器 —— 等 --test-notify 验证通过再开，免得带着错配置空跑
 #   - 装完打印文件指纹，方便确认服务器上跑的是不是最新版
 #
 # 用法：sudo bash install-watch.sh
+#
+# 如果你在服务器上直接改过 watch.py / selftest.py / watchdog.py，又不想被这次
+# 更新覆盖（比如只想先看看 diff），加一个开关：
+#     sudo WD_KEEP_LOCAL=1 bash install-watch.sh
+# 它会跳过这三个 .py 的更新，其余照装。想改文案/颜文字这类东西，不用改代码，
+# 写进 /etc/default/douyu-watchdog 更省事（本脚本从不碰它）。
 
 set -euo pipefail
 
@@ -72,6 +80,10 @@ fi
 mkdir -p "$APP_DIR"
 
 for f in watch.py selftest.py; do
+  if [[ -f "$APP_DIR/$f" && "${WD_KEEP_LOCAL:-0}" == "1" ]]; then
+    echo "WD_KEEP_LOCAL=1 → 保留已有的 $APP_DIR/$f，不更新"
+    continue
+  fi
   # 已有旧版先备份，别把服务器上改坏的版本无声冲掉
   if [[ -f "$APP_DIR/$f" ]]; then
     cp -a "$APP_DIR/$f" "$APP_DIR/$f.bak.$(date +%Y%m%d%H%M%S)"
@@ -82,11 +94,40 @@ done
 
 # 看门狗在 deploy/ 里，和本脚本同层（不在仓库根的源文件目录），所以从 $UNIT_DIR 取
 if [[ -f "$UNIT_DIR/watchdog.py" ]]; then
-  if [[ -f "$APP_DIR/watchdog.py" ]]; then
-    cp -a "$APP_DIR/watchdog.py" "$APP_DIR/watchdog.py.bak.$(date +%Y%m%d%H%M%S)"
+  if [[ "${WD_KEEP_LOCAL:-0}" == "1" && -f "$APP_DIR/watchdog.py" ]]; then
+    echo "WD_KEEP_LOCAL=1 → 保留已有的 $APP_DIR/watchdog.py，不更新"
+  elif [[ -f "$APP_DIR/watchdog.py" ]]; then
+    # 比指纹：新旧不一致，说明服务器上这份要么被本地改过、要么本来就不是这一版。
+    # 升级照做，但绝不静默 —— 备份 + 明确告知 + 给出还原/合并命令。
+    old_sum=$(sha256sum "$APP_DIR/watchdog.py" 2>/dev/null | cut -c1-16 || true)
+    new_sum=$(sha256sum "$UNIT_DIR/watchdog.py" 2>/dev/null | cut -c1-16 || true)
+    changed=0
+    if [[ -n "$old_sum" && -n "$new_sum" && "$old_sum" != "$new_sum" ]]; then
+      changed=1
+    fi
+    # 只有真的会换内容（或指纹没法算、不敢断言）才备份，免得重复安装攒一堆没用的 .bak
+    if [[ "$changed" == "1" || -z "$old_sum" ]]; then
+      bak="$APP_DIR/watchdog.py.bak.$(date +%Y%m%d%H%M%S)"
+      cp -a "$APP_DIR/watchdog.py" "$bak"
+    fi
+    cp -a "$UNIT_DIR/watchdog.py" "$APP_DIR/watchdog.py"
+    if [[ "$changed" == "1" ]]; then
+      echo "已放入 $APP_DIR/watchdog.py（指纹 ${old_sum} → ${new_sum}）"
+      echo "  ⚠️ 新旧指纹不同：如果你在服务器上改过 watchdog.py，这次更新把它整份换掉了，"
+      echo "     改动不会自动合并。旧版已备份：$bak"
+      echo "     · 想看改了什么：diff -u '$bak' '$APP_DIR/watchdog.py'"
+      echo "     · 想改回去：    cp -a '$bak' '$APP_DIR/watchdog.py'"
+      echo "     · 想跳过更新： 下次跑之前加 WD_KEEP_LOCAL=1"
+      echo "     · 只是想改报平安文案/颜文字？不用改代码，写进"
+      echo "       /etc/default/douyu-watchdog 的 DAILY_OK_TITLE / DAILY_OK_BODY /"
+      echo "       DAILY_OK_KAOMOJI —— 本脚本从不覆盖那个文件，升级也不会丢。"
+    else
+      echo "已放入 $APP_DIR/watchdog.py（指纹 ${new_sum:-未知}，与服务器上原有版本一致）"
+    fi
+  else
+    cp -a "$UNIT_DIR/watchdog.py" "$APP_DIR/watchdog.py"
+    echo "已放入 $APP_DIR/watchdog.py"
   fi
-  cp -a "$UNIT_DIR/watchdog.py" "$APP_DIR/watchdog.py"
-  echo "已放入 $APP_DIR/watchdog.py"
 else
   echo "⚠️ 没找到 watchdog.py（症状：日志里会少一路掉线告警）"
 fi

@@ -89,6 +89,9 @@ DEFAULTS = {
     "ALERT_EMAIL": "",
     "ALERT_REPEAT_SECONDS": "3600",  # 同一个问题最多每小时提醒一次
     "DAILY_OK_AT": "",
+    "DAILY_OK_TITLE": "",          # 空则用内置文案
+    "DAILY_OK_BODY": "",           # 空则用内置文案
+    "DAILY_OK_KAOMOJI": "",        # 颜文字池，按日期轮换；空则不追加
     "HTTP_TIMEOUT": "10",
     "CMD_TIMEOUT": "60",
 }
@@ -914,9 +917,8 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
     if daily_at and ok_now and _at_or_after(daily_at):
         today = datetime.now().strftime("%Y-%m-%d")
         if st.get("last_daily_ok") != today and not dry_run:
-            deliver_alert("daily_ok", "每日体检：一切正常",
-                          "斗鱼提醒整条链路正常。这条消息每天发一次，"
-                          "哪天没收到，说明机器或者看门狗本身出问题了。",
+            ok_title, ok_body = daily_ok_texts(today)
+            deliver_alert("daily_ok", ok_title, ok_body,
                           channels, napcat_ok, state_dir, http=http, runner=runner)
             st["last_daily_ok"] = today
             body_lines.append("已发每日正常通知")
@@ -985,6 +987,34 @@ def _at_or_after(hhmm):
         return False
     now = datetime.now()
     return (now.hour, now.minute) >= (hh, mm)
+
+
+def daily_ok_texts(today=None):
+    """每日「报平安」那条的标题与正文。
+
+    文案可以用环境变量 改（见文件头 DAILY_OK_TITLE / DAILY_OK_BODY /
+    DAILY_OK_KAOMOJI），这样定制写在 /etc/default/douyu-watchdog 里，
+    升级 watchdog.py 不会把它冲掉。
+    颜文字写多个时按日期轮换，同一天总是同一个，不会每轮体检都变。
+    """
+    title = str(cfg_get("DAILY_OK_TITLE")).strip() or "每日体检：一切正常"
+    body = str(cfg_get("DAILY_OK_BODY")).strip() or (
+        "斗鱼提醒整条链路正常。这条消息每天发一次，"
+        "哪天没收到，说明机器或者看门狗本身出问题了。"
+    )
+
+    faces = [x for x in re.split(r"[,，\s]+", str(cfg_get("DAILY_OK_KAOMOJI"))) if x]
+    if faces:
+        if today:
+            try:
+                day = datetime.strptime(today, "%Y-%m-%d")
+            except ValueError:
+                day = datetime.now()
+        else:
+            day = datetime.now()
+        title = "%s %s" % (title, faces[day.timetuple().tm_yday % len(faces)])
+
+    return title, body
 
 
 # --------------------------------------------------------------------------
@@ -1375,6 +1405,40 @@ def selftest():
     check(not dry_calls, "dry-run 下告警真的不投递（别拿它验证通道是否打得通）")
     check(not os.path.exists(os.path.join(tmpdir, "dry-state", "state.json")),
           "dry-run 不写状态文件（不会污染真实的连续失败计数）")
+
+    print("-- 报平安文案（可定制，不写死在代码里）--")
+    dt0, db0 = daily_ok_texts()
+    check(dt0 == "每日体检：一切正常" and "整条链路正常" in db0,
+          "不配任何环境变量时用内置文案")
+
+    kept = {k: os.environ.get(k) for k in
+            ("DAILY_OK_TITLE", "DAILY_OK_BODY", "DAILY_OK_KAOMOJI")}
+    try:
+        os.environ["DAILY_OK_TITLE"] = "报个平安"
+        os.environ["DAILY_OK_BODY"] = "一切照旧。"
+        pool = ["(๑•̀ㅂ•́)و✧", "✧*｡٩(ˊᗜˋ*)و✧*｡"]
+        os.environ["DAILY_OK_KAOMOJI"] = ",".join(pool)
+        dt1, db1 = daily_ok_texts("2026-01-01")
+        dt1_again, _ = daily_ok_texts("2026-01-01")
+        dt2, _ = daily_ok_texts("2026-01-02")
+        check(dt1.startswith("报个平安") and db1 == "一切照旧。",
+              "标题和正文都能用环境变量改")
+        face1 = dt1[len("报个平安 "):]
+        face2 = dt2[len("报个平安 "):]
+        check(dt1.startswith("报个平安 ") and face1 in pool,
+              "颜文字追加在标题后，且只取池子里的一个")
+        check(dt1_again == dt1, "同一天反复调用，颜文字不变（不是随机）")
+        check(face2 in pool and face2 != face1,
+              "配了多个颜文字则按日期轮换（隔天换一个）")
+        os.environ.pop("DAILY_OK_KAOMOJI", None)
+        dt3, _ = daily_ok_texts("2026-01-01")
+        check(dt3 == "报个平安", "颜文字留空就不追加（等于关掉）")
+    finally:
+        for k, v in kept.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     print()

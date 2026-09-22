@@ -195,6 +195,22 @@ sudo systemctl restart douyu-watchdog.timer                    # 改完重启定
 「每日体检：一切正常」。**哪天你没收到，说明机器或者看门狗自己挂了** ——
 这是唯一能覆盖「看门狗自己死掉」的手段。
 
+想让这条更像「报平安」，**不用改代码**，在 `/etc/default/douyu-watchdog` 里加：
+
+```bash
+DAILY_OK_TITLE=报个平安
+DAILY_OK_BODY=整条链路都在。哪天没收到，就是出事了。
+DAILY_OK_KAOMOJI=(๑•̀ㅂ•́)و✧,✧*｡٩(ˊᗜˋ*)و✧*｡   # 多个则按日期轮换，同一天固定同一个
+```
+
+这三项都留空就用内置文案。放在这里的好处是 **`install-watch.sh` 从不覆盖
+`/etc/default/douyu-watchdog`**，所以以后升级看门狗，你的文案不会被冲掉 ——
+比改 `watchdog.py` 稳。
+
+> 反过来，如果你直接改的是 `watchdog.py`：`install-watch.sh` 覆盖前会先备份成
+> `watchdog.py.bak.<时间戳>`，并且**打印指纹变化 + 还原命令**，不会静默冲掉。
+> 想整个跳过更新：`sudo WD_KEEP_LOCAL=1 bash install-watch.sh`。
+
 ---
 
 ## 五、部署后必须验证它真的会叫
