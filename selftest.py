@@ -359,6 +359,32 @@ try:
           "已推送" not in out and "未送出" in out,
           "末行=%r" % (out.strip().splitlines() or [""])[-1][:80])
 
+    # 9i 状态文件被手改坏 / 配置写错 —— 绝不能把整轮检查搞崩
+    # （状态文件是允许手改的，而 tick 崩了 systemd 每轮都失败，监控会安静地死掉）
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    tick_with([FailNotifier()])
+    tick_with([FailNotifier()])
+    st = load_st()
+    st["notify"]["last_attempt_at"] = "2020-01-01T00:00:00"   # 少了时区
+    st["notify"]["first_failed_at"] = "看不出来是什么时间"      # 彻底乱写
+    st["notify"]["attempts"] = "三次"                          # 类型都不对
+    with open(STATE, "w", encoding="utf-8") as fp:
+        json.dump(st, fp, ensure_ascii=False)
+    cfg["notify_retry_backoff_cap_minutes"] = "十分钟"          # 配置也写错
+
+    crashed = None
+    try:
+        tick_with([FakeNotifier()])
+    except Exception as exc:  # noqa: BLE001
+        crashed = exc
+    check("状态文件乱写 / 配置写错，tick 也不会崩", crashed is None,
+          "异常=%r" % crashed)
+    check("乱写的 attempts 当 0 处理，仍会去重试（不是躺平）",
+          crashed is None and load_st().get("notify") is None,
+          "notify=%s" % load_st().get("notify"))
+    cfg["notify_retry_backoff_cap_minutes"] = 10
+
 finally:
     if backup is not None:
         with open(STATE, "w", encoding="utf-8") as fp:

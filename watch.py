@@ -586,35 +586,69 @@ def _kind_cn(kind):
 
 
 def _parse_iso(value):
+    """解析状态文件里的时间戳。
+
+    容忍脏数据（无时区 / 乱写 / 类型不对），**绝不抛异常** ——
+    状态文件是允许用户手改的（本项目文档就建议过 `--recover-notify` 那种做法），
+    一个畸形时间戳不该把整轮检查搞崩：那样 systemd 每轮都失败，
+    监控会**安静地**死掉，比当场报个错严重得多。
+    """
+    if not isinstance(value, str):
+        return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CST)      # 没有时区的按北京时间算
+    return dt
+
+
+def _age_seconds(value, now):
+    """距今多少秒。值不可解析就返回 None —— 调用方据此保守处理。"""
+    dt = _parse_iso(value)
+    if dt is None:
+        return None
+    try:
+        return (now - dt).total_seconds()
     except (TypeError, ValueError):
         return None
 
 
+def _num(value, default):
+    """配置/状态里的数字容错：写错了就用默认值，别让一个笔误搞崩整轮检查。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _attempts(pend):
+    return int(_num(pend.get("attempts"), 0) or 0)
+
+
 def _retry_due(pend, cfg, now):
     """现在该不该重试。返回 (bool, 原因)，原因只用于日志。"""
-    attempts = int(pend.get("attempts") or 0)
+    attempts = _attempts(pend)
     if attempts <= 0:
         return True, ""
-    last = _parse_iso(pend.get("last_attempt_at"))
-    cap = max(1, int(cfg.get("notify_retry_backoff_cap_minutes") or 10))
-    wait = min(2 ** (attempts - 1), cap) * 60
-    if last is not None:
-        left = wait - (now - last).total_seconds()
-        if left > 0:
-            return False, "退避中，还要等 %d 秒" % int(left)
+    age = _age_seconds(pend.get("last_attempt_at"), now)
+    cap = max(1, int(_num(cfg.get("notify_retry_backoff_cap_minutes"), 10)))
+    # 指数前先夹住，免得状态文件里一个天文数字把 2**n 算成大整数
+    wait = min(2 ** min(attempts - 1, 20), cap) * 60
+    if age is not None and age < wait:
+        return False, "退避中，还要等 %d 秒" % int(wait - age)
     return True, ""
 
 
 def _retry_give_up(pend, cfg, now):
     """到顶了没有？到顶就返回原因字符串，否则返回空串。"""
-    attempts = int(pend.get("attempts") or 0)
-    if attempts >= max(1, int(cfg.get("notify_retry_max") or 30)):
+    attempts = _attempts(pend)
+    if attempts >= max(1, int(_num(cfg.get("notify_retry_max"), 30))):
         return "已重试 %d 次" % attempts
-    hours = float(cfg.get("notify_retry_max_age_hours") or 6)
-    first = _parse_iso(pend.get("first_failed_at"))
-    if first is not None and (now - first).total_seconds() > hours * 3600:
+    hours = _num(cfg.get("notify_retry_max_age_hours"), 6)
+    age = _age_seconds(pend.get("first_failed_at"), now)
+    if age is not None and age > hours * 3600:
         return "距首次失败已超过 %g 小时" % hours
     return ""
 
@@ -791,14 +825,14 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
                 notify_info = {"kind": pend.get("kind"), "stage": "giveup",
                                "delivered": False,
                                "failed": pend.get("failed_channels") or [],
-                               "attempts": int(pend.get("attempts") or 0)}
+                               "attempts": _attempts(pend)}
             elif not due:
                 if verbose:
                     print("[warn] 「%s」通知待补发：%s"
                           % (_kind_cn(pend.get("kind")), why), flush=True)
             else:
                 delivered, failed = notify_all(notifiers, pend.get("text") or "")
-                pend["attempts"] = int(pend.get("attempts") or 0) + 1
+                pend["attempts"] = _attempts(pend) + 1
                 pend["last_attempt_at"] = now.isoformat()
                 pend["failed_channels"] = failed
                 if delivered:
