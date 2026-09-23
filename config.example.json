@@ -12,7 +12,9 @@
   "treat_loop_as_live": false,
   "log_heartbeat": true,
 
-  "_channels_comment": "可选：console（只打日志）/ onebot（NapCat 等）/ qq_official（官方机器人）。可以多选。",
+  "_retry_comment": "通知发送失败会自动补发（默认开），正文记进 state_*.json 的 notify 字段。可调：retry_failed_notify / notify_retry_max / notify_retry_max_age_hours / notify_retry_backoff_cap_minutes，说明见 watch.py 文件头「关于「发送失败」」。",
+
+  "_channels_comment": "可选：console（只打日志）/ onebot（NapCat 等）/ qq_official（官方机器人）。可以多选。注意 console 只算本地留痕，不算『送达』。",
   "channels": ["console"],
 
   "onebot": {

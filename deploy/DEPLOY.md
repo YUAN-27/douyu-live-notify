@@ -710,7 +710,7 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | **`[error]` 里带 `retcode 200` + `sendMsg` / `1006514 网络连接异常`** | **登录态半死**：QQ 侧把登录态判失效了，但 `get_login_info` **仍然返回 ok**（在线探测抓不到这种状态），于是消息发不出去 | **`docker restart` 修不好这个** —— 重启只会让缓存 token 被拒、退回报码。只能重新扫码（见第 5 步）。先跑 `sudo bash why-no-notify.sh` 确认是这一种 |
 | 日志里反复出现「账号状态变更为离线」 | 同上，腾讯侧判失效 | 同上，必须重登 |
 | **开播了但群里没收到，不知道从哪查起** | — | `cd /opt/douyu-live-notify && sudo bash why-no-notify.sh`。只读、不发消息，一次把定时器 / 心跳 / 状态切换 / OneBot 通道全打出来，末尾给结论和对应修法 |
-| **机器人掉线，通知静默丢了** | 发送失败只打印一行 `[error]`，而状态**照样落盘** → **那条开播通知不会自动补发** | 看门狗会告警；补发：`python3 watchdog.py --recover-notify`（确认主播仍在播，先备份状态文件） |
+| **机器人掉线，通知静默丢了** | NapCat 掉线时发送失败 —— 但**正文会记进状态文件并自动补发**（1、2、4、8… 分钟退避，默认最多 30 次 / 6 小时） | 一般不用管：日志里看 `[ok] ... 补发成功`。只有出现 `放弃自动重试`（重试到顶）才需要手动：`python3 watchdog.py --recover-notify` |
 | **机器人莫名掉线，重启又好了** | 被内核 OOM killer 杀掉。它**不写应用日志**，所以看起来毫无征兆 | `bash mem-report.sh` 看第 6 节；`sudo bash add-swap.sh` |
 | **同机的网页突然挂了，自身日志无异常** | 很可能也是 OOM killer 杀的 —— 全局 OOM **按 RSS 从大到小挑牺牲品**，网页占得多就先死 | `journalctl -k \| grep -i oom`；给 NapCat 加内存上限（第 4 步已默认加）；或改走零内存推送通道（0.3 路线 B） |
 | `docker inspect napcat --format '{{.HostConfig.Memory}}'` 返回 0 | compose 的 `deploy.resources.limits` 没被识别 | 换成旧写法 `mem_limit: 900m`，再 `docker compose up -d` |
@@ -734,8 +734,22 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
   | **登录态半死**（2026-09-23 实盘踩到）：接口仍返回 `ok`、`online: true`，但发消息报 `retcode 200` + `sendMsg` / `1006514 网络连接异常` | **不能自愈，`docker restart` 也修不好**（重启只会让缓存 token 被拒、退回报码）。看门狗是靠「日志里有 `[error]` 发送失败」发现的，**不是**靠在线探测（探测这时是绿的），告警后仍需人重新扫码 |
 
   没装看门狗时，掉线你收不到任何提示。装了之后，另一种静默失败也一并解决：
-  **通知发送失败**只打印一行 `[error]`、状态却已落盘 —— 看门狗会立刻告警，
-  但那条消息**仍然需要你手动补**（`python3 watchdog.py --recover-notify`，主播仍在播时有效）。
+  **通知发送失败**只打印一行 `[error]` —— 看门狗会立刻告警，
+  而 `watch.py` 自己会把那条正文记进状态文件、**在后续轮次自动补发**
+  （重试到顶才会打出「放弃自动重试」，那时才需要手动 `python3 watchdog.py --recover-notify`）。
+
+  让这件事成立的三个设计点，改动 `watch.py` 时别弄丢：
+  * **失败的通知必须落盘**（`state_<room_id>.json` 的 `notify` 字段），否则下一轮
+    因为「无状态切换」永远不会再发 —— 这正是 2026-09-23 丢通知的原因。
+  * **console 通道的成功不算「送达」**（`counts_as_delivery = False`）。
+    否则 `channels: ["onebot", "console"]` 里 console 永远成功，
+    onebot 发不出去也会被判成「已推送」，重试永不触发。
+  * **`--tick` 的回执要如实**：以前不管发没发出去都写「已推送」。日志撒谎比没日志更坏。
+
+- **自动补发的代价：可能多出一条重复消息**。OneBot 的 `send_group_msg` 没有幂等键，
+  所以「消息其实发出去了、只是响应超时或丢包」时，重试会再发一条。
+  这个取舍是刻意的 —— **最多多一条，总好过彻底没有**；想避免就 `retry_failed_notify: false`
+  （代价是退回「发失败就永久丢」的老行为）。
 
   辨别「半死」与「假死」最快的办法：`sudo bash why-no-notify.sh`，它会比对日志里的
   失败签名、并告诉你**现在正坏着**还是**几小时前坏过、已经好了**（只按日志有无 `[error]`

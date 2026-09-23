@@ -109,7 +109,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/watchdog.py --status` | **一条命令看健康**：watch.py 在跑吗、NapCat 在线吗（只读） |
 | `python deploy/watchdog.py --selftest` | 看门狗离线自检，不联网、不碰 docker |
 | `python deploy/watchdog.py --test-alert` | 验证告警通道真的通（部署后必做） |
-| `python deploy/watchdog.py --recover-notify` | 补一条丢失的开播通知（主播仍在播时用） |
+| `python deploy/watchdog.py --recover-notify` | 手动补一条丢失的开播通知（**兜底**：发送失败通常会自动补发，只有重试到顶才需要它） |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py`，并归一为 LF） |
 | `python qr_make.py --url "<日志里的二维码链接>"` | 把 NapCat 登录二维码在本地变成可扫的图片（见下方「扫码登录」） |
 
@@ -258,7 +258,7 @@ python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"    # 生成 qr.png
 | `502 Bad Gateway` 打 `127.0.0.1` | 环境里有全局代理，把回环地址也劫持了 | 脚本已内置绕过，若仍出现检查 `HTTP_PROXY` |
 | 群里收不到消息 | 机器人不在群里 / 被禁言 / 定时器没开 | `get_group_list` 核对群号 |
 | 机器人掉线了但我不知道 | `watch.py` 不做健康检查 | 装看门狗，然后 `python deploy/watchdog.py --status` 一眼看健康；掉线会自动告警 |
-| 丢了某条开播通知 | 发送失败只打一行 `[error]`，状态已落盘 → 不重试 | `python deploy/watchdog.py --recover-notify`（主播仍在播时有效） |
+| 丢了某条开播通知 | 发送失败时正文会记进状态文件，**后续轮次自动补发**（1、2、4、8… 分钟退避，默认最多 30 次 / 6 小时） | 一般不用管；看到 `放弃自动重试` 才手动 `python deploy/watchdog.py --recover-notify`（主播仍在播时有效） |
 
 ### 关于 `at_all`（@全体成员）
 

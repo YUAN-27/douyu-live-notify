@@ -12,6 +12,8 @@
   "treat_loop_as_live": false,
   "log_heartbeat": true,
 
+  "_comment_retry": "发送失败会自动补发（默认开）：正文记进 state_*.json 的 notify 字段，按 1/2/4/8… 分钟退避重试。可调 retry_failed_notify / notify_retry_max / notify_retry_max_age_hours / notify_retry_backoff_cap_minutes。注意 console 通道不算「送达」。",
+
   "channels": ["onebot"],
 
   "onebot": {

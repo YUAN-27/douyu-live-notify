@@ -48,6 +48,25 @@
      能打印出主播名、房间标题就说明对了；返回报错页说明这是靓号或房间不存在
 
 配置里请填真实 room_id。`--probe` 只做体检，不读配置。
+
+关于「发送失败」（重要）
+------------------------
+通知发失败**不等于没事**。以前的做法是：失败只打一行 `[error]`，而状态照样落盘，
+于是下一轮「无状态切换」→ 永远不会再发 → **那条通知永久丢失**。
+2026-09-23 实盘就是这么丢掉一条开播提醒的（NapCat 的 QQ 登录态半死，
+接口还答着 `ok`，消息却发不出去）。
+
+现在：失败的正文会连同重试次数写进状态文件的 `notify` 字段，之后每轮自动补发，
+间隔按 1、2、4、8… 分钟退避，直到送出去或到达上限
+（`notify_retry_max` 次 / `notify_retry_max_age_hours` 小时）。
+补发成功会打 `[ok]`，一直失败会打 `[warn]`，到顶放弃会打 `[error]`。
+
+两个容易搞错的地方：
+  * **console 通道的成功不算「送达」**（`counts_as_delivery = False`）。
+    否则 `channels: ["onebot", "console"]` 里 console 永远成功，
+    onebot 发不出去也会被判成「已推送」，重试永不触发。
+  * `--tick` 的 `判定：...` 那行现在**如实**区分「已推送 / 未送出待补发」。
+    以前不管有没有发出去都写「已推送」，日志撒谎比没日志更坏。
 """
 
 from __future__ import annotations
@@ -97,6 +116,17 @@ DEFAULT_CFG = {
     "log_heartbeat": True,
     # 通知通道：console / onebot / qq_official，可多选
     "channels": ["console"],
+    # ---- 发送失败要不要重试（重要，默认开）----
+    # 关掉的话，那条通知就**永久丢失**：发送失败只打一行 [error]，而状态照样落盘，
+    # 下一轮因为「无状态切换」不会再发第二次。2026-09-23 实盘踩到过这个坑。
+    "retry_failed_notify": True,
+    # 最多尝试几次（含首次）。到顶就放弃，并留一条 [error] 交给人处理
+    "notify_retry_max": 30,
+    # 超过这么多小时还没送出去也放弃，防止无限重试
+    "notify_retry_max_age_hours": 6,
+    # 重试间隔按 1、2、4、8… 分钟翻倍退避，上限这么多分钟。
+    # 退避是为了 NapCat 挂掉时别每分钟都去撞一次、把日志刷满
+    "notify_retry_backoff_cap_minutes": 10,
     "onebot": {
         "base": "http://127.0.0.1:3000",
         "token": "",
@@ -237,6 +267,12 @@ def read_state(room_id, methods=(probe_betard, probe_legacy)):
 
 class ConsoleNotifier:
     name = "console"
+
+    # 控制台只算「本地留痕」，**不算送达**。
+    # 否则一个永远成功的 console 会把 onebot 的失败掩盖掉：
+    # channels: ["onebot", "console"] 的配置下，onebot 发不出去也会被判成
+    # 「已推送」，重试永远不会触发 —— 实测踩过这个设计陷阱。
+    counts_as_delivery = False
 
     def send(self, text):
         stamp = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
@@ -485,7 +521,8 @@ def load_state(path):
                 return json.load(fp)
         except (OSError, json.JSONDecodeError):
             pass
-    return {"is_live": None, "pending": None, "pending_n": 0, "last_change_at": None}
+    return {"is_live": None, "pending": None, "pending_n": 0,
+            "last_change_at": None, "notify": None}
 
 
 def save_state(path, state):
@@ -517,11 +554,69 @@ def format_message(cur, cfg, action):
 
 
 def notify_all(notifiers, text):
+    """逐个通道发送，返回 (是否已送达真实通道, 失败的通道名列表)。
+
+    「送达」只认 counts_as_delivery 的通道（见 ConsoleNotifier 上的说明）：
+    console 的成功不算数，否则它的「永远成功」会把 onebot 的失败吞掉，
+    重试逻辑就形同虚设。一个只配了 console 的配置不存在「送达」概念，
+    直接算成功（没什么可重试的）。
+    """
+    delivered = False
+    has_delivery_channel = False
+    failed = []
     for notifier in notifiers:
+        if not getattr(notifier, "counts_as_delivery", True):
+            try:
+                notifier.send(text)
+            except Exception as exc:  # noqa: BLE001
+                print("[error] %s 通知失败：%s" % (notifier.name, exc), flush=True)
+            continue
+        has_delivery_channel = True
         try:
             notifier.send(text)
+            delivered = True
         except Exception as exc:  # noqa: BLE001
+            failed.append(notifier.name)
             print("[error] %s 通知失败：%s" % (notifier.name, exc), flush=True)
+    return (delivered or not has_delivery_channel), failed
+
+
+def _kind_cn(kind):
+    return "开播" if kind == "up" else "下播"
+
+
+def _parse_iso(value):
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_due(pend, cfg, now):
+    """现在该不该重试。返回 (bool, 原因)，原因只用于日志。"""
+    attempts = int(pend.get("attempts") or 0)
+    if attempts <= 0:
+        return True, ""
+    last = _parse_iso(pend.get("last_attempt_at"))
+    cap = max(1, int(cfg.get("notify_retry_backoff_cap_minutes") or 10))
+    wait = min(2 ** (attempts - 1), cap) * 60
+    if last is not None:
+        left = wait - (now - last).total_seconds()
+        if left > 0:
+            return False, "退避中，还要等 %d 秒" % int(left)
+    return True, ""
+
+
+def _retry_give_up(pend, cfg, now):
+    """到顶了没有？到顶就返回原因字符串，否则返回空串。"""
+    attempts = int(pend.get("attempts") or 0)
+    if attempts >= max(1, int(cfg.get("notify_retry_max") or 30)):
+        return "已重试 %d 次" % attempts
+    hours = float(cfg.get("notify_retry_max_age_hours") or 6)
+    first = _parse_iso(pend.get("first_failed_at"))
+    if first is not None and (now - first).total_seconds() > hours * 3600:
+        return "距首次失败已超过 %g 小时" % hours
+    return ""
 
 
 def fill_online(room_id, cur):
@@ -563,11 +658,18 @@ def cmd_once(room_id, cfg):
 
 
 def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
-    """执行一轮检查：读状态 → 判定 → 必要时通知 → 写回状态文件。
+    """执行一轮检查：读状态 → 判定 → 必要时通知 → 补发漏掉的 → 写回状态文件。
 
     刻意做成"单次执行 + 落盘"的形态，这样它既能被常驻循环调用，
     也能被 cron / 青龙面板 / 云函数每分钟拉起来跑 —— 后者就不需要常驻进程。
-    返回 dict，含 is_live / action / cur / state。
+
+    发送失败不会丢通知：失败的正文连同重试次数写进状态文件的 `notify` 字段，
+    之后每一轮都会尝试补发（间隔 1、2、4、8… 分钟退避），
+    直到送出、或到达 notify_retry_max / notify_retry_max_age_hours 上限。
+
+    返回 dict，含 is_live / action / cur / state，
+    外加 notify（本轮实际做过的通知动作，可能为 None）
+    和 pending（本轮结束后仍未送出的那条，可能为 None）。
     """
     room_id = str(cfg["room_id"])
     path = state_path(cfg)
@@ -604,11 +706,17 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
                  cur.get("loop_flag") if cur.get("loop_flag") is not None else "-",
                  cur.get("source")), flush=True)
 
+    # 本轮开始时就挂着的待补发记录。只补发「上几轮遗留的」——
+    # 免得同一轮里刚发失败就立刻再撞一次（那等于把同一个动作做两遍）。
+    stale = state.get("notify")
+    now = datetime.now(CST)
+    notify_info = None
+
     action = None
     if state["is_live"] is None:
         # 首次运行只记录当前状态，不发通知，避免程序一启动就误报一条
         state["is_live"] = is_live
-        state["last_change_at"] = datetime.now(CST).isoformat()
+        state["last_change_at"] = now.isoformat()
         if verbose:
             print("[init] 首次运行，记录当前状态为 %s，不发送通知"
                   % ("直播中" if is_live else "未开播"), flush=True)
@@ -621,12 +729,35 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
             state["pending_n"] = 1
         if state["pending_n"] >= confirm:
             action = "up" if is_live else "end"
-            if action == "up" or cfg.get("notify_on_end"):
-                notify_all(notifiers, format_message(fill_online(room_id, cur), cfg, action))
+            # 状态先落盘、再发送：发送失败也不会把「状态」这件事弄丢
             state["is_live"] = is_live
             state["pending"] = None
             state["pending_n"] = 0
-            state["last_change_at"] = datetime.now(CST).isoformat()
+            state["last_change_at"] = now.isoformat()
+            if action == "up" or cfg.get("notify_on_end"):
+                text = format_message(fill_online(room_id, cur), cfg, action)
+                delivered, failed = notify_all(notifiers, text)
+                if delivered:
+                    state["notify"] = None
+                else:
+                    # 没送出去 → 记下来，下一轮起自动补发（这才是根治）
+                    state["notify"] = {
+                        "kind": action,
+                        "text": text,
+                        "attempts": 1,
+                        "failed_channels": failed,
+                        "first_failed_at": now.isoformat(),
+                        "last_attempt_at": now.isoformat(),
+                    }
+                    if not cfg.get("retry_failed_notify", True):
+                        state["notify"]["gave_up_at"] = now.isoformat()
+                        state["notify"]["gave_up_why"] = "配置里关掉了重试"
+                notify_info = {"kind": action, "stage": "first",
+                               "delivered": delivered, "failed": failed, "attempts": 1}
+            else:
+                # 这次不需要通知（例如 notify_on_end=false 的下播）：
+                # 旧记录一并清掉，别让它继续挂着
+                state["notify"] = None
             if verbose:
                 print("[change] 状态切换 -> %s" % ("直播中" if is_live else "未开播"), flush=True)
     else:
@@ -634,8 +765,58 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
             state["pending"] = None
             state["pending_n"] = 0
 
+    # ---- 补发上一轮（或更早）没送出去的通知 ----
+    pend = state.get("notify") if state.get("notify") is stale else None
+    if pend is not None:
+        want_kind = "up" if state["is_live"] else "end"
+        if pend.get("kind") != want_kind:
+            # 状态已经翻面、或有人手改了状态文件 —— 这条旧通知作废。
+            # （--recover-notify 正是靠这个把卡住的记录清掉的）
+            if verbose:
+                print("[warn] 状态已变为「%s」，放弃补发旧的「%s」通知"
+                      % ("直播中" if state["is_live"] else "未开播",
+                         _kind_cn(pend.get("kind"))), flush=True)
+            state["notify"] = None
+        elif pend.get("gave_up_at") or not cfg.get("retry_failed_notify", True):
+            pass
+        else:
+            due, why = _retry_due(pend, cfg, now)
+            give_up_why = _retry_give_up(pend, cfg, now)
+            if give_up_why:
+                pend["gave_up_at"] = now.isoformat()
+                pend["gave_up_why"] = give_up_why
+                print("[error] 「%s」通知%s仍未送出，放弃自动重试。"
+                      "通道恢复后手动补一次：python3 watchdog.py --recover-notify"
+                      % (_kind_cn(pend.get("kind")), give_up_why), flush=True)
+                notify_info = {"kind": pend.get("kind"), "stage": "giveup",
+                               "delivered": False,
+                               "failed": pend.get("failed_channels") or [],
+                               "attempts": int(pend.get("attempts") or 0)}
+            elif not due:
+                if verbose:
+                    print("[warn] 「%s」通知待补发：%s"
+                          % (_kind_cn(pend.get("kind")), why), flush=True)
+            else:
+                delivered, failed = notify_all(notifiers, pend.get("text") or "")
+                pend["attempts"] = int(pend.get("attempts") or 0) + 1
+                pend["last_attempt_at"] = now.isoformat()
+                pend["failed_channels"] = failed
+                if delivered:
+                    if verbose:
+                        print("[ok] 「%s」通知补发成功（第 %d 次尝试）"
+                              % (_kind_cn(pend.get("kind")), pend["attempts"]), flush=True)
+                    state["notify"] = None
+                else:
+                    if verbose:
+                        print("[warn] 「%s」通知第 %d 次补发仍失败，稍后继续重试"
+                              % (_kind_cn(pend.get("kind")), pend["attempts"]), flush=True)
+                notify_info = {"kind": pend.get("kind"), "stage": "retry",
+                               "delivered": delivered, "failed": failed,
+                               "attempts": pend["attempts"]}
+
     save_state(path, state)
-    return {"is_live": is_live, "action": action, "cur": cur, "state": state}
+    return {"is_live": is_live, "action": action, "cur": cur, "state": state,
+            "notify": notify_info, "pending": state.get("notify")}
 
 
 def cmd_tick(cfg):
@@ -645,8 +826,29 @@ def cmd_tick(cfg):
     这行心跳就是事后复验（比如确认 videoLoop 到底什么时候变 0）的唯一依据。
     """
     result = tick(cfg, heartbeat=bool(cfg.get("log_heartbeat")))
-    if result["action"]:
-        tail = "，已推送「%s」通知" % ("开播" if result["action"] == "up" else "下播")
+    info = result.get("notify")
+    pending = result.get("pending")
+    # 这一步以前会说「已推送」——哪怕发送其实失败了。日志撒谎比没日志更坏：
+    # 你会以为链路是通的。现在如实分开说。
+    if info:
+        kind = _kind_cn(info["kind"])
+        if info["stage"] == "first":
+            if info["delivered"]:
+                tail = "，已推送「%s」通知" % kind
+            else:
+                tail = ("，「%s」通知未送出（%s），已记下并在后续轮次自动补发"
+                        % (kind, "、".join(info["failed"]) or "全部通道"))
+        elif info["stage"] == "retry":
+            if info["delivered"]:
+                tail = "，补发「%s」通知成功（第 %d 次尝试）" % (kind, info["attempts"])
+            else:
+                tail = "，补发「%s」通知仍失败（第 %d 次），稍后继续" % (kind, info["attempts"])
+        else:  # giveup
+            tail = "，「%s」通知重试到顶仍未送出，已放弃自动重试（需人工处理）" % kind
+    elif result["action"]:
+        tail = "，状态切换为「%s」，按配置不发通知" % _kind_cn(result["action"])
+    elif pending:
+        tail = "，无状态切换（有 1 条「%s」通知待补发）" % _kind_cn(pending.get("kind"))
     else:
         tail = "，无状态切换"
     print("判定：%s%s" % ("直播中" if result["is_live"] else "未开播", tail), flush=True)

@@ -8,7 +8,9 @@
 
 退出码：全部通过为 0，有失败为 1（方便接 CI）。
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -204,6 +206,158 @@ try:
     check("onebot 的 target_id 正常时放行", w.validate_cfg(
         {"room_id": TEST_ROOM_ID, "channels": ["onebot"],
          "onebot": {"target_id": "123456", "token": "t"}}, "x"))
+
+    log("")
+    log("=" * 68)
+    log("场景 9：发送失败要能自动补发（2026-09-23 丢通知的根治项）")
+    log("=" * 68)
+
+    class FailNotifier:
+        """真实通道，但每次都失败。"""
+        name = "onebot"
+        counts_as_delivery = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def send(self, text):
+            self.calls += 1
+            raise RuntimeError("OneBot 返回异常：NTEvent sendMsg failed")
+
+    class ConsoleLikeNotifier:
+        """和 ConsoleNotifier 一样：永远成功，但不算送达。"""
+        name = "console"
+        counts_as_delivery = False
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+
+    def tick_with(ns):
+        """跑一轮，并把 stdout 掐掉。
+
+        失败路径本来就会打 [error]（那正是本场景要测的东西），
+        但让它们出现在自检输出里，会让人误以为是自检自己报错了。
+        要看的结论用 check() 断言，不靠肉眼读日志。
+        """
+        with contextlib.redirect_stdout(io.StringIO()):
+            return w.tick(cfg, notifiers=ns, verbose=False)
+
+    def fresh_state(is_live):
+        if os.path.exists(STATE):
+            os.remove(STATE)
+        with open(STATE, "w", encoding="utf-8") as fp:
+            json.dump({"is_live": is_live, "pending": None, "pending_n": 0,
+                       "last_change_at": None, "notify": None}, fp)
+
+    def load_st():
+        with open(STATE, encoding="utf-8") as fp:
+            return json.load(fp)
+
+    def age_pending(seconds):
+        """把 last_attempt_at 往前挪，用来绕过退避（否则刚失败不会立刻重试）。"""
+        st = load_st()
+        st["notify"]["last_attempt_at"] = (
+            w.datetime.now(w.CST) - w.timedelta(seconds=seconds)).isoformat()
+        with open(STATE, "w", encoding="utf-8") as fp:
+            json.dump(st, fp)
+
+    cfg["notify_retry_max"] = 30
+    cfg["notify_retry_backoff_cap_minutes"] = 10
+
+    # 9a 首次发送失败 —— 不再当作「已送达」，而是落盘记下待补发
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0, online=2830556)
+    bad = FailNotifier()
+    tick_with([bad])
+    tick_with([bad])
+    st = load_st()
+    check("发送失败不再被判成「已送达」", st.get("notify") is not None,
+          "notify=%s" % (st.get("notify") or {}).get("kind"))
+    check("失败记录里存了正文，补发不用重新拼",
+          "【斗鱼开播】" in ((st.get("notify") or {}).get("text") or ""))
+    check("状态照样落盘（不然永远不再判定）", st["is_live"] is True)
+
+    # 9b 退避期内不该重试
+    before = bad.calls
+    tick_with([bad])
+    st = load_st()
+    check("退避期内不重试（别每分钟都去撞）",
+          bad.calls == before and int(st["notify"]["attempts"]) == 1,
+          "calls=%d attempts=%s" % (bad.calls, st["notify"]["attempts"]))
+
+    # 9c 过了退避期 —— 自动补发，成功后清掉记录
+    age_pending(120)
+    good = FakeNotifier()
+    r = tick_with([good])
+    st = load_st()
+    check("过了退避期会自动补发", len(good.sent) == 1, "收到 %d 条" % len(good.sent))
+    check("补发成功后清掉待补发记录", st.get("notify") is None)
+    check("返回值如实说明这是「补发」",
+          (r.get("notify") or {}).get("stage") == "retry"
+          and (r.get("notify") or {}).get("delivered") is True,
+          "notify=%s" % r.get("notify"))
+
+    # 9d console 的成功不能掩盖 onebot 的失败（这是最容易写错的地方）
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    bad2 = FailNotifier()
+    con = ConsoleLikeNotifier()
+    tick_with([con, bad2])
+    tick_with([con, bad2])
+    st = load_st()
+    check("console 成功不算送达，不掩盖 onebot 的失败",
+          st.get("notify") is not None and len(con.sent) == 1,
+          "notify=%s console发了%d条" % ((st.get("notify") or {}).get("kind"), len(con.sent)))
+
+    # 9e 一直失败 —— 重试次数要递增
+    age_pending(600)
+    tick_with([con, bad2])
+    st = load_st()
+    check("反复失败时重试次数递增", int(st["notify"]["attempts"]) == 2,
+          "attempts=%s" % st["notify"]["attempts"])
+
+    # 9f 状态翻面 —— 旧记录作废（--recover-notify 就是靠这个清干净的）
+    st = load_st()
+    st["is_live"] = False              # 模拟人工把 is_live 改回 false
+    with open(STATE, "w", encoding="utf-8") as fp:
+        json.dump(st, fp)
+    CUR["v"] = fake_state(False)
+    tick_with([con, bad2])
+    check("状态翻面后放弃补发旧通知", load_st().get("notify") is None)
+
+    # 9g 到达上限 —— 放弃，别无限撞
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    cfg["notify_retry_max"] = 1
+    bad3 = FailNotifier()
+    tick_with([bad3])
+    tick_with([bad3])
+    tick_with([bad3])
+    st = load_st()
+    check("重试到顶就放弃，不再无限撞",
+          bool((st.get("notify") or {}).get("gave_up_at")),
+          "notify=%s" % st.get("notify"))
+    cfg["notify_retry_max"] = 30
+
+    # 9h --tick 的那行回执不能撒谎（以前不管发没发出去都写「已推送」）
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    real_build = w.build_notifiers
+    w.build_notifiers = lambda c: [FailNotifier()]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            w.cmd_tick(cfg)
+            w.cmd_tick(cfg)
+    finally:
+        w.build_notifiers = real_build
+    out = buf.getvalue()
+    check("--tick 发送失败时不谎称「已推送」",
+          "已推送" not in out and "未送出" in out,
+          "末行=%r" % (out.strip().splitlines() or [""])[-1][:80])
 
 finally:
     if backup is not None:
