@@ -10,6 +10,11 @@ watchdog.env
 # ---- 运行期产物 ----
 state_*.json
 selftest_result.txt
+# 登录二维码：本质是一次性登录凭据，生成一次就作废。绝不能进仓库。
+qr.png
+qr.svg
+qrcode.png
+qrcode.b64
 __pycache__/
 *.pyc
 *.pyo

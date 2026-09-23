@@ -132,6 +132,33 @@ else
   echo "⚠️ 没找到 watchdog.py（症状：日志里会少一路掉线告警）"
 fi
 
+# 诊断脚本：只读工具，「开播了但群里没收到」时先跑它。规矩同 watchdog.py ——
+# 要覆盖先比指纹，不一致就备份并说明，不静默换掉你在服务器上改过的版本。
+if [[ -f "$UNIT_DIR/why-no-notify.sh" ]]; then
+  wdst="$APP_DIR/why-no-notify.sh"
+  if [[ "${WD_KEEP_LOCAL:-0}" == "1" && -f "$wdst" ]]; then
+    echo "WD_KEEP_LOCAL=1 → 保留已有的 $wdst，不更新"
+  elif [[ -f "$wdst" ]]; then
+    old_sum=$(sha256sum "$wdst" 2>/dev/null | cut -c1-16 || true)
+    new_sum=$(sha256sum "$UNIT_DIR/why-no-notify.sh" 2>/dev/null | cut -c1-16 || true)
+    if [[ -n "$old_sum" && -n "$new_sum" && "$old_sum" != "$new_sum" ]]; then
+      wbak="$wdst.bak.$(date +%Y%m%d%H%M%S)"
+      cp -a "$wdst" "$wbak"
+      cp -a "$UNIT_DIR/why-no-notify.sh" "$wdst"
+      echo "已放入 $wdst（指纹 ${old_sum} → ${new_sum}）"
+      echo "  ⚠️ 新旧不同：你在服务器上改过的内容被换掉了，旧版备份：$wbak"
+    else
+      echo "已放入 $wdst（指纹 ${new_sum:-未知}，与原有版本一致）"
+    fi
+  else
+    cp -a "$UNIT_DIR/why-no-notify.sh" "$wdst"
+    echo "已放入 $wdst"
+  fi
+  chmod +x "$wdst" 2>/dev/null || true
+else
+  echo "⚠️ 没找到 why-no-notify.sh（不影响运行，只是少了那个排错脚本）"
+fi
+
 # 打印指纹：以后怀疑「服务器上是不是旧版」，和仓库里的对一下 sha256 前 16 位即可
 if command -v sha256sum >/dev/null 2>&1; then
   echo "指纹（sha256 前 16 位）："

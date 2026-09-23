@@ -1208,7 +1208,7 @@ def selftest():
         return _r
 
     def http_ok():
-        return True, {"status": "ok", "data": {"user_id": 3981665877}}
+        return True, {"status": "ok", "data": {"user_id": 10001}}
 
     def http_not_logged_in():
         return True, {"status": "failed", "data": None}
@@ -1218,7 +1218,7 @@ def selftest():
 
     n = check_napcat("napcat", "http://127.0.0.1:3000", "t",
                      runner=fake_runner_factory(), test_online=http_ok)
-    check(n["verdict"] == "online" and n["user_id"] == "3981665877", "已登录 → online（带 QQ 号）")
+    check(n["verdict"] == "online" and n["user_id"] == "10001", "已登录 → online（带 QQ 号）")
 
     n = check_napcat("napcat", "http://127.0.0.1:3000", "t",
                      runner=fake_runner_factory(running="false"), test_online=http_down)

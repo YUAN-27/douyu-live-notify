@@ -707,7 +707,10 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
 | 判定一直「直播中」 | `treat_loop_as_live` 被改回 true | 改回 `false` |
 | 群里一直没消息 | 定时器没开 / 主播没真开播 | `systemctl list-timers`；看 `tick.log` 的 `loop=` 值 |
 | 日志里报 `[error] onebot 通知失败` | NapCat 挂了或配置被改 | `docker logs napcat` |
-| **机器人掉线，通知静默丢了** | 本项目**没有掉线检测**；且发送失败只打印一行 `[error]`，而状态已落盘 → **那条开播通知不会补发** | 见第 12 节。每天扫一眼：`grep -c '\[error\]' /var/log/douyu-watch/tick.log` |
+| **`[error]` 里带 `retcode 200` + `sendMsg` / `1006514 网络连接异常`** | **登录态半死**：QQ 侧把登录态判失效了，但 `get_login_info` **仍然返回 ok**（在线探测抓不到这种状态），于是消息发不出去 | **`docker restart` 修不好这个** —— 重启只会让缓存 token 被拒、退回报码。只能重新扫码（见第 5 步）。先跑 `sudo bash why-no-notify.sh` 确认是这一种 |
+| 日志里反复出现「账号状态变更为离线」 | 同上，腾讯侧判失效 | 同上，必须重登 |
+| **开播了但群里没收到，不知道从哪查起** | — | `cd /opt/douyu-live-notify && sudo bash why-no-notify.sh`。只读、不发消息，一次把定时器 / 心跳 / 状态切换 / OneBot 通道全打出来，末尾给结论和对应修法 |
+| **机器人掉线，通知静默丢了** | 发送失败只打印一行 `[error]`，而状态**照样落盘** → **那条开播通知不会自动补发** | 看门狗会告警；补发：`python3 watchdog.py --recover-notify`（确认主播仍在播，先备份状态文件） |
 | **机器人莫名掉线，重启又好了** | 被内核 OOM killer 杀掉。它**不写应用日志**，所以看起来毫无征兆 | `bash mem-report.sh` 看第 6 节；`sudo bash add-swap.sh` |
 | **同机的网页突然挂了，自身日志无异常** | 很可能也是 OOM killer 杀的 —— 全局 OOM **按 RSS 从大到小挑牺牲品**，网页占得多就先死 | `journalctl -k \| grep -i oom`；给 NapCat 加内存上限（第 4 步已默认加）；或改走零内存推送通道（0.3 路线 B） |
 | `docker inspect napcat --format '{{.HostConfig.Memory}}'` 返回 0 | compose 的 `deploy.resources.limits` 没被识别 | 换成旧写法 `mem_limit: 900m`，再 `docker compose up -d` |
@@ -728,11 +731,18 @@ tail -f /var/log/douyu-watch/tick.log     # 推荐常看这个
   | 容器 / 进程崩了 | 能。`restart: always` + 登录态 + `ACCOUNT` 快速登录 |
   | 幽灵假死（腾讯侧断链，本地不报错也不出二维码） | **看门狗能发现并自动重启**（容器在跑但接口无响应） |
   | 登录态失效（换设备 / 改密 / 手机端把服务器顶下线） | 不能，必须重新扫码。看门狗会识别出「容器日志里出现二维码」，**不会白重启**，直接告警要人处理 |
+  | **登录态半死**（2026-09-23 实盘踩到）：接口仍返回 `ok`、`online: true`，但发消息报 `retcode 200` + `sendMsg` / `1006514 网络连接异常` | **不能自愈，`docker restart` 也修不好**（重启只会让缓存 token 被拒、退回报码）。看门狗是靠「日志里有 `[error]` 发送失败」发现的，**不是**靠在线探测（探测这时是绿的），告警后仍需人重新扫码 |
 
   没装看门狗时，掉线你收不到任何提示。装了之后，另一种静默失败也一并解决：
   **通知发送失败**只打印一行 `[error]`、状态却已落盘 —— 看门狗会立刻告警，
   但那条消息**仍然需要你手动补**（`python3 watchdog.py --recover-notify`，主播仍在播时有效）。
 
+  辨别「半死」与「假死」最快的办法：`sudo bash why-no-notify.sh`，它会比对日志里的
+  失败签名、并告诉你**现在正坏着**还是**几小时前坏过、已经好了**（只按日志有无 `[error]`
+  判断会把老故障误报成当前故障）。
+
   自查是否在线：`curl -s -H "Authorization: Bearer YOUR_ONEBOT_TOKEN" http://127.0.0.1:3000/get_login_info`
-  （返回你的 QQ 号才算真在线）。**别在手机 QQ 上登录这个小号**，那会把服务器端顶下线。
+  （返回你的 QQ 号才算真在线）。⚠️ **这句只能证明「登录还在」——半死状态下它同样是绿的。
+  要证明「能发出去」，只能真发一条：`python3 watch.py --test-notify`。**
+  **别在手机 QQ 上登录这个小号**，那会把服务器端顶下线。
 - **协议端合规风险自负**。脚本只是把消息 POST 给 OneBot 端点。
