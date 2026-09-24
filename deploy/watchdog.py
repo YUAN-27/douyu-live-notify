@@ -40,6 +40,14 @@
                           generic / serverchan / pushplus / bark / telegram / dingtalk / feishu / wecom
     ALERT_EMAIL           邮箱地址，走本机 msmtp 或 sendmail
     DAILY_OK_AT           例如 20:00，每天这个点后发一条「一切正常」（沉默 = 出事）
+    DAILY_OK_RETRY_MAX    上面这条发失败时，含首次在内最多试几次（默认 5）
+    DAILY_OK_RETRY_BACKOFF_MINUTES
+                          首次重试间隔（默认 3 分钟），之后翻倍，最长 30 分钟
+
+关于「发送失败」：
+    只有**真送到至少一条通道**才算发出去了。失败会按上面的退避自动重试，
+    试满才放弃并在 alerts.log 里写明原因 —— 一次网络抽风不会把当天的报平安吞掉。
+    webhook 的单次超时跟随 HTTP_TIMEOUT。
 """
 
 import argparse
@@ -92,7 +100,10 @@ DEFAULTS = {
     "DAILY_OK_TITLE": "",          # 空则用内置文案
     "DAILY_OK_BODY": "",           # 空则用内置文案
     "DAILY_OK_KAOMOJI": "",        # 颜文字池，按日期轮换；空则不追加
-    "HTTP_TIMEOUT": "10",
+    # 报平安发失败之后怎么办。见 maybe_daily_ok：一次发送失败不能把当天的报平安吞掉。
+    "DAILY_OK_RETRY_MAX": "5",                 # 含首次在内，最多试几次
+    "DAILY_OK_RETRY_BACKOFF_MINUTES": "3",     # 首次等 3 分钟，之后翻倍，最长 30 分钟
+    "HTTP_TIMEOUT": "10",          # 单次 HTTP 超时（秒）。**告警 webhook 也用它**
     "CMD_TIMEOUT": "60",
 }
 
@@ -602,20 +613,25 @@ def send_onebot_private(base, token, user_id, text, timeout=10, http=http_json):
 
 
 def deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
-                  dry_run=False, http=http_json, runner=run_cmd):
+                  dry_run=False, http=http_json, runner=run_cmd, timeout=None):
     """把一条告警送到所有配好的通道，并**无条件**落一行到本地 alerts.log。
 
     channels = {"webhook":..., "webhook_kind":..., "webhooks":[...], "tg":..., "email":...,
                 "onebot_private":..., "onebot_base":..., "onebot_token":...}
+    timeout：单次 HTTP 超时秒数，默认跟随 HTTP_TIMEOUT。以前 webhook 写死 10 秒、
+             改配置也不生效，于是「网络抽风 10 秒」就整条丢掉。
     返回 (已送达的通道列表, 说明列表)
     """
+    if not timeout:
+        timeout = cfg_int("HTTP_TIMEOUT")
     host = hostname()
     text = "【斗鱼提醒·看门狗】%s\n%s\n主机：%s\n时间：%s" % (title, body, host, now_text())
     sent, notes = [], []
 
     if napcat_ok and channels.get("onebot_private"):
         ok, why = send_onebot_private(channels.get("onebot_base"), channels.get("onebot_token"),
-                                      channels["onebot_private"], text, http=http)
+                                      channels["onebot_private"], text,
+                                      timeout=timeout, http=http)
         (sent.append("onebot私聊") if ok else notes.append("onebot私聊：%s" % why))
 
     specs = channels.get("webhooks")
@@ -624,7 +640,8 @@ def deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
     for spec in specs:
         label = "webhook(%s)" % spec["kind"]
         ok, why = send_webhook(spec["url"], spec["kind"], title, body, host,
-                               tg_chat_id=channels.get("tg") or "", http=http)
+                               tg_chat_id=channels.get("tg") or "",
+                               timeout=timeout, http=http)
         (sent.append(label) if ok else notes.append("%s：%s" % (label, why)))
 
     if channels.get("email"):
@@ -641,10 +658,13 @@ def deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
     # 本地永不失手的那一份
     try:
         os.makedirs(state_dir, exist_ok=True)
+        # 一条都没送出去时，把通道说的原因一并写下 —— 否则日志里只有「送达：无」，
+        # 想知道为什么还得靠猜（2026-09-24 就是靠反推服务耗时才知道是超时）。
+        reason = "" if sent else ("（%s）" % "；".join(notes) if notes else "")
         with open(os.path.join(state_dir, "alerts.log"), "a", encoding="utf-8") as fp:
-            fp.write("[%s] %s | %s | 送达：%s\n%s\n%s\n"
+            fp.write("[%s] %s | %s | 送达：%s%s\n%s\n%s\n"
                      % (now_text(), kind_key, title,
-                        ",".join(sent) or "无", body, "-" * 60))
+                        ",".join(sent) or "无", reason, body, "-" * 60))
     except OSError as exc:
         notes.append("写 alerts.log 失败：%s" % exc)
 
@@ -889,7 +909,8 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
             last_sent[kind_key] = {"hash": h, "ts": now, "title": title}
             continue
         sent, notes = deliver_alert(kind_key, title, body, channels, napcat_ok, state_dir,
-                                    dry_run=dry_run, http=http, runner=runner)
+                                    dry_run=dry_run, http=http, runner=runner,
+                                    timeout=cfg_int("HTTP_TIMEOUT"))
         last_sent[kind_key] = {"hash": h, "ts": now, "title": title}
         body_lines.append("已告警：%s（送达：%s%s）"
                           % (title, ",".join(sent) or "仅本地日志",
@@ -906,22 +927,58 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
         body = "这个故障从 %s 起一直存在，本轮体检已恢复正常。" % since
         if not dry_run:
             deliver_alert("recover_" + kind_key, title, body, channels, napcat_ok, state_dir,
-                          http=http, runner=runner)
+                          http=http, runner=runner, timeout=cfg_int("HTTP_TIMEOUT"))
             body_lines.append("已发恢复通知：%s" % kind_key)
         else:
             body_lines.append("[dry-run] 本应发恢复通知：%s" % kind_key)
 
     # ---- 每日「一切正常」（沉默即出事：哪天没收到，就是机器或看门狗自己挂了）----
+    #
+    # 关键规矩：**只有真送到了一条通道，才算「今天报过平安」。**
+    # 以前这里不看 deliver_alert 的返回值，发失败也照样写 last_daily_ok，
+    # 于是当天再也不重试 —— 2026-09-23、09-24 的 10:00 各丢了一条（那两轮
+    # 恰好卡满 HTTP 超时 10 秒，而日志里只留「送达：无」，看不出原因）。
+    # 现在失败的痕迹留在 daily_ok_retry 里，过一会儿再来，到顶才放弃。
     daily_at = str(cfg_get("DAILY_OK_AT")).strip()
     ok_now = not pending
     if daily_at and ok_now and _at_or_after(daily_at):
         today = datetime.now().strftime("%Y-%m-%d")
-        if st.get("last_daily_ok") != today and not dry_run:
-            ok_title, ok_body = daily_ok_texts(today)
-            deliver_alert("daily_ok", ok_title, ok_body,
-                          channels, napcat_ok, state_dir, http=http, runner=runner)
-            st["last_daily_ok"] = today
-            body_lines.append("已发每日正常通知")
+        dly = daily_retry_state(st, today)
+        if st.get("last_daily_ok") != today and not dly.get("gave_up"):
+            if not dry_run and now >= _float_or(dly.get("next_try_ts")):
+                ok_title, ok_body = daily_ok_texts(today)
+                sent, notes = deliver_alert("daily_ok", ok_title, ok_body,
+                                            channels, napcat_ok, state_dir,
+                                            http=http, runner=runner,
+                                            timeout=cfg_int("HTTP_TIMEOUT"))
+                dly["attempts"] = _int_or(dly.get("attempts")) + 1
+                dly["last_attempt_at"] = now_text()
+                if sent:
+                    st["last_daily_ok"] = today          # 送达了才落章
+                    dly["next_try_ts"] = 0.0
+                    body_lines.append("已发每日正常通知（第 %d 次尝试送达：%s）"
+                                      % (dly["attempts"], ",".join(sent)))
+                else:
+                    why = "；".join(notes) or "未知原因"
+                    max_try = max(1, cfg_int("DAILY_OK_RETRY_MAX"))
+                    if dly["attempts"] >= max_try:
+                        dly["gave_up"] = True
+                        dly["next_try_ts"] = 0.0
+                        body_lines.append(
+                            "❌ 每日正常通知连试 %d 次都没送出去，今天不再重试。"
+                            "最后一次的原因：%s —— 今天你会收不到报平安，"
+                            "别把它当成「机器挂了」" % (dly["attempts"], why))
+                    else:
+                        wait = daily_retry_backoff(
+                            dly["attempts"],
+                            cfg_int("DAILY_OK_RETRY_BACKOFF_MINUTES"))
+                        dly["next_try_ts"] = now + wait
+                        body_lines.append(
+                            "⚠️ 每日正常通知第 %d 次发送失败（%s），约 %d 分钟后重试"
+                            % (dly["attempts"], why, max(1, int(wait // 60))))
+            elif dry_run and not st.get("last_daily_ok"):
+                body_lines.append("[dry-run] 本应发每日正常通知")
+        st["daily_ok_retry"] = dly
 
     # ---- 存状态 ----
     st["last_run"] = now_text()
@@ -970,6 +1027,7 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
         lines.append("           %s" % tick["detail"])
     lines.append("  NapCat : %s —— %s" % (nap["verdict"], nap["detail"]))
     lines.append("  通知失败: 本轮新增 %d 行" % len(fails))
+    lines.append("  报平安 : %s" % daily_ok_status(st))
     lines.append("  判定   : %s" % verdict.upper())
     for a in actions:
         lines.append("  动作   : %s" % a)
@@ -987,6 +1045,65 @@ def _at_or_after(hhmm):
         return False
     now = datetime.now()
     return (now.hour, now.minute) >= (hh, mm)
+
+
+def _int_or(v, default=0):
+    """容错取整数。状态文件是允许手改的，别让一个手滑的字符串崩掉整轮体检。"""
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_or(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def daily_retry_state(st, today):
+    """取今天的「报平安重试」状态；跨天自动重置。
+
+    为什么需要它：报平安发失败之后，如果照样把今天标成「已报」，
+    当天就再也不会发 —— 一条消息就这么永久丢了（2026-09-24 真的丢过）。
+    所以失败的痕迹记在这里，过一会儿再来一次。
+    """
+    d = st.get("daily_ok_retry")
+    if not isinstance(d, dict) or str(d.get("date") or "") != today:
+        d = {"date": today, "attempts": 0, "last_attempt_at": "",
+             "next_try_ts": 0.0, "gave_up": False}
+    return d
+
+
+def daily_retry_backoff(attempts, base_minutes=3, cap_minutes=30):
+    """已经试过 attempts 次都失败，下一次该等多少秒：base、2×base、4×base…封顶 cap。"""
+    a = max(1, min(_int_or(attempts, 1), 20))       # 指数别放飞，封在 20
+    base = max(1, _int_or(base_minutes, 3))
+    cap = max(base, _int_or(cap_minutes, 30))
+    return min(base * (2 ** (a - 1)), cap) * 60
+
+
+def daily_ok_status(st):
+    """一句话说清今天的报平安处在什么状态（给 --status 看）。
+
+    「今天没收到报平安」原来只能靠翻 alerts.log 反推，现在一条命令就有答案。
+    """
+    at = str(cfg_get("DAILY_OK_AT")).strip()
+    if not at:
+        return "未启用（没配 DAILY_OK_AT）"
+    today = datetime.now().strftime("%Y-%m-%d")
+    if st.get("last_daily_ok") == today:
+        return "今天已送达（%s 后发的那条）" % at
+    d = daily_retry_state(st, today)
+    if d.get("gave_up"):
+        return "⚠️ 今天已放弃（试了 %d 次都没送出去，今天不会再发）" % _int_or(d.get("attempts"))
+    if not _at_or_after(at):
+        return "还没到点（%s 之后才发）" % at
+    n = _int_or(d.get("attempts"))
+    if n == 0:
+        return "到点了，下一轮就发"
+    return "重试中：已试 %d 次，最近一次 %s" % (n, d.get("last_attempt_at") or "—")
 
 
 def daily_ok_texts(today=None):
@@ -1440,6 +1557,166 @@ def selftest():
         check(dt3 == "报个平安", "颜文字留空就不追加（等于关掉）")
     finally:
         for k, v in kept.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    print("-- 报平安：发失败不落章、会自动重试（2026-09-24 的 10:00 就丢在这里）--")
+
+    dlog = os.path.join(tmpdir, "daily-tick.log")
+    _d_seq = [0]
+
+    def tick_fresh():
+        """每轮都让心跳序号前进。
+
+        不这么做的话，连续 3 轮序号不动会被判成 stuck，pending 非空，
+        报到就走不到报平安那一步了（这个坑我在写测试时踩过一次）。
+        """
+        _d_seq[0] += 1
+        with open(dlog, "w", encoding="utf-8", newline="\n") as fp:
+            fp.write("[12:00:00] #%d 未开播 | loop=1\n" % _d_seq[0])
+
+    tick_fresh()
+
+    class _DArgs(object):
+        app_dir = tmpdir
+        tick_log = dlog
+        state_dir = os.path.join(tmpdir, "daily-state")
+        config = os.path.join(tmpdir, "no-such-config.json")
+        container = "napcat"
+        onebot_base = "http://127.0.0.1:3000"
+        onebot_token = "t"
+        stale = None
+        stuck_rounds = None
+        auto_restart = None
+
+    # 这一组要的是「一切正常」的机器：容器在跑、QQ 已登录，
+    # 这样 pending 为空，才会走到报平安那一步。
+    d_runner = fake_runner_factory()
+    d_probe = lambda: (True, {"status": "ok", "data": {"user_id": 10001}})
+
+    d_ok_calls, d_bad_calls = [], []
+
+    def d_http_ok(url, **kw):
+        d_ok_calls.append(url)
+        return True, {"code": 200}
+
+    def d_http_bad(url, **kw):
+        d_bad_calls.append(url)
+        return False, "URLError: <urlopen error timed out>"
+
+    dstate = os.path.join(tmpdir, "daily-state", "state.json")
+    dalog = os.path.join(tmpdir, "daily-state", "alerts.log")
+
+    def d_run(http):
+        tick_fresh()
+        return run_once(_DArgs(), runner=d_runner, http=http, napcat_probe=d_probe)
+
+    def read_dstate():
+        with open(dstate, encoding="utf-8") as fp:
+            return json.load(fp)
+
+    def write_dstate(s):
+        os.makedirs(os.path.dirname(dstate), exist_ok=True)
+        with open(dstate, "w", encoding="utf-8") as fp:
+            json.dump(s, fp, ensure_ascii=False)
+
+    def today_str():
+        return datetime.now().strftime("%Y-%m-%d")
+
+    kept2 = {k: os.environ.get(k) for k in
+             ("DAILY_OK_AT", "ALERT_WEBHOOK", "ALERT_ONEBOT_PRIVATE", "ALERT_EMAIL",
+              "DAILY_OK_RETRY_MAX", "DAILY_OK_RETRY_BACKOFF_MINUTES")}
+    try:
+        os.environ["DAILY_OK_AT"] = "00:00"
+        os.environ["ALERT_WEBHOOK"] = "pushplus|https://www.pushplus.plus/send?token=TK"
+        for k in ("ALERT_ONEBOT_PRIVATE", "ALERT_EMAIL"):
+            os.environ.pop(k, None)
+        os.environ["DAILY_OK_RETRY_MAX"] = "3"
+        os.environ["DAILY_OK_RETRY_BACKOFF_MINUTES"] = "3"
+
+        # 第 1 轮：到点了，但通道打不通
+        _v, d1 = d_run(d_http_bad)
+        s1 = read_dstate()
+        check(not s1.get("last_daily_ok"),
+              "★ 报平安发失败时**不写** last_daily_ok（写了今天就永远不发了）")
+        check(_int_or(s1.get("daily_ok_retry", {}).get("attempts")) == 1,
+              "失败后记下尝试次数")
+        check(_float_or(s1.get("daily_ok_retry", {}).get("next_try_ts")) > time.time(),
+              "安排了下一次重试的时间")
+        check(any("重试" in x for x in d1), "本轮报告如实说「失败、稍后重试」")
+        check("timed out" in open(dalog, encoding="utf-8").read(),
+              "★ 失败原因写进 alerts.log（原来只有「送达：无」，查不出为什么）")
+
+        # 第 2 轮：退避时间还没到 → 不要每轮都去捶通道
+        n_bad = len(d_bad_calls)
+        d_run(d_http_bad)
+        check(len(d_bad_calls) == n_bad and
+              _int_or(read_dstate()["daily_ok_retry"]["attempts"]) == 1,
+              "退避时间没到就不再发")
+
+        # 第 3 轮：时间到了、通道恢复 → 送达，这才落章
+        s2 = read_dstate()
+        s2["daily_ok_retry"]["next_try_ts"] = 0
+        write_dstate(s2)
+        _v, d3 = d_run(d_http_ok)
+        check(read_dstate().get("last_daily_ok") == today_str(),
+              "重试成功后才写 last_daily_ok")
+        check(any("已发每日正常通知" in x for x in d3), "送达后报告里写明已发")
+
+        # 第 4 轮：今天已经报过了 → 不再发
+        n_ok = len(d_ok_calls)
+        d_run(d_http_ok)
+        check(len(d_ok_calls) == n_ok, "当天已送达就不再重发")
+
+        # 第 5 轮：跨天 → 昨天「已放弃」的结论不该拖累今天
+        s4 = read_dstate()
+        s4["last_daily_ok"] = ""
+        s4["daily_ok_retry"] = {"date": "2000-01-01", "attempts": 9,
+                                "last_attempt_at": "", "next_try_ts": 0,
+                                "gave_up": True}
+        write_dstate(s4)
+        d_run(d_http_ok)
+        s5 = read_dstate()
+        check(not s5["daily_ok_retry"].get("gave_up") and
+              _int_or(s5["daily_ok_retry"]["attempts"]) == 1,
+              "★ 跨天自动重置重试计数（昨天放弃了，今天照常报）")
+
+        # 第 6 轮：一直失败到顶 → 明确放弃，并说清后果
+        s6 = read_dstate()
+        s6["last_daily_ok"] = ""
+        s6["daily_ok_retry"] = {"date": today_str(), "attempts": 2,
+                                "last_attempt_at": "", "next_try_ts": 0,
+                                "gave_up": False}
+        write_dstate(s6)
+        _v, d6 = d_run(d_http_bad)
+        s7 = read_dstate()
+        check(_int_or(s7["daily_ok_retry"]["attempts"]) == 3 and
+              s7["daily_ok_retry"].get("gave_up"),
+              "试满 DAILY_OK_RETRY_MAX 次后标记放弃")
+        check(any("不再重试" in x for x in d6),
+              "放弃时报告写明白，并提示别误当成机器挂了")
+
+        # 第 7 轮：放弃之后当天不再骚扰通道
+        n_bad = len(d_bad_calls)
+        d_run(d_http_bad)
+        check(len(d_bad_calls) == n_bad, "放弃之后不再发（当天到此为止）")
+
+        # 状态文案：--status 里能一眼看出今天报平安处在哪一步
+        st_ok = {"last_daily_ok": today_str()}
+        check("已送达" in daily_ok_status(st_ok), "--status 能看出「今天已送达」")
+        check("放弃" in daily_ok_status({"daily_ok_retry": {
+            "date": today_str(), "attempts": 3, "gave_up": True}}),
+            "--status 能看出「今天已放弃」")
+        check("重试中" in daily_ok_status({"daily_ok_retry": {
+            "date": today_str(), "attempts": 2, "next_try_ts": 0}}),
+            "--status 能看出「重试中」")
+        os.environ.pop("DAILY_OK_AT", None)
+        check("未启用" in daily_ok_status({}), "没配 DAILY_OK_AT 时如实说未启用")
+        os.environ["DAILY_OK_AT"] = "00:00"
+    finally:
+        for k, v in kept2.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
