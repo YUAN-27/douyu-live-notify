@@ -8,7 +8,10 @@
   "jitter_seconds": 8,
   "confirm_rounds": 2,
 
-  "notify_on_end": false,
+  "_comment_notify_on_end": "是否推送下播通知（默认开），下播消息里带「直播时长」。时长由程序自己记的「确认开播 → 确认下播」算出，不用接口的 show_time（轮播时它指的是轮播场次起点）。代价是一场直播两条消息。",
+  "notify_on_end": true,
+  "_comment_notify_end_max_hours": "没有自记开播时刻时（升级前就在播 / 中断期间开的播），接口给的开播时间最多回溯几小时才算可信。",
+  "notify_end_max_hours": 24,
   "treat_loop_as_live": false,
   "log_heartbeat": true,
 

@@ -68,7 +68,7 @@ if [[ -f "$STATE" ]]; then
   python3 - "$STATE" <<'PY'
 import json, sys
 st = json.load(open(sys.argv[1], encoding="utf-8"))
-keys = ("is_live", "pending", "pending_n", "rounds", "last_change_at")
+keys = ("is_live", "pending", "pending_n", "rounds", "last_change_at", "live_started_at")
 print(json.dumps({k: st.get(k) for k in keys}, ensure_ascii=False, indent=2))
 PY
 else

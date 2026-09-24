@@ -67,6 +67,24 @@
     onebot 发不出去也会被判成「已推送」，重试永不触发。
   * `--tick` 的 `判定：...` 那行现在**如实**区分「已推送 / 未送出待补发」。
     以前不管有没有发出去都写「已推送」，日志撒谎比没日志更坏。
+
+关于下播通知与「直播时长」（重要）
+-----------------------------------
+`notify_on_end` 默认 True：开播、下播各推一条，下播那条带**本次直播总时长**。
+
+时长**不是**从斗鱼接口的 `show_time` 算的，理由很实在：实测房间轮播时
+`show_time` 指的是**轮播场次的起点**（实测 room_id=6979222，轮播中
+`show_time` 换算出来比「现在」早了一大截），拿它当真人开播时间会算出离谱的值。
+
+真正的做法是让状态机自己记账：
+  * 确认开播那一刻，把时刻写进状态文件的 `live_started_at`
+  * 确认下播那一刻，用 `now - live_started_at` 得出时长
+
+所以时长只会比真实的**晚**开始算，绝不会凭空多出来。三种「没有自记时刻」
+的兜底情形（升级到本功能前就在播 / 程序中断期间开的播 / 有人手改坏了字段），
+会用接口给的开播时间顶上，但先过一遍常识检查（能解析、不在未来、
+回溯不超过 `notify_end_max_hours` 小时）；不过关就退回「本轮首次看到在播」，
+并把这条时长写成「**至少** X 小时 Y 分」—— 只报下限，不编精确值。
 """
 
 from __future__ import annotations
@@ -104,8 +122,17 @@ DEFAULT_CFG = {
     "jitter_seconds": 8,
     # 连续 N 次读到同一状态才认定状态切换，防接口抖动误报
     "confirm_rounds": 2,
-    # 是否推送“下播”通知
-    "notify_on_end": False,
+    # 是否推送「下播」通知（默认开）。下播消息里会带上**本次直播的总时长**。
+    # 时长的来源是「程序自己记的『确认开播』到『确认下播』之差」，不是接口给的
+    # show_time —— 实测轮播时 show_time 指的是轮播场次的起点，拿它算会得到
+    # 离谱的时长（详见 _pick_live_start 的注释）。
+    # 代价是一场直播会收到两条消息（开播 + 下播）。嫌吵就改成 false。
+    "notify_on_end": True,
+    # 没有自记开播时刻时，接口给的开播时间最多回溯多少小时算「像真的」。
+    # 只有两种场景会用到它：① 升级到本功能之前就在播；② 程序中断期间开的播。
+    # 超过这个小时数、或解析不出来、或在未来，就一律退回「本轮首次看到在播」，
+    # 并把时长标成近似 —— 宁可说「约」，也不能报一个瞎猜的数。
+    "notify_end_max_hours": 24,
     # 把「视频轮播」（无人直播、循环放录播）也当作开播。
     # 实测结论：videoLoop == 1 就是「房间在放轮播、不是真人直播」。
     #   对照证据 1：斗鱼「正在直播」列表里抽样的在播房间，videoLoop 全为 0
@@ -522,7 +549,14 @@ def load_state(path):
         except (OSError, json.JSONDecodeError):
             pass
     return {"is_live": None, "pending": None, "pending_n": 0,
-            "last_change_at": None, "notify": None}
+            "last_change_at": None, "notify": None,
+            # 本次直播的「确认开播」时刻，用来算下播通知里的时长。
+            # 单独开一个字段而不是复用 last_change_at：后者在每次状态切换时
+            # 都会被覆盖，下播那一刻正好把它冲掉，算不出时长。
+            "live_started_at": None,
+            # 上面那个时刻是不是「只知道从这一秒起在播」的兜底值。是的话
+            # 真实时长只会更长，通知里会写「至少 X 小时 Y 分」。
+            "live_started_approx": False}
 
 
 def save_state(path, state):
@@ -532,7 +566,62 @@ def save_state(path, state):
     os.replace(tmp, path)
 
 
-def format_message(cur, cfg, action):
+def _fmt_duration(seconds, at_least=False):
+    """把秒数写成中文时长，例如「1 小时 23 分」。返回空串 = 「说不出来」。
+
+    空串的语义很重要：调用方据此**整行不写**。状态文件是允许手改的，
+    一个畸形的时长宁可不说，也不能让通知里出现「-3 小时」或「None」——
+    那比不报更误导人。负数和解析不了的都归到空串。
+
+    at_least=True 表示这个数只是**下限**（没能拿到准确的开播时刻，只知道自己
+    从某一刻起看到它在播，真实时长只会更长）。这时写成「至少 1 小时 23 分」。
+    不满 1 分钟的情况不再加「至少」——「至少 不到 1 分钟」是病句，而且那个
+    量级加不加限定词都没什么信息量。
+    """
+    try:
+        total = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return ""
+    if total < 0:
+        return ""
+    hours, rest = divmod(total, 3600)
+    minutes = rest // 60
+    if hours and minutes:
+        text = "%d 小时 %d 分" % (hours, minutes)
+    elif hours:
+        text = "%d 小时" % hours
+    elif minutes:
+        text = "%d 分钟" % minutes
+    else:
+        text = "不到 1 分钟"
+    if at_least and total >= 60:
+        return "至少 " + text
+    return text
+
+
+def _to_cst_text(value):
+    """把状态文件里的时间戳渲染成给人看的样子（北京时间、不带时区尾巴）。
+
+    **读不懂就返回空串**，不原样照抄。这里的值最终会进通知正文，
+    「开播时间：2020-13-45 99:99:99」这种东西印给群友看没有任何意义，
+    还不如不写那一行 —— 调用方会退回接口给的开播时间。
+    与 _parse_iso 一样，绝不抛异常。
+    """
+    dt = _parse_iso(value)
+    if dt is None:
+        return ""
+    return dt.astimezone(CST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_message(cur, cfg, action, duration_seconds=None, started_at=None,
+                  duration_is_min=False):
+    """拼通知正文。
+
+    duration_seconds 只在下播（action == "end"）时用得上，由 tick 从状态文件里
+    自己记的开播时刻算出来 —— **不是**接口的 show_time（理由见 _pick_live_start）。
+    传 None 就整行不写「直播时长」，不瞎编。
+    duration_is_min=True 表示这个长度只是下限，会写成「至少 X」。
+    """
     lines = []
     if action == "up":
         head = "【斗鱼开播】"
@@ -549,6 +638,15 @@ def format_message(cur, cfg, action):
             lines.append("开播时间：" + str(cur["start_time"]))
         if cur.get("loop_flag") == 1:
             lines.append("提示：接口显示该房间为视频轮播，可能不是真人直播")
+    else:
+        # 下播：先报时长（这是这一条通知的重点），再补一个开播时间方便对账。
+        # 开播时间优先用自己记的那个 —— 它才是算时长的基准，口径一致。
+        when = _to_cst_text(started_at) or (cur.get("start_time") or "")
+        if when:
+            lines.append("开播时间：" + str(when))
+        duration = _fmt_duration(duration_seconds, at_least=duration_is_min)
+        if duration:
+            lines.append("直播时长：" + duration)
     lines.append(cfg.get("room_url") or ("https://www.douyu.com/" + str(cur.get("room_id"))))
     return "\n".join(lines)
 
@@ -621,6 +719,31 @@ def _num(value, default):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _pick_live_start(cur, looping, cfg, now):
+    """挑一个「本次直播的开播时刻」。返回 (ISO 字符串, 是不是只能算近似值)。
+
+    只在状态机**没有**自记时刻时才调用它（见 tick 里那两处补记），场景有二：
+      · 升级到本功能之前主播就在播 —— 旧状态文件里没有 live_started_at
+      · 程序中断期间开的播 —— 启动时已经是直播中，没看到那次状态切换
+
+    默认拿接口给的开播时间兜底，但必须先把话说清楚：**它不一定可信**。
+    实测 room_id=6979222 轮播中，betard 的 show_time 是轮播场次的起点，
+    不是真人开播时间；拿它当开播时间会算出离谱的时长（第一次实测时
+    show_time=1790215735，比「现在」早了一大截，正是这个原因）。
+    所以这里过一遍常识检查：解析得出来、不在未来（容 60 秒时钟偏差）、
+    回溯不超过 notify_end_max_hours。任一条不过就退回 now，并标记为近似值 ——
+    宁可让通知里那个数小一点、真一点，也不要大得离谱。
+    """
+    if not looping and cur.get("start_time"):
+        dt = _parse_iso(cur["start_time"])
+        if dt is not None:
+            age = (now - dt).total_seconds()
+            max_hours = _num(cfg.get("notify_end_max_hours"), 24)
+            if -60 <= age <= max_hours * 3600:
+                return dt.isoformat(), False
+    return now.isoformat(), True
 
 
 def _attempts(pend):
@@ -701,6 +824,10 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
     之后每一轮都会尝试补发（间隔 1、2、4、8… 分钟退避），
     直到送出、或到达 notify_retry_max / notify_retry_max_age_hours 上限。
 
+    下播通知里的「本次直播时长」由本函数自己记账：确认开播时把时刻写进
+    state 的 live_started_at，确认下播时相减。**不用**接口的 show_time
+    （轮播时它指的是轮播场次起点，会算出离谱的值，见 _pick_live_start）。
+
     返回 dict，含 is_live / action / cur / state，
     外加 notify（本轮实际做过的通知动作，可能为 None）
     和 pending（本轮结束后仍未送出的那条，可能为 None）。
@@ -768,13 +895,43 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
             state["pending"] = None
             state["pending_n"] = 0
             state["last_change_at"] = now.isoformat()
+            # 下播通知里那个「本次直播时长」，只能靠自己记的开播时刻算 ——
+            # 接口的 show_time 不可信，理由见 _pick_live_start 的注释。
+            duration = None
+            duration_is_min = False
+            started_at = state.get("live_started_at")
             if action == "up" or cfg.get("notify_on_end"):
-                text = format_message(fill_online(room_id, cur), cfg, action)
+                if action == "up":
+                    # 记下开播时刻，等下播时相减。这是本次直播时长的唯一基准。
+                    state["live_started_at"], approx = _pick_live_start(cur, looping, cfg, now)
+                    state["live_started_approx"] = approx
+                    if verbose:
+                        print("[info] 记下本次开播时刻 %s%s"
+                              % (state["live_started_at"],
+                                 "（只是下限：拿不到可信的接口开播时间，从本轮算起）"
+                                 if approx else ""), flush=True)
+                else:
+                    started_dt = _parse_iso(started_at)
+                    if started_dt is not None:
+                        duration = max(0, int((now - started_dt).total_seconds()))
+                        # 兜底来的时刻只知道自己从那一刻起在播，真实时长更长，
+                        # 所以文案要写成「至少 X」，不能当成准确值报出去
+                        duration_is_min = bool(state.get("live_started_approx"))
+                    elif verbose:
+                        print("[warn] 状态文件里没有可用的开播时刻，这条下播通知不报时长", flush=True)
+                    # 本场结束，把时刻收掉；下次开播会重新记。
+                    # 必须放在算完 duration 之后，否则就永远是 None 了
+                    state["live_started_at"] = None
+                    state["live_started_approx"] = False
+                text = format_message(fill_online(room_id, cur), cfg, action,
+                                      duration_seconds=duration, started_at=started_at,
+                                      duration_is_min=duration_is_min)
                 delivered, failed = notify_all(notifiers, text)
                 if delivered:
                     state["notify"] = None
                 else:
-                    # 没送出去 → 记下来，下一轮起自动补发（这才是根治）
+                    # 没送出去 → 记下来，下一轮起自动补发（这才是根治）。
+                    # 正文里已经把时长写进去了，所以补发时那个数不会变样。
                     state["notify"] = {
                         "kind": action,
                         "text": text,
@@ -786,18 +943,40 @@ def tick(cfg, notifiers=None, verbose=True, heartbeat=False):
                     if not cfg.get("retry_failed_notify", True):
                         state["notify"]["gave_up_at"] = now.isoformat()
                         state["notify"]["gave_up_why"] = "配置里关掉了重试"
-                notify_info = {"kind": action, "stage": "first",
+                notify_info = {"kind": action, "stage": "first", "duration": duration,
+                               "duration_is_min": duration_is_min,
                                "delivered": delivered, "failed": failed, "attempts": 1}
             else:
                 # 这次不需要通知（例如 notify_on_end=false 的下播）：
-                # 旧记录一并清掉，别让它继续挂着
+                # 旧记录一并清掉，别让它继续挂着；开播时刻同理，本场已经结束了
                 state["notify"] = None
+                state["live_started_at"] = None
+                state["live_started_approx"] = False
             if verbose:
-                print("[change] 状态切换 -> %s" % ("直播中" if is_live else "未开播"), flush=True)
+                tail = ""
+                d = _fmt_duration(duration, at_least=duration_is_min)
+                if d:
+                    tail = "，本次直播 " + d
+                print("[change] 状态切换 -> %s%s"
+                      % ("直播中" if is_live else "未开播", tail), flush=True)
     else:
         if state.get("pending") is not None:
             state["pending"] = None
             state["pending_n"] = 0
+
+    # 状态是「直播中」，但状态文件里没有可用的开播时刻 —— 补记一次。
+    # 三种来路：① 升级到本功能之前就在播（旧状态文件没这个字段）；
+    # ② 程序中断期间开的播，重启后第一次看到就是直播中，没看到那次切换；
+    # ③ 有人手改状态文件，把一个解析不出来的值写进了这个字段。
+    # 不补的话，这场的下播通知就会缺时长。已经有合法值的一次都不动。
+    if state["is_live"] and _parse_iso(state.get("live_started_at")) is None:
+        state["live_started_at"], approx = _pick_live_start(cur, looping, cfg, now)
+        state["live_started_approx"] = approx
+        if verbose:
+            print("[info] 补记本次开播时刻 %s%s"
+                  % (state["live_started_at"],
+                     "（只是下限：拿不到可信的接口开播时间，从本轮算起）" if approx else ""),
+                  flush=True)
 
     # ---- 补发上一轮（或更早）没送出去的通知 ----
     pend = state.get("notify") if state.get("notify") is stale else None
@@ -866,12 +1045,16 @@ def cmd_tick(cfg):
     # 你会以为链路是通的。现在如实分开说。
     if info:
         kind = _kind_cn(info["kind"])
+        # 下播这条的回执里把时长也带上：事后翻日志时，就这一行能直接回答
+        # 「这场到底播了多久」，不必再去翻推送记录。
+        dur = _fmt_duration(info.get("duration"), at_least=info.get("duration_is_min"))
+        dursuf = ("（本次直播 %s）" % dur) if dur else ""
         if info["stage"] == "first":
             if info["delivered"]:
-                tail = "，已推送「%s」通知" % kind
+                tail = "，已推送「%s」通知%s" % (kind, dursuf)
             else:
-                tail = ("，「%s」通知未送出（%s），已记下并在后续轮次自动补发"
-                        % (kind, "、".join(info["failed"]) or "全部通道"))
+                tail = ("，「%s」通知%s未送出（%s），已记下并在后续轮次自动补发"
+                        % (kind, dursuf, "、".join(info["failed"]) or "全部通道"))
         elif info["stage"] == "retry":
             if info["delivered"]:
                 tail = "，补发「%s」通知成功（第 %d 次尝试）" % (kind, info["attempts"])

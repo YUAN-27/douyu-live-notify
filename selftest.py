@@ -385,6 +385,250 @@ try:
           "notify=%s" % load_st().get("notify"))
     cfg["notify_retry_backoff_cap_minutes"] = 10
 
+    log("")
+    log("=" * 68)
+    log("场景 10：下播提醒与直播时长（时长必须靠自己记账，不信接口）")
+    log("=" * 68)
+
+    w.read_state = lambda room_id, **kw: CUR["v"]
+    w.probe_legacy = lambda room_id: CUR["v"]
+
+    def save_st(patch):
+        st = load_st()
+        st.update(patch)
+        with open(STATE, "w", encoding="utf-8") as fp:
+            json.dump(st, fp, ensure_ascii=False)
+
+    def now_ago(**kw):
+        return (w.datetime.now(w.CST) - w.timedelta(**kw)).isoformat()
+
+    # 10a 时长文案本身（含各量级与四类脏输入）
+    for sec, want in ((0, "不到 1 分钟"), (59, "不到 1 分钟"), (60, "1 分钟"),
+                      (1830, "30 分钟"), (3599, "59 分钟"), (3600, "1 小时"),
+                      (3720, "1 小时 2 分"), (4980, "1 小时 23 分"),
+                      (5400, "1 小时 30 分"), (86400, "24 小时")):
+        got = w._fmt_duration(sec)
+        check("_fmt_duration(%d) == %s" % (sec, want), got == want, "实际 %r" % got)
+    check("时长解析不了就返回空串（那一行整行不写，也不编）", w._fmt_duration("三次") == "")
+    check("负时长返回空串（不写「-3 小时」）", w._fmt_duration(-5) == "")
+    check("None 返回空串", w._fmt_duration(None) == "")
+    check("数字被手改成了字符串也认", w._fmt_duration("3600") == "1 小时")
+    check("下限写法：「至少 1 小时 23 分」",
+          w._fmt_duration(4980, at_least=True) == "至少 1 小时 23 分",
+          "实际 %r" % w._fmt_duration(4980, at_least=True))
+    check("下限但不满 1 分钟时不加「至少」（避免病句）",
+          w._fmt_duration(30, at_least=True) == "不到 1 分钟",
+          "实际 %r" % w._fmt_duration(30, at_least=True))
+
+    # 10b 下播消息的版式
+    end_msg = w.format_message(fake_state(False), cfg, "end",
+                               duration_seconds=4980,
+                               started_at="2026-09-24T19:30:00+08:00")
+    log("-" * 68)
+    log(end_msg)
+    log("-" * 68)
+    check("下播消息标题是【斗鱼下播】", end_msg.startswith("【斗鱼下播】"))
+    check("下播消息带「直播时长」行", "直播时长：1 小时 23 分" in end_msg)
+    check("下播消息带开播时间，且用自己记的那个（口径与时长一致）",
+          "开播时间：2026-09-24 19:30:00" in end_msg)
+    check("拿不到时长就整行不写", "直播时长" not in w.format_message(
+        fake_state(False), cfg, "end", duration_seconds=None, started_at=None))
+    check("开播消息不受影响（仍是开播标题、无时长行）",
+          w.format_message(fake_state(True, loop=0), cfg, "up").startswith("【斗鱼开播】")
+          and "直播时长" not in w.format_message(fake_state(True, loop=0), cfg, "up"))
+    check("_to_cst_text 把带时区的 ISO 渲染成北京时间",
+          w._to_cst_text("2026-09-24T19:30:00+08:00") == "2026-09-24 19:30:00",
+          "实际 %r" % w._to_cst_text("2026-09-24T19:30:00+08:00"))
+    for bad in ("看不懂", "", None, 12345):
+        check("_to_cst_text(%r) 读不懂就返回空串（通知里不出现垃圾值）" % (bad,),
+              w._to_cst_text(bad) == "", "实际 %r" % w._to_cst_text(bad))
+
+    # 10c 端到端：开播记账 → 下播算出时长
+    cfg["notify_on_end"] = True
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    tick_with([FakeNotifier()])
+    tick_with([FakeNotifier()])
+    st = load_st()
+    check("确认开播时把开播时刻记进了状态文件", bool(st.get("live_started_at")),
+          "live_started_at=%s" % st.get("live_started_at"))
+    check("接口 start_time 不可信时不拿它当基准，退回本轮（并标记为下限）",
+          st.get("live_started_approx") is True,
+          "live_started_approx=%s" % st.get("live_started_approx"))
+
+    save_st({"live_started_at": now_ago(seconds=4983), "live_started_approx": False})
+    CUR["v"] = fake_state(False)
+    down = FakeNotifier()
+    tick_with([down])
+    check("下播也要连续 confirm 次才推（不因加时长而破坏防抖）",
+          len(down.sent) == 0, "收到 %d 条" % len(down.sent))
+    tick_with([down])
+    check("下播会推送一条通知", len(down.sent) == 1, "收到 %d 条" % len(down.sent))
+    if down.sent:
+        log("-" * 68)
+        log(down.sent[0])
+        log("-" * 68)
+    check("下播通知里带着本次直播总时长",
+          "直播时长：1 小时 23 分" in (down.sent[0] if down.sent else ""),
+          "实际 %r" % (down.sent[0].splitlines() if down.sent else None))
+    check("记录准确的时刻时不写「至少」",
+          "至少" not in (down.sent[0] if down.sent else ""))
+    check("下播后把开播时刻收掉（下次开播重新记）",
+          load_st().get("live_started_at") is None
+          and load_st().get("live_started_approx") is False)
+
+    # 10d 只有下限时措辞要诚实（升级/重启兜底的场景）
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    tick_with([FakeNotifier()])
+    tick_with([FakeNotifier()])
+    save_st({"live_started_at": now_ago(hours=9, minutes=5), "live_started_approx": True})
+    CUR["v"] = fake_state(False)
+    d2 = FakeNotifier()
+    tick_with([d2])
+    tick_with([d2])
+    check("只知道下限时写「至少 9 小时 5 分」，不当成准确值报",
+          "直播时长：至少 9 小时 5 分" in (d2.sent[0] if d2.sent else ""),
+          "实际 %r" % (d2.sent[0].splitlines() if d2.sent else None))
+
+    # 10e notify_on_end=false —— 老行为不能被改坏
+    cfg["notify_on_end"] = False
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    tick_with([FakeNotifier()])
+    tick_with([FakeNotifier()])
+    off = FakeNotifier()
+    CUR["v"] = fake_state(False)
+    tick_with([off])
+    tick_with([off])
+    check("notify_on_end=false 时不推下播", len(off.sent) == 0, "收到 %d 条" % len(off.sent))
+    check("notify_on_end=false 时也把开播时刻收掉（免得留脏数据）",
+          load_st().get("live_started_at") is None)
+    cfg["notify_on_end"] = True
+
+    # 10f 旧状态文件（升级前就在播）：要补记，否则这场的下播没有时长
+    fresh_state(True)
+    CUR["v"] = fake_state(True, loop=0)
+    tick_with([FakeNotifier()])
+    st = load_st()
+    check("旧状态文件里没有 live_started_at 时会补记一次",
+          bool(st.get("live_started_at")), "live_started_at=%s" % st.get("live_started_at"))
+    check("补记出来的时刻就是刚才，不是接口那个陈旧值",
+          abs(w._age_seconds(st.get("live_started_at"), w.datetime.now(w.CST))) < 120,
+          "已过去 %s 秒" % w._age_seconds(st.get("live_started_at"), w.datetime.now(w.CST)))
+    check("补记的值同样标成「下限」", st.get("live_started_approx") is True)
+
+    # 10g _pick_live_start 的取舍：接口值像真的就用，不像就退
+    ref_now = w.datetime.now(w.CST)
+    ok_state = fake_state(True, loop=0)
+    ok_state["start_time"] = (ref_now - w.timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+    iso, approx = w._pick_live_start(ok_state, False, cfg, ref_now)
+    check("接口给的开播时间在合理范围内就采用它", approx is False,
+          "下限标记=%s 值=%s" % (approx, iso))
+    check("采用的就是接口那个时刻（距今 45 分钟）",
+          abs((w._age_seconds(iso, ref_now) or -1) - 2700) < 2,
+          "距今 %s 秒" % w._age_seconds(iso, ref_now))
+    for label, c, lp in (
+            ("落在未来", dict(ok_state, start_time=(
+                ref_now + w.timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")), False),
+            ("太旧（超过 notify_end_max_hours）",
+             dict(ok_state, start_time="2026-01-01 20:00:00"), False),
+            ("轮播中（show_time 是轮播场次起点，不能用）", ok_state, True)):
+        iso2, approx2 = w._pick_live_start(c, lp, cfg, ref_now)
+        check("开播时间%s → 退回本轮并标成下限" % label, approx2 is True,
+              "下限标记=%s 值=%s" % (approx2, iso2))
+
+    # 10h 状态文件被手改坏 —— 不能崩，也不能编一个时长出来
+    fresh_state(True)
+    save_st({"live_started_at": "看不出来是什么时间"})
+    CUR["v"] = fake_state(True, loop=0)
+    crashed = None
+    try:
+        tick_with([FakeNotifier()])
+    except Exception as exc:  # noqa: BLE001
+        crashed = exc
+    check("live_started_at 是乱写的字符串时 tick 不崩", crashed is None, "异常=%r" % crashed)
+    check("乱写的值被当成「没有」，自动补记一个新的（能救回来）",
+          w._parse_iso(load_st().get("live_started_at")) is not None,
+          "live_started_at=%r" % load_st().get("live_started_at"))
+
+    fresh_state(True)
+    save_st({"live_started_at": {"坏": "结构也不对"}, "live_started_approx": "也许"})
+    CUR["v"] = fake_state(True, loop=0)
+    tick_with([FakeNotifier()])          # 这一轮会把坏值补记掉
+    CUR["v"] = fake_state(False)
+    d3 = FakeNotifier()
+    crashed = None
+    try:
+        tick_with([d3])
+        tick_with([d3])
+    except Exception as exc:  # noqa: BLE001
+        crashed = exc
+    check("开播时刻结构损坏 + 标记类型也不对，下播流程依然不崩",
+          crashed is None, "异常=%r" % crashed)
+    check("补记之后下播照样有（下限）时长",
+          len(d3.sent) == 1 and "直播时长：不到 1 分钟" in d3.sent[0],
+          "实际 %r" % (d3.sent[0].splitlines() if d3.sent else None))
+
+    # 10i 下播那一刻才发现时刻不可用：只报下播，不写时长行。
+    # 这里把 confirm_rounds 临时压到 1，好让「下播」在一次 tick 内就成立 ——
+    # 否则前一轮的补记逻辑早把坏值救回来了，走不到这个防御分支。
+    cfg["confirm_rounds"] = 1
+    fresh_state(True)
+    save_st({"live_started_at": "2020-13-45 99:99:99", "live_started_approx": False})
+    CUR["v"] = fake_state(False)
+    d4 = FakeNotifier()
+    crashed = None
+    try:
+        tick_with([d4])
+    except Exception as exc:  # noqa: BLE001
+        crashed = exc
+    check("非法日期的开播时刻不会让下播流程崩", crashed is None, "异常=%r" % crashed)
+    check("算不出时长时就只报下播、不编时长行",
+          len(d4.sent) == 1 and "直播时长" not in d4.sent[0],
+          "实际 %r" % (d4.sent[0].splitlines() if d4.sent else None))
+    check("读不懂的日期不会被原样印进通知（宁可退回接口值）",
+          len(d4.sent) == 1 and "2020-13-45" not in d4.sent[0],
+          "实际 %r" % (d4.sent[0].splitlines() if d4.sent else None))
+    check("下播通知本身照发（不能因为时长缺失就不通知）",
+          len(d4.sent) == 1 and "【斗鱼下播】" in d4.sent[0])
+    # 开播时刻缺失（而不是非法）时同理 —— 一样只报下播
+    fresh_state(True)
+    save_st({"live_started_at": None})
+    d5 = FakeNotifier()
+    crashed = None
+    try:
+        tick_with([d5])
+    except Exception as exc:  # noqa: BLE001
+        crashed = exc
+    check("开播时刻缺失时也只报下播、不写时长行",
+          crashed is None and len(d5.sent) == 1 and "直播时长" not in d5.sent[0],
+          "异常=%r 实际 %r" % (crashed, d5.sent[0].splitlines() if d5.sent else None))
+    cfg["confirm_rounds"] = 2
+
+    # 10j --tick 的回执也要带时长：翻日志就能直接回答「上一场播了多久」
+    cfg["notify_on_end"] = True
+    fresh_state(False)
+    CUR["v"] = fake_state(True, loop=0)
+    real_build = w.build_notifiers
+    w.build_notifiers = lambda c: [FakeNotifier()]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            w.cmd_tick(cfg)
+            w.cmd_tick(cfg)
+        save_st({"live_started_at": now_ago(hours=2, minutes=30),
+                 "live_started_approx": False})
+        CUR["v"] = fake_state(False)
+        with contextlib.redirect_stdout(buf):
+            w.cmd_tick(cfg)
+            w.cmd_tick(cfg)
+    finally:
+        w.build_notifiers = real_build
+    out = buf.getvalue()
+    check("--tick 的回执里带上了本次直播时长", "2 小时 30 分" in out,
+          "末行=%r" % ((out.strip().splitlines() or [""])[-1][:110]))
+
 finally:
     if backup is not None:
         with open(STATE, "w", encoding="utf-8") as fp:
