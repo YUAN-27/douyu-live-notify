@@ -168,6 +168,24 @@ def read_text(path, limit_bytes=262144):
         return None, 0
 
 
+def read_new_bytes(path, byte_pos, fallback_bytes=262144):
+    """读 path 从 byte_pos 到末尾的新增字节。返回 (text, size)。
+
+    用字节偏移（而不是行号）跟踪扫描进度：read_text 只读尾部 256KB，
+    行号会随日志增长而错位，导致「通知失败」漏扫。
+    byte_pos 越界（日志被轮转/清空）时退回只扫尾部 fallback_bytes。
+    """
+    try:
+        size = os.path.getsize(path)
+        if byte_pos < 0 or byte_pos > size:
+            byte_pos = max(0, size - fallback_bytes)
+        with open(path, "rb") as fp:
+            fp.seek(byte_pos)
+            return fp.read().decode("utf-8", errors="replace"), size
+    except OSError:
+        return None, 0
+
+
 def load_json(path):
     try:
         with open(path, "r", encoding="utf-8") as fp:
@@ -800,8 +818,10 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
                        runner=runner, http=http, test_online=napcat_probe)
 
     # ---- 检查 3：日志里的通知失败 ----
-    text, _ = read_text(tick_log)
-    fails, errors, total_lines = scan_log_tail(text or "", int(st.get("alert_scan_lines") or 0))
+    text, total_pos = read_new_bytes(tick_log, int(st.get("alert_scan_pos") or 0))
+    _lines = (text or "").splitlines()
+    fails = [ln.strip() for ln in _lines if NOTIFY_FAIL_PAT.search(ln)]
+    errors = [ln.strip() for ln in _lines if ERROR_LINE_PAT.match(ln.strip())]
 
     # ---- 汇总本轮要发的告警 ----
     pending = []   # (kind_key, level, title, body)
@@ -984,7 +1004,7 @@ def run_once(args, runner=run_cmd, http=http_json, napcat_probe=None,
     st["last_run"] = now_text()
     st["last_hb_seq"] = tick["seq"] if tick["seq"] is not None else st.get("last_hb_seq")
     st["hb_same_count"] = tick["same_count"]
-    st["alert_scan_lines"] = total_lines
+    st["alert_scan_pos"] = total_pos
     st["active_alerts"] = active
     st["alert_sent"] = last_sent
     st["napcat_verdict"] = nap["verdict"]
@@ -1120,7 +1140,7 @@ def daily_ok_texts(today=None):
         "哪天没收到，说明机器或者看门狗本身出问题了。"
     )
 
-    faces = [x for x in re.split(r"[,，\s]+", str(cfg_get("DAILY_OK_KAOMOJI"))) if x]
+    faces = [x for x in re.split(r"[,，]+", str(cfg_get("DAILY_OK_KAOMOJI"))) if x]
     if faces:
         if today:
             try:
