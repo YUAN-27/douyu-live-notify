@@ -19,7 +19,7 @@
 【CS2 今日赛程】2026-10-03
 
 14:00  TYLOO vs Lynn Vision Gaming · Bo3 · BLAST Premier Fall
-17:30  Rare Atom vs The MongolZ · Bo3 · IEM Cologne 2026
+17:30  TYLOO vs Team Liquid · Bo3 · IEM Cologne 2026
 
 共 2 场。
 数据来源：Liquipedia
@@ -87,7 +87,7 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 | `enabled` | `true` | 总开关。`false` 时脚本立刻退出，systemd 不会当成失败 |
 | `ua_contact` | 项目地址 + 邮箱 | Liquipedia 要求在 User-Agent 里写联系方式，**别删** |
 | `major_keywords` | 17 个 | 子串匹配赛事名，大小写不敏感。这是「算不算大赛」的**全部依据** |
-| `cn_teams` | 8 个 | **精确匹配**队名。别用模糊匹配 |
+| `cn_teams` | 2 个 | **精确匹配**队名。别用模糊匹配 |
 | `fold_hint` | `15` | 超过这么多场就只列前 N 场（0 = 不折叠） |
 | `calm_after_empty_days` | `7` | 连续静默多少天后发报平安（0 = 从不发） |
 | `fetch_retry_max` | `3` | 抓取重试次数（含首次） |
@@ -102,9 +102,11 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 `The MongolZ` / `IHC` / `ATOX` / `NKT` / `Chinggis Warriors` 这类**蒙古国队伍**误判成中国队 ——
 这是这个功能最容易搞错的一点。
 
-当前白名单：`TYLOO`、`Lynn Vision Gaming`、`Rare Atom`、`Wings Up Gaming`、
-`Steel Helmet`、`NewHappy`、`The Huns`、`Talon Esports`（中国香港）。
-发现有漏的中国队，按 Liquipedia 上的**全名**加进来。
+当前白名单**只有 2 支**：`TYLOO`、`Lynn Vision Gaming`。
+（早期版本还收过 `Rare Atom`、`Wings Up Gaming`、`Steel Helmet`、`NewHappy`、
+`The Huns`、`Talon Esports` —— 2026-09-30 按用户要求收窄，需要时按 Liquipedia 上的
+**全名**加回来，别用缩写。）
+发现有漏的中国队，同样按全名加进 `esports.cn_teams`。
 
 ---
 

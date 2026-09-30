@@ -86,12 +86,14 @@ DEFAULT_MAJOR_KEYWORDS = [
 
 # 中国队白名单（**精确匹配**队名，不模糊 —— 模糊匹配会把「The MongolZ」这类
 # 别国队伍误判进来）。
+# 2026-09-30 按用户要求收窄到 2 支，只保留最确定的两支。
+# 早期版本还收过 Rare Atom / Wings Up Gaming / Steel Helmet / NewHappy /
+# The Huns / Talon Esports，需要时按**Liquipedia 上的全名**加回来，别用缩写。
 # ⚠️ 蒙古国队伍（The MongolZ / IHC / ATOX / NKT / Chinggis Warriors）**不是中国队**，
 #    这是最容易搞错的一点，别加进来。
 DEFAULT_CN_TEAMS = [
-    "TYLOO", "Lynn Vision Gaming", "Rare Atom", "Wings Up Gaming",
-    "Steel Helmet", "NewHappy", "The Huns",
-    "Talon Esports",          # 中国香港
+    "TYLOO",
+    "Lynn Vision Gaming",
 ]
 
 ESPORT_DEFAULTS = {
@@ -775,6 +777,15 @@ def selftest():
     t.check("默认白名单非空", bool(merged["major_keywords"]) and bool(merged["cn_teams"]))
     t.check("默认白名单不含蒙古队",
             not any("mongol" in t.lower() for t in merged["cn_teams"]))
+    t.check("默认中国队白名单就是约定的 2 支",
+            merged["cn_teams"] == ["TYLOO", "Lynn Vision Gaming"], merged["cn_teams"])
+    t.check("已移出的队伍不再算中国队",
+            not has_cn_team({"teams": ["Rare Atom", "X"]}, merged["cn_teams"]))
+    t.check("已移出的队伍大小写混写也不算",
+            not has_cn_team({"teams": ["rare atom", "X"]}, merged["cn_teams"]))
+    t.check("保留的两支大小写混写仍算中国队",
+            has_cn_team({"teams": ["tyloo", "X"]}, merged["cn_teams"])
+            and has_cn_team({"teams": ["LYNN VISION GAMING", "X"]}, merged["cn_teams"]))
     t.check("解析空配置不炸", resolve_config({})["fold_hint"] == 15)
 
     ua = build_ua({"ua_contact": "me@example.com"})
