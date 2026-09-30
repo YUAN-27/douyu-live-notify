@@ -31,6 +31,9 @@
 - **自带看门狗**：`watch.py` 有两个静默失败（掉线不发、停摆不说），
   看门狗每 2 分钟独立体检一次并告警，能自愈的自己动手。有一条**独立于 QQ 的告警通道**，
   所以掉线时也通知得到你 —— 详见 `deploy/WATCHDOG.md`
+- **顺带每天报一次 CS2 赛程**：每天北京 09:30 抓一次 Liquipedia，只推「今天还没开打」的
+  **大赛**和**有中国队参赛**的场次；没比赛就静默，但连着静默满 7 天会报个平安 ——
+  免得「今天没比赛」和「程序挂了」长得一样。独立功能，不要可以整个删掉 —— 详见 `deploy/ESPORTS.md`
 
 ---
 
@@ -113,7 +116,10 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/watchdog.py --selftest` | 看门狗离线自检，不联网、不碰 docker |
 | `python deploy/watchdog.py --test-alert` | 验证告警通道真的通（部署后必做） |
 | `python deploy/watchdog.py --recover-notify` | 手动补一条丢失的开播通知（**兜底**：发送失败通常会自动补发，只有重试到顶才需要它） |
-| `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py`，并归一为 LF） |
+| `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
+| `python deploy/esports.py --selftest` | 赛程预告离线自检，不联网、不发消息 |
+| `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
+| `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py`，并归一为 LF） |
 | `python qr_make.py --url "<日志里的二维码链接>"` | 把 NapCat 登录二维码在本地变成可扫的图片（见下方「扫码登录」） |
 
 ---
@@ -211,6 +217,9 @@ deploy/
 ├── selftest.py            逻辑自检（部署包里有副本，源头在仓库根目录）
 ├── watchdog.py            看门狗：体检「有没有在跑 / 掉线没有 / 通知丢了没」并自愈
 ├── WATCHDOG.md            看门狗设计说明 + 「怎么验证它真的会叫」
+├── esports.py             CS2 每日赛程预告（独立功能，可选）
+├── ESPORTS.md             赛程预告的口径、限制、排查，以及改选择器时的注意事项
+├── check-esports-net.py   赛程数据源连通性自检（上线前先跑，只读）
 ├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1，ACCOUNT 必填）
 ├── .env.example           WebUI token / 机器人 QQ 号 / 容器内存上限模板
 ├── config.example.json    配置模板
@@ -218,9 +227,10 @@ deploy/
 ├── setup-docker-mirror.sh 探测可用的 Docker 镜像源
 ├── mem-report.sh          内存被谁占了（只读，含 OOM 历史）
 ├── add-swap.sh            加/删 swap（幂等、可撤销，小内存机器用）
-├── install-watch.sh       安装 watch.py / watchdog.py 与 systemd 单元
+├── install-watch.sh       安装 watch.py / watchdog.py / esports.py 与 systemd 单元
 ├── douyu-watch.{service,timer}  systemd 每分钟拉起 watch.py --tick
 ├── douyu-watchdog.{service,timer}  每 2 分钟体检一次，异常时告警 / 自愈
+├── douyu-esports.{service,timer}   每天北京 09:30 推一次 CS2 今日赛程
 ├── watchdog.env.example   告警通道与阈值模板（装到 /etc/default/douyu-watchdog）
 └── douyu-watch.tmpfiles   日志与状态目录兜底（装到 /etc/tmpfiles.d/）
 ```
@@ -239,6 +249,15 @@ deploy/
 配法 `ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=<token>`；
 Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 —— 两个都用 `;` 连起来写即可。
 
+**CS2 每日赛程预告（可选，独立功能）**：`esports.py` 每天北京 09:30 抓一次 Liquipedia，
+只推「今天还没开打」的**大赛**和**有中国队参赛**的场次 —— 大赛靠赛事名关键词认，
+中国队靠队名白名单认。两个名单都在 `config.json` 的 `esports` 段里可改，
+**整段不写也行**（内置默认值就能跑）。没有符合条件的比赛就**静默**；
+连着静默满 7 天会发一条报平安，这样「今天没比赛」和「程序挂了」在群里长得不一样。
+抓取失败会单独告警，并明确写「这不等于今天没有比赛」。
+上线前先跑 `python3 esports.py --check` 看清楚会发什么（**只抓不发、不写状态**）。
+口径、已知限制与排查见 `ESPORTS.md`。
+
 用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
 （只读，不改任何东西）看环境，然后照 `DEPLOY.md` 一步步走。
 **如果你想让 AI agent 来部署，直接把 `AGENT_PROMPT.md` 里那份提示词丢给它。**
@@ -251,13 +270,13 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
 python pack_deploy.py        # 生成 deploy.zip
 ```
 
-包里必须同时有 `watch.py`、`selftest.py`、`watchdog.py` 和 `install-watch.sh`，
+包里必须同时有 `watch.py`、`selftest.py`、`watchdog.py`、`esports.py` 和 `install-watch.sh`，
 而且这些文件在同一层 —— `install-watch.sh` 是从自己所在目录往上找源文件的，
 少一个就会报「找不到」。手动 `zip -r deploy.zip deploy/` 很容易漏掉仓库根目录的两个 .py，
 所以这件事交给脚本做，缺文件时它会直接报错、不生成包。它还会把文本文件统一转成 LF
 （Windows 上工作区常是 CRLF，带进包里的 shell 脚本到 Linux 上会报 `$'\r': command not found`）。
 
-装完之后 `install-watch.sh` 会打印 `watch.py` / `selftest.py` / `watchdog.py`
+装完之后 `install-watch.sh` 会打印 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py`
 的 sha256 前 16 位，以后怀疑「服务器上是不是旧版」，和仓库里的对一下即可。
 
 ### 扫码登录 QQ（不需要 SSH 隧道）
@@ -299,6 +318,10 @@ python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"    # 生成 qr.png
 | 群里收不到消息 | 机器人不在群里 / 被禁言 / 定时器没开 | `get_group_list` 核对群号 |
 | 机器人掉线了但我不知道 | `watch.py` 不做健康检查 | 装看门狗，然后 `python deploy/watchdog.py --status` 一眼看健康；掉线会自动告警 |
 | 丢了某条开播通知 | 发送失败时正文会记进状态文件，**后续轮次自动补发**（1、2、4、8… 分钟退避，默认最多 30 次 / 6 小时） | 一般不用管；看到 `放弃自动重试` 才手动 `python deploy/watchdog.py --recover-notify`（主播仍在播时有效） |
+| 赛程预告没发，也不确定是没比赛还是坏了 | 两者故意长得不一样，但只看群看不出来 | `tail -n 50 /var/log/douyu-watch/esports.log`：`[silent]` = 今天确实没比赛；`[error]` = 抓取/发送失败 |
+| 赛程预告里出现了没中国队参加、也不算大赛的比赛 | 撞了 `major_keywords` 的关键词。例如 `eXTREMESLAND` 会连它各区预选赛一起命中 | 从 `config.json` 的 `esports.major_keywords` 里删掉那个关键词 |
+| 赛程预告抓不到数据（`HTTP 406` / `403` / `429`） | User-Agent 或 gzip 不合格 / 被封 / 限流 | 检查 `esports.ua_contact` 别留空；限流就调大 `parse_min_interval_seconds` |
+| 赛程预告报「一个比赛都没解析出来」 | Liquipedia 页面结构变了 | 见 `ESPORTS.md` 第 7 节；**`esports.py` 和 `check-esports-net.py` 里的解析器要一起改** |
 
 ### 关于 `at_all`（@全体成员）
 

@@ -132,6 +132,32 @@ else
   echo "⚠️ 没找到 watchdog.py（症状：日志里会少一路掉线告警）"
 fi
 
+# CS2 每日赛程预告。也在 deploy/ 里，规矩同 watchdog.py ——
+# 要覆盖先比指纹，不一致就备份并说明，不静默换掉你在服务器上改过的版本。
+if [[ -f "$UNIT_DIR/esports.py" ]]; then
+  est="$APP_DIR/esports.py"
+  if [[ "${WD_KEEP_LOCAL:-0}" == "1" && -f "$est" ]]; then
+    echo "WD_KEEP_LOCAL=1 → 保留已有的 $est，不更新"
+  elif [[ -f "$est" ]]; then
+    old_sum=$(sha256sum "$est" 2>/dev/null | cut -c1-16 || true)
+    new_sum=$(sha256sum "$UNIT_DIR/esports.py" 2>/dev/null | cut -c1-16 || true)
+    if [[ -n "$old_sum" && -n "$new_sum" && "$old_sum" != "$new_sum" ]]; then
+      ebak="$est.bak.$(date +%Y%m%d%H%M%S)"
+      cp -a "$est" "$ebak"
+      cp -a "$UNIT_DIR/esports.py" "$est"
+      echo "已放入 $est（指纹 ${old_sum} → ${new_sum}）"
+      echo "  ⚠️ 新旧不同：你在服务器上改过的内容被换掉了，旧版备份：$ebak"
+    else
+      echo "已放入 $est（指纹 ${new_sum:-未知}，与原有版本一致）"
+    fi
+  else
+    cp -a "$UNIT_DIR/esports.py" "$est"
+    echo "已放入 $est"
+  fi
+else
+  echo "⚠️ 没找到 esports.py（症状：不会有每日赛程预告）"
+fi
+
 # 诊断脚本：只读工具，「开播了但群里没收到」时先跑它。规矩同 watchdog.py ——
 # 要覆盖先比指纹，不一致就备份并说明，不静默换掉你在服务器上改过的版本。
 if [[ -f "$UNIT_DIR/why-no-notify.sh" ]]; then
@@ -191,6 +217,14 @@ if [[ -f "$UNIT_DIR/douyu-watchdog.service" && -f "$UNIT_DIR/douyu-watchdog.time
   install -m 644 "$UNIT_DIR/douyu-watchdog.service" /etc/systemd/system/douyu-watchdog.service
   install -m 644 "$UNIT_DIR/douyu-watchdog.timer"   /etc/systemd/system/douyu-watchdog.timer
   echo "已安装 douyu-watchdog.service / douyu-watchdog.timer（尚未启用）"
+fi
+
+# CS2 赛程预告单元。同样**只装不 enable** —— 它会往群里发消息，
+# 先手工跑一次 --check 看清楚要发什么，再决定开不开。
+if [[ -f "$UNIT_DIR/douyu-esports.service" && -f "$UNIT_DIR/douyu-esports.timer" ]]; then
+  install -m 644 "$UNIT_DIR/douyu-esports.service" /etc/systemd/system/douyu-esports.service
+  install -m 644 "$UNIT_DIR/douyu-esports.timer"   /etc/systemd/system/douyu-esports.timer
+  echo "已安装 douyu-esports.service / douyu-esports.timer（尚未启用）"
 fi
 
 # 看门狗的告警通道配置。**已存在绝不覆盖** —— 里面是你要填的 webhook 密钥。
@@ -279,18 +313,44 @@ cat <<'EOF'
        敢开它的前提是「重启免扫码自动登录」已经验收通过（见 DEPLOY.md）。
        没验过就先在 /etc/default/douyu-watchdog 里设 AUTO_RESTART=0。
 
+【8】CS2 每日赛程预告（可选，独立功能，和主播开播提醒互不影响）
+
+    a) 先离线自检（不联网、不发消息、不写状态）
+       cd /opt/douyu-live-notify && python3 esports.py --selftest
+
+    b) 看今天到底会发什么 —— **只抓取 + 打印，不发消息、不写状态**
+       cd /opt/douyu-live-notify && python3 esports.py --check
+       如果没内容，那是「今天没有大赛、也没有中国队参赛」，正式跑会自动静默。
+       连续静默满 7 天会发一条报平安 —— 免得「今天没比赛」和「程序挂了」长得一样。
+
+    c) 想改口径（哪些算大赛 / 哪些算中国队）就编辑 config.json 的 esports 段。
+       ⚠️ 整个 esports 段也可以不写，那样全用程序内置的默认值，功能照常。
+       ⚠️ cn_teams 是**精确匹配**队名，不是子串；别把蒙古队 The MongolZ 加进来
+          （蒙古国队伍不是中国队），这是最容易搞错的一点。
+
+    d) 确认 --check 的输出没问题后，才启用（每天北京 09:30，带时区后缀不受服务器时区影响）
+       systemctl enable --now douyu-esports.timer
+       systemctl list-timers douyu-esports.timer
+       tail -f /var/log/douyu-watch/esports.log
+
 【回滚】
+    # 只回滚赛程预告：
+    systemctl disable --now douyu-esports.timer
+    rm -f /etc/systemd/system/douyu-esports.{service,timer}
+    systemctl daemon-reload
     # 只回滚看门狗：
     systemctl disable --now douyu-watchdog.timer
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     systemctl daemon-reload
     # 全部回滚：
-    systemctl disable --now douyu-watch.timer douyu-watchdog.timer
+    systemctl disable --now douyu-watch.timer douyu-watchdog.timer douyu-esports.timer
     rm -f /etc/systemd/system/douyu-watch.{service,timer}
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
+    rm -f /etc/systemd/system/douyu-esports.{service,timer}
     systemctl daemon-reload
     # 注意：不回滚 /var/log/douyu-watch（日志留着排错）和
-    #       /var/lib/douyu-watchdog（告警历史留着）、/etc/default/douyu-watchdog（你的密钥）
+    #       /var/lib/douyu-watchdog（告警历史留着）、/etc/default/douyu-watchdog（你的密钥）、
+    #       /opt/douyu-live-notify/state_esports.json（连续静默天数）
     #       确认不再用的时候自己删。
 
 ===============================================================

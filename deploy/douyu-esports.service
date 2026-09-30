@@ -1,0 +1,28 @@
+[Unit]
+Description=斗鱼开播提醒 · CS2 每日赛程预告（由 douyu-esports.timer 每天 09:30 拉起）
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# esports.py 用 __file__ 定位 config.json 和 state_esports.json，
+# 所以 WorkingDirectory 不影响读写；留着是为了排错时路径直观。
+WorkingDirectory=/opt/douyu-live-notify
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py
+
+# 单次跑几秒，但抓取失败时会按 Liquipedia 条款（1 次 / 30 秒）退避重试，
+# 最多 3 次 ≈ 60 秒；再加发送重试，给 300 秒余量。
+TimeoutStartSec=300
+
+# 复用 watch.py 已经建好的日志目录（由 /etc/tmpfiles.d/douyu-watch.conf 保证存在）。
+# 顺手 tail 两个日志：tail -f /var/log/douyu-watch/*.log
+StandardOutput=append:/var/log/douyu-watch/esports.log
+StandardError=append:/var/log/douyu-watch/esports.log
+
+# 最小权限。和 douyu-watch.service 一致 —— 它不需要 docker/systemctl 权限。
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true

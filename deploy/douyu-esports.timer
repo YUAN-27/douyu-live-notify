@@ -1,0 +1,18 @@
+[Unit]
+Description=每天 09:30（北京）抓一次 CS2 赛程，推「今日赛程预告」
+
+[Timer]
+# ⚠️ 显式带时区后缀 Asia/Shanghai —— 这样服务器时区哪怕是 UTC，也准点在北京 09:30 跑。
+#    不带后缀的话，systemd 按**本机时区**解释，服务器时区一改时间就整体平移。
+#    （时区后缀需要 systemd >= 212，Ubuntu 20.04+ 都满足。）
+OnCalendar=*-*-* 09:30:00 Asia/Shanghai
+
+# 那一刻机器没开着（重启 / 关机 / 整机维护）→ 开机后补跑一次。
+# 这条是必须的：Daily 类定时器一旦错过就整天不发，而「静默」在本功能里
+# 是有含义的（约定了没比赛才静默），不能因为机器没开机而混淆。
+Persistent=true
+
+Unit=douyu-esports.service
+
+[Install]
+WantedBy=timers.target

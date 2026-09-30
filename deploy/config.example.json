@@ -34,5 +34,25 @@
     "target_type": "c2c",
     "group_openid": "",
     "user_openid": ""
+  },
+
+  "_comment_esports": "CS2 每日赛程预告（esports.py，由 douyu-esports.timer 每天北京 09:30 拉起）。**这一段整个可以不要** —— 删掉就全用程序内置的默认值，功能照常工作。想改口径时才加上其中某几项。推送通道沿用上面的 channels，所以 NapCat 挂了它也发不出去，这跟开播提醒是同一个前提。",
+  "_comment_esports_scope": "口径：只发「今天还没开打」+「大赛 或 有中国队参赛」的比赛。不满足就静默；连续静默满 calm_after_empty_days 天会发一条报平安，免得「今天没比赛」和「程序挂了」长得一样。",
+  "_comment_esports_keywords": "major_keywords：子串匹配赛事名（大小写不敏感）。页面上拿不到赛事分级（S/A/B 是客户端过滤，没写进 HTML），所以「算不算大赛」只能靠赛事名认，这份名单就是全部依据。例如把 eXTREMESLAND 去掉，就不会再推它各区预选赛。",
+  "_comment_esports_cn": "cn_teams：**精确匹配**队名（不是子串）。别用模糊匹配，否则 The MongolZ 这类会被误判进来 —— 蒙古国队伍不是中国队，别加。",
+  "esports": {
+    "enabled": true,
+    "ua_contact": "https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com",
+    "major_keywords": [
+      "BLAST", "IEM", "ESL Pro League", "Major", "PGL", "Perfect World",
+      "Esports World Cup", "DreamHack", "ESL One", "CCT", "ESL Challenger",
+      "eXTREMESLAND", "FISSURE", "Thunderpick", "YaLLa", "BetBoom", "Skyesports"
+    ],
+    "cn_teams": [
+      "TYLOO", "Lynn Vision Gaming", "Rare Atom", "Wings Up Gaming",
+      "Steel Helmet", "NewHappy", "The Huns", "Talon Esports"
+    ],
+    "fold_hint": 15,
+    "calm_after_empty_days": 7
   }
 }
