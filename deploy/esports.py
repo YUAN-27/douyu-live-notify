@@ -10,6 +10,12 @@ CS2 赛程，挑出**今天还没开打**、且满足下面任一条件的比赛
 
   · 大赛（赛事名命中 esports.major_keywords 里的关键词）
   · 有中国队参赛（队名精确命中 esports.cn_teams 白名单）
+  · 有知名队伍参赛（队名精确命中 esports.notable_teams 白名单）
+
+后两条是**精确匹配**队名，不是子串：`The MongolZ` 这种别国队伍不会被归成中国队，
+`MOUZ NXT` 也不会因为主队 `MOUZ` 在白名单里就跟着混进来。大小写无所谓，
+但**措辞必须和页面上一致**（`Team Liquid` ≠ `Liquid`）—— 写错了不报错、只会静默漏发，
+所以改名单前先用 `--teams` 把页面上的真实队名打出来照着抄。
 
 没有符合条件的比赛就**静默**（不发消息），但连续静默满 7 天会发一条「报平安」——
 免得「今天没比赛」和「程序挂了」在群里长得一模一样。
@@ -33,6 +39,7 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
 ----
     python3 esports.py                 # 正常跑一轮（该发就发，该静默就静默）
     python3 esports.py --check         # 只抓 + 打印将要发的内容，**不发消息、不写状态**
+    python3 esports.py --teams         # 列出页面上的真实队名 + 是否已收录，用来校白名单
     python3 esports.py --test-notify   # 往配置的通道发一条测试消息（验证链路用）
     python3 esports.py --selftest      # 离线自检，不联网、不发消息
 
@@ -96,6 +103,38 @@ DEFAULT_CN_TEAMS = [
     "Lynn Vision Gaming",
 ]
 
+# 「知名队伍」白名单（同样是**精确匹配**队名）。
+#
+# 为什么需要它：真正的一线强队经常在 Stake Ranked / iBUYPOWER Masters / Leon.bet
+# 这类小赛事里出场，光靠赛事名关键词会把它们全漏掉。用「有没有名队在打」兜底。
+#
+# ⚠️ 名字必须和 Liquipedia 页面上**完全一致**（大小写无所谓，措辞必须对）。
+#    实测踩到的例子（2026-09-30 从页面上核对）：
+#      `Ninjas in Pyjamas` —— **不是** `NIP`
+#      `PaiN Gaming`       —— **不是** `PaiN`
+#      `Team Liquid`       —— **不是** `Liquid`
+#      `FaZe Clan`         —— **不是** `FaZe`
+#      `Natus Vincere`     —— **不是** `NAVI`
+#    大小写是忽略的：`HEROIC` / `heroic`、`Fnatic` / `fnatic` 都能匹配。
+#    拿不准就跑 `python3 esports.py --teams`，把页面上的真实队名打出来照着抄
+#    （它会同时标出哪些已收录、哪些还没收录）。
+#
+# 注：**学院队是独立队名**，精确匹配下不会误收。例如 `Natus Vincere Junior`
+#     和 `MOUZ NXT` 与主队 `Natus Vincere`、`MOUZ` 互不影响。
+DEFAULT_NOTABLE_TEAMS = [
+    # —— 这批的写法是 2026-09-30 从 Liquipedia 实际页面上核对过的 ——
+    "100 Thieves", "3DMAX", "Alliance", "Astralis", "B8", "BIG", "FaZe Clan",
+    "FlyQuest", "Fnatic", "GamerLegion", "HEROIC", "Imperial Esports",
+    "Luminosity Gaming", "M80", "Nemiga Gaming", "Ninjas in Pyjamas", "NRG",
+    "PaiN Gaming", "SAW", "Sangal Esports", "SINNERS Esports", "Team Liquid",
+    "Wildcard",
+    # —— 这批按 Liquipedia 惯用写法，还没在本页出现过，用 --teams 核对着补 ——
+    "9z Team", "Aurora Gaming", "Cloud9", "ENCE", "Eternal Fire",
+    "FURIA Esports", "G2 Esports", "Gaimin Gladiators", "Legacy", "MIBR", "MOUZ",
+    "Natus Vincere", "OG", "Passion UA", "Team Falcons", "Team Spirit",
+    "Team Vitality", "The MongolZ", "Virtus.pro",
+]
+
 ESPORT_DEFAULTS = {
     # 总开关。关掉后本脚本立刻退出，systemd 那边不会当成失败。
     "enabled": True,
@@ -103,6 +142,7 @@ ESPORT_DEFAULTS = {
     "ua_contact": "https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com",
     "major_keywords": DEFAULT_MAJOR_KEYWORDS,
     "cn_teams": DEFAULT_CN_TEAMS,
+    "notable_teams": DEFAULT_NOTABLE_TEAMS,
     # 超过多少场就开始折叠（只列前 N 场）。0 = 不折叠。
     "fold_hint": 15,
     # 连续静默多少天后发一条「报平安」，之后每满这么多天再发一次。0 = 从不发。
@@ -298,14 +338,36 @@ def is_major(m, keywords):
     return any((k or "").lower() in tour for k in (keywords or []) if k)
 
 
-def has_cn_team(m, cn_teams):
-    """队名精确命中中国队白名单（大小写不敏感，两端空白已由 tidy 去掉）。"""
-    allow = {(t or "").strip().lower() for t in (cn_teams or [])}
+def has_team(m, names):
+    """队名精确命中白名单（大小写不敏感，两端空白已由 tidy 去掉）。
+
+    **是精确匹配、不是子串匹配**，两个理由：
+      · 子串匹配会把 `The MongolZ` 这类别国队伍当成中国队；
+      · 也会让 `MOUZ` 命中学院队 `MOUZ NXT` —— 那是另一支队。
+    """
+    allow = {(t or "").strip().lower() for t in (names or [])}
+    if not allow:
+        return False
     return any((t or "").strip().lower() in allow for t in (m.get("teams") or []))
 
 
+def why_selected(m, es):
+    """这场比赛凭哪一条被选中：'major' / 'cn' / 'notable' / None。
+
+    单独抽出来，是为了让 --check / --teams 能说清「它是靠什么进来的」——
+    调白名单时不用猜。
+    """
+    if is_major(m, es.get("major_keywords")):
+        return "major"
+    if has_team(m, es.get("cn_teams")):
+        return "cn"
+    if has_team(m, es.get("notable_teams")):
+        return "notable"
+    return None
+
+
 def select_today(matches, now, es):
-    """挑出「今天还没开打、对阵已定、且属于大赛或有中国队」的比赛。
+    """挑出「今天还没开打、对阵已定，且 属于大赛 / 有中国队 / 有知名队伍」的比赛。
 
     为什么只要「还没开打」：这是一条**赛程预告**，09:30 发出去的时候，
     今天凌晨那几场早就打完了，列出来只会让人以为还有比赛可看。
@@ -314,9 +376,6 @@ def select_today(matches, now, es):
     day1 = day0 + timedelta(days=1)
     t0, t1 = day0.timestamp(), day1.timestamp()
     nowts = now.timestamp()
-
-    keywords = es.get("major_keywords") or []
-    cn_teams = es.get("cn_teams") or []
 
     out = []
     for m in matches:
@@ -328,10 +387,20 @@ def select_today(matches, now, es):
             continue
         if m["ts"] < nowts:                     # 只预告还没开打的
             continue
-        if not (is_major(m, keywords) or has_cn_team(m, cn_teams)):
+        if not why_selected(m, es):
             continue
         out.append(m)
     return out
+
+
+def pick_reasons(picked, es):
+    """统计这些场次各靠什么进来的，供 --check 打印。"""
+    counts = {"major": 0, "cn": 0, "notable": 0}
+    for m in picked:
+        r = why_selected(m, es)
+        if r:
+            counts[r] += 1
+    return counts
 
 
 # ==========================================================================
@@ -533,6 +602,10 @@ def run_once(cfg, args):
     picked = select_today(matches, now, es)
     log("[info] 页面共 %d 场，其中今天还没开打且符合条件的有 %d 场"
         % (len(matches), len(picked)))
+    if picked:
+        rc = pick_reasons(picked, es)
+        log("[info] 选择依据（每场只记第一条命中的）：大赛 %d 场 / 中国队 %d 场 / 知名队伍 %d 场"
+            % (rc["major"], rc["cn"], rc["notable"]))
 
     # ---- 组装 ----
     state = load_state()
@@ -573,6 +646,52 @@ def run_once(cfg, args):
 # ==========================================================================
 # 子命令
 # ==========================================================================
+
+def cmd_list_teams(cfg):
+    """把页面上出现的队名全打出来，并标出它命中哪个白名单 —— 维护白名单用。
+
+    只读：不发消息、不写状态。但**会真的联网抓一次**，所以别放进循环里跑。
+    """
+    es = resolve_config(cfg)
+    r = fetch_matches(es)
+    if r is None or not r["ok"]:
+        log("[error] 抓取失败：%s" % ((r or {}).get("error") or "未知错误"))
+        return 1
+    html_text, err = extract_html(r["text"])
+    if html_text is None:
+        log("[error] %s" % err)
+        return 1
+    matches = parse_matches(html_text)
+    if not matches:
+        log("[error] 一个比赛都没解析出来 —— 页面结构可能变了")
+        return 1
+
+    seen = {}
+    for m in matches:
+        for name in m["teams"]:
+            slot = seen.setdefault(name, {"cn": False, "notable": False, "n": 0})
+            slot["n"] += 1
+            if has_team({"teams": [name]}, es.get("cn_teams")):
+                slot["cn"] = True
+            if has_team({"teams": [name]}, es.get("notable_teams")):
+                slot["notable"] = True
+
+    log("页面共 %d 场，出现 %d 个不同队名。" % (len(matches), len(seen)))
+    log("标记：[中国队] / [知名] / [未收录]。想把某队加进白名单，"
+        "把名字**原样**抄进 config.json 的 esports.cn_teams / notable_teams。")
+    log("")
+    for name in sorted(seen, key=lambda x: x.lower()):
+        it = seen[name]
+        tags = ("[中国队]" if it["cn"] else "") + ("[知名]" if it["notable"] else "")
+        log("  %-10s %-28s 出场 %d 次" % (tags or "[未收录]", name, it["n"]))
+
+    blanks = [n for n in seen if not seen[n]["cn"] and not seen[n]["notable"]]
+    log("")
+    log("未收录 %d 个 —— 其中觉得算「知名」的，抄进 notable_teams 即可。" % len(blanks))
+    log("⚠️ 精确匹配：大小写无所谓，但**措辞必须原样**。"
+        "`Team Liquid` 和 `Liquid`、`NIP` 和 `Ninjas in Pyjamas` 不是一回事。")
+    return 0
+
 
 def cmd_test_notify(cfg):
     es = resolve_config(cfg)
@@ -701,8 +820,13 @@ def selftest():
         ("关键词大小写不敏感", mk(ts(14), ["A", "B"], "blast premier"), True),
         ("中国队命中", mk(ts(14), ["TYLOO", "The MongolZ"], "Stake Ranked"), True),
         ("中国队大小写不敏感", mk(ts(14), ["tyloo", "x"], "Stake Ranked"), True),
-        ("既非大赛也非中国队 → 丢掉", mk(ts(14), ["A", "B"], "Stake Ranked"), False),
-        ("蒙古队不算中国队", mk(ts(14), ["The MongolZ", "IHC"], "Stake Ranked"), False),
+        ("知名队伍命中", mk(ts(14), ["FaZe Clan", "X"], "Stake Ranked"), True),
+        ("知名队伍大小写不敏感", mk(ts(14), ["faze clan", "X"], "Stake Ranked"), True),
+        ("三条都不沾 → 丢掉", mk(ts(14), ["A", "B"], "Stake Ranked"), False),
+        ("蒙古队不算中国队（且不在知名名单里）",
+         mk(ts(14), ["IHC", "ATOX"], "Stake Ranked"), False),
+        ("学院队不算主队（MOUZ NXT）",
+         mk(ts(14), ["MOUZ NXT", "X"], "Stake Ranked"), False),
         ("TBD 丢掉", mk(ts(14), ["TBD", "TBD"], "BLAST Premier", tbd=True), False),
         ("队名不全丢掉", mk(ts(14), ["TYLOO"], "BLAST Premier"), False),
         ("已开打的丢掉", mk(ts(8), ["TYLOO", "B"], "BLAST Premier"), False),
@@ -713,6 +837,9 @@ def selftest():
     for name, m, want in cases:
         got = select_today([m], base, es)
         t.check(name, bool(got) == want, "want=%s got=%s" % (want, bool(got)))
+
+    t.check("蒙古队不算中国队（直接断言 has_team）",
+            not has_team({"teams": ["The MongolZ", "IHC"]}, es["cn_teams"]))
 
     t.check("边界：恰好此刻开打 → 保留",
             bool(select_today([mk(ts(9, 30), ["TYLOO", "B"], "IEM")], base, es)))
@@ -780,12 +907,45 @@ def selftest():
     t.check("默认中国队白名单就是约定的 2 支",
             merged["cn_teams"] == ["TYLOO", "Lynn Vision Gaming"], merged["cn_teams"])
     t.check("已移出的队伍不再算中国队",
-            not has_cn_team({"teams": ["Rare Atom", "X"]}, merged["cn_teams"]))
+            not has_team({"teams": ["Rare Atom", "X"]}, merged["cn_teams"]))
     t.check("已移出的队伍大小写混写也不算",
-            not has_cn_team({"teams": ["rare atom", "X"]}, merged["cn_teams"]))
+            not has_team({"teams": ["rare atom", "X"]}, merged["cn_teams"]))
     t.check("保留的两支大小写混写仍算中国队",
-            has_cn_team({"teams": ["tyloo", "X"]}, merged["cn_teams"])
-            and has_cn_team({"teams": ["LYNN VISION GAMING", "X"]}, merged["cn_teams"]))
+            has_team({"teams": ["tyloo", "X"]}, merged["cn_teams"])
+            and has_team({"teams": ["LYNN VISION GAMING", "X"]}, merged["cn_teams"]))
+
+    # ---- 知名队伍白名单 ----
+    t.check("知名队伍白名单非空", len(merged["notable_teams"]) >= 20,
+            len(merged["notable_teams"]))
+    t.check("知名白名单含一线强队",
+            all(n in merged["notable_teams"]
+                for n in ("FaZe Clan", "Team Liquid", "Astralis", "Natus Vincere")))
+    t.check("知名白名单不含中国队（两套名单各管各的）",
+            not set(merged["notable_teams"]) & set(merged["cn_teams"]))
+    t.check("精确匹配：MOUZ 不会命中学院队 MOUZ NXT",
+            not has_team({"teams": ["MOUZ NXT"]}, ["MOUZ"]))
+    t.check("精确匹配：Natus Vincere 不会命中青训队 Junior",
+            not has_team({"teams": ["Natus Vincere Junior"]}, ["Natus Vincere"]))
+    t.check("精确匹配：措辞差一点就不算（PaiN != PaiN Gaming）",
+            not has_team({"teams": ["PaiN Gaming"]}, ["PaiN"])
+            and not has_team({"teams": ["NIP"]}, ["Ninjas in Pyjamas"]))
+    t.check("精确匹配：大小写不算差异（paiN Gaming 仍命中）",
+            has_team({"teams": ["paiN Gaming"]}, ["PaiN Gaming"])
+            and has_team({"teams": ["heroic"]}, ["HEROIC"]))
+    t.check("空白名单不误命中", not has_team({"teams": ["FaZe Clan"]}, []))
+    t.check("白名单为 None 不炸", not has_team({"teams": ["FaZe Clan"]}, None))
+    t.check("队伍字段缺失不炸", not has_team({}, ["FaZe Clan"]))
+
+    # ---- why_selected：说清每场是靠什么进来的 ----
+    t.check("为什么入选：赛事名命中 -> major",
+            why_selected(_mk(ts(14), ["A", "B"], "BLAST Premier"), es) == "major")
+    t.check("为什么入选：中国队优先于知名队伍",
+            why_selected(_mk(ts(14), ["TYLOO", "FaZe Clan"], "Stake Ranked"), es) == "cn")
+    t.check("为什么入选：只靠知名队伍 -> notable",
+            why_selected(_mk(ts(14), ["FaZe Clan", "M80"], "Stake Ranked"), es) == "notable")
+    t.check("为什么入选：都不沾 -> None",
+            why_selected(_mk(ts(14), ["A", "B"], "Stake Ranked"), es) is None)
+
     t.check("解析空配置不炸", resolve_config({})["fold_hint"] == 15)
 
     ua = build_ua({"ua_contact": "me@example.com"})
@@ -806,6 +966,8 @@ def main(argv=None):
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="配置文件路径")
     parser.add_argument("--check", action="store_true",
                         help="只抓取并打印将要发送的内容，不发消息、不写状态")
+    parser.add_argument("--teams", action="store_true",
+                        help="列出页面上的所有队名，并标出命中哪个白名单（只读，维护白名单用）")
     parser.add_argument("--test-notify", action="store_true",
                         help="往配置的每个通道发一条测试消息（部署后先跑这个）")
     parser.add_argument("--selftest", action="store_true", help="离线自检，不联网")
@@ -815,6 +977,10 @@ def main(argv=None):
         return selftest()
 
     cfg = watch.load_config(args.config)
+
+    # --teams 只用 esports 段，不依赖 room_id / onebot，所以放在 validate_cfg 之前
+    if args.teams:
+        return cmd_list_teams(cfg)
 
     if args.test_notify:
         return cmd_test_notify(cfg)

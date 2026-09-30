@@ -32,7 +32,7 @@
   看门狗每 2 分钟独立体检一次并告警，能自愈的自己动手。有一条**独立于 QQ 的告警通道**，
   所以掉线时也通知得到你 —— 详见 `deploy/WATCHDOG.md`
 - **顺带每天报一次 CS2 赛程**：每天北京 09:30 抓一次 Liquipedia，只推「今天还没开打」的
-  **大赛**和**有中国队参赛**的场次；没比赛就静默，但连着静默满 7 天会报个平安 ——
+  **大赛**、**有中国队参赛**、**有知名队伍参赛**的场次；没比赛就静默，但连着静默满 7 天会报个平安 ——
   免得「今天没比赛」和「程序挂了」长得一样。独立功能，不要可以整个删掉 —— 详见 `deploy/ESPORTS.md`
 
 ---
@@ -117,6 +117,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/watchdog.py --test-alert` | 验证告警通道真的通（部署后必做） |
 | `python deploy/watchdog.py --recover-notify` | 手动补一条丢失的开播通知（**兜底**：发送失败通常会自动补发，只有重试到顶才需要它） |
 | `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
+| `python deploy/esports.py --teams` | **列出页面上的真实队名**并标出哪些已收录，改白名单前用它抄名字（不发消息、不写状态） |
 | `python deploy/esports.py --selftest` | 赛程预告离线自检，不联网、不发消息 |
 | `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py`，并归一为 LF） |
@@ -250,10 +251,12 @@ deploy/
 Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 —— 两个都用 `;` 连起来写即可。
 
 **CS2 每日赛程预告（可选，独立功能）**：`esports.py` 每天北京 09:30 抓一次 Liquipedia，
-只推「今天还没开打」的**大赛**和**有中国队参赛**的场次 —— 大赛靠赛事名关键词认，
-中国队靠队名白名单认。两个名单都在 `config.json` 的 `esports` 段里可改，
-**整段不写也行**（内置默认值就能跑）。没有符合条件的比赛就**静默**；
-连着静默满 7 天会发一条报平安，这样「今天没比赛」和「程序挂了」在群里长得不一样。
+只推「今天还没开打」的**大赛**、**有中国队参赛**、**有知名队伍参赛**的场次 ——
+大赛靠赛事名关键词认，中国队和知名队伍靠**队名白名单**认（精确匹配，大小写不敏感）。
+三个名单都在 `config.json` 的 `esports` 段里可改，**整段不写也行**（内置默认值就能跑）。
+不知道队名该怎么写就 `python3 esports.py --teams`，它把页面上的名字原样打出来照着抄。
+没有符合条件的比赛就**静默**；连着静默满 7 天会发一条报平安，这样
+「今天没比赛」和「程序挂了」在群里长得不一样。
 抓取失败会单独告警，并明确写「这不等于今天没有比赛」。
 上线前先跑 `python3 esports.py --check` 看清楚会发什么（**只抓不发、不写状态**）。
 口径、已知限制与排查见 `ESPORTS.md`。
@@ -319,7 +322,8 @@ python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"    # 生成 qr.png
 | 机器人掉线了但我不知道 | `watch.py` 不做健康检查 | 装看门狗，然后 `python deploy/watchdog.py --status` 一眼看健康；掉线会自动告警 |
 | 丢了某条开播通知 | 发送失败时正文会记进状态文件，**后续轮次自动补发**（1、2、4、8… 分钟退避，默认最多 30 次 / 6 小时） | 一般不用管；看到 `放弃自动重试` 才手动 `python deploy/watchdog.py --recover-notify`（主播仍在播时有效） |
 | 赛程预告没发，也不确定是没比赛还是坏了 | 两者故意长得不一样，但只看群看不出来 | `tail -n 50 /var/log/douyu-watch/esports.log`：`[silent]` = 今天确实没比赛；`[error]` = 抓取/发送失败 |
-| 赛程预告里出现了没中国队参加、也不算大赛的比赛 | 撞了 `major_keywords` 的关键词。例如 `eXTREMESLAND` 会连它各区预选赛一起命中 | 从 `config.json` 的 `esports.major_keywords` 里删掉那个关键词 |
+| 赛程预告里出现了没中国队参加、也不算大赛的比赛 | 撞了 `major_keywords` 的关键词。例如 `eXTREMESLAND` 会连它各区预选赛一起命中 | 从 `config.json` 的 `esports.major_keywords` 里删掉那个关键词（但若对阵里有知名队伍，仍会被 `notable_teams` 那条捞回来） |
+| 赛程预告该发的比赛没发，日志却是 `[silent]` | 队名**措辞**和白名单对不上 —— 精确匹配差一个词就静默漏发，且不报错 | `python deploy/esports.py --teams` 把页面上的真实队名原样抄进 `cn_teams` / `notable_teams` |
 | 赛程预告抓不到数据（`HTTP 406` / `403` / `429`） | User-Agent 或 gzip 不合格 / 被封 / 限流 | 检查 `esports.ua_contact` 别留空；限流就调大 `parse_min_interval_seconds` |
 | 赛程预告报「一个比赛都没解析出来」 | Liquipedia 页面结构变了 | 见 `ESPORTS.md` 第 7 节；**`esports.py` 和 `check-esports-net.py` 里的解析器要一起改** |
 
