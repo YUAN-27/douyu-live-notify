@@ -4,6 +4,22 @@
 > **适用场景**：这台机器上**已经在跑**（watch.py + 看门狗都装好了、定时器已启用），
 > 这次只是**更新代码**，不重装环境。
 > 全新部署请看 `AGENT_PROMPT.md`；卡在内存那一步的续跑请看 `RESUME_PROMPT.md`。
+>
+> ⚠️ **本文件的正文写于「装下播提醒」那一版，之后包又更新过两次**（新增 `esports.py`
+> 的 CS2 赛程预告、以及它的知名队伍白名单）。场景没变，但**第 0 步的指纹表已经按当前包
+> 更新过 —— 以那张表为准**。`esports.py` 是新增文件，服务器上原本没有，
+> `install-watch.sh` 会直接装上；它的定时器 `douyu-esports.timer` **装完是 disabled 的**，
+> 是否启用另说，不在本流程范围内。
+
+---
+
+## 这次的包比下面这张表更新（先看这里）
+
+| 提交 | 内容 | 你能看到的变化 |
+|---|---|---|
+| `78f0981` / `3bc7a79` | 新增 `esports.py`：CS2 每日赛程预告 + 知名队伍白名单 | 每天北京 09:30 推一条「今日赛程」（**需要另外启用 `douyu-esports.timer` 才会跑**） |
+
+下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 
 ---
 
@@ -36,21 +52,26 @@
 ```bash
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
-sha256sum watch.py selftest.py watchdog.py | cut -c1-16
-wc -c watch.py selftest.py watchdog.py
+sha256sum watch.py selftest.py watchdog.py esports.py | cut -c1-16
+wc -c watch.py selftest.py watchdog.py esports.py
 ```
 
-三个值必须完全一致：
+四个值必须完全一致：
 
 | 文件 | sha256 前 16 位 | 字节数 |
 |---|---|---|
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
-| `watchdog.py` | `d49b24c4427fb108` | 84789 |
+| `watchdog.py` | `0b66acce3c3d7571` | 85650 |
+| `esports.py` | `af414aa31c57d710` | 43143 |
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 
-> ⚠️ 别用 `python3 watchdog.py --version` 判断新旧 —— 它的 `VERSION` 这次**没有**跟着改
+> ⚠️ **这张表是权威**。不要把记忆里或旧文档里的值当基准 —— 这版 `watchdog.py` 的指纹
+> 和更早的 `UPDATE_PROMPT.md` 副本**已经不一样了**（那时是 `d49b24c4427fb108` / 84789，
+> 后来合回了线上手工打的 3 个修复）。看到「不符」先回来对这张表，别自行判断是新是旧。
+>
+> ⚠️ 别用 `python3 watchdog.py --version` 判断新旧 —— 它的 `VERSION` **一直没跟着改**
 > （仍是 `1.0.0`），看不出差别。**只认 sha256 指纹。**
 
 ---
@@ -78,7 +99,7 @@ sudo bash install-watch.sh
 
 **逐行读它的输出**，重点两处：
 
-1. 末尾「指纹（sha256 前 16 位）」三行 —— 必须与第 0 步一致
+1. 末尾「指纹（sha256 前 16 位）」那几行 —— 必须与第 0 步一致
 2. 应出现 `config.json 已存在，保持不动（不会覆盖你的 room_id 和 token）`。
    **如果它说「已放入 …/config.json」，说明原来那份没了 —— 立刻停下报告**：
    那意味着群号和 token 被模板顶掉了。
@@ -249,7 +270,7 @@ sudo cat /opt/douyu-live-notify/state_6979222.json
 
 ## 最后回报这几项
 
-1. 第 0 步三行 `sha256sum` 输出（原样）
+1. 第 0 步四行 `sha256sum` 输出（原样）
 2. 第 2 步 `install-watch.sh` 的**完整输出**
 3. 第 3 步两个自检的**最后一行 + 退出码**（有 `[FAIL]` 就附全文）
 4. 第 4 步改前 / 改后那两行配置对照（**token 不要打印**）

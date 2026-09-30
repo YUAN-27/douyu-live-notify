@@ -188,7 +188,7 @@ fi
 # 打印指纹：以后怀疑「服务器上是不是旧版」，和仓库里的对一下 sha256 前 16 位即可
 if command -v sha256sum >/dev/null 2>&1; then
   echo "指纹（sha256 前 16 位）："
-  ( cd "$APP_DIR" && sha256sum watch.py selftest.py watchdog.py 2>/dev/null ) \
+  ( cd "$APP_DIR" && sha256sum watch.py selftest.py watchdog.py esports.py 2>/dev/null ) \
     | awk '{ f = $2; sub(/^\*/, "", f); printf "  %s  %s\n", substr($1, 1, 16), f }'
 fi
 
@@ -320,13 +320,18 @@ cat <<'EOF'
 
     b) 看今天到底会发什么 —— **只抓取 + 打印，不发消息、不写状态**
        cd /opt/douyu-live-notify && python3 esports.py --check
-       如果没内容，那是「今天没有大赛、也没有中国队参赛」，正式跑会自动静默。
+       如果没内容，那是「今天没有大赛、也没有中国队 / 知名队伍参赛」，正式跑会自动静默。
        连续静默满 7 天会发一条报平安 —— 免得「今天没比赛」和「程序挂了」长得一样。
 
-    c) 想改口径（哪些算大赛 / 哪些算中国队）就编辑 config.json 的 esports 段。
+    b2) 想调白名单先核队名 —— **不发消息、不写状态**，把页面上的队名原样打出来：
+       cd /opt/douyu-live-notify && python3 esports.py --teams
+
+    c) 想改口径（哪些算大赛 / 哪些算中国队 / 哪些算知名队伍）就编辑 config.json 的 esports 段。
        ⚠️ 整个 esports 段也可以不写，那样全用程序内置的默认值，功能照常。
-       ⚠️ cn_teams 是**精确匹配**队名，不是子串；别把蒙古队 The MongolZ 加进来
-          （蒙古国队伍不是中国队），这是最容易搞错的一点。
+       ⚠️ cn_teams / notable_teams 都是**精确匹配**队名，不是子串；别把蒙古队 The MongolZ
+          加进 cn_teams（蒙古国队伍不是中国队），这是最容易搞错的一点。
+       ⚠️ 精确匹配下**措辞必须和页面上一致**（Team Liquid ≠ Liquid），写错了不报错、
+          只会静默漏发。所以改之前先跑 `python3 esports.py --teams` 把真实队名打出来照着抄。
 
     d) 确认 --check 的输出没问题后，才启用（每天北京 09:30，带时区后缀不受服务器时区影响）
        systemctl enable --now douyu-esports.timer
