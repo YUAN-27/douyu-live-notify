@@ -5,9 +5,9 @@
 > 这次只是**更新代码**，不重装环境。
 > 全新部署请看 `AGENT_PROMPT.md`；卡在内存那一步的续跑请看 `RESUME_PROMPT.md`。
 >
-> ⚠️ **本文件的正文写于「装下播提醒」那一版，之后包又更新过两次**（新增 `esports.py`
-> 的 CS2 赛程预告、以及它的知名队伍白名单）。场景没变，但**第 0 步的指纹表已经按当前包
-> 更新过 —— 以那张表为准**。`esports.py` 是新增文件，服务器上原本没有，
+> ⚠️ **本文件的正文写于「装下播提醒」那一版，之后包又更新过三次**（新增 `esports.py`
+> 的 CS2 赛程预告、知名队伍白名单、以及**图片卡片**）。场景没变，但**第 0 步的指纹表
+> 已经按当前包更新过 —— 以那张表为准**。`esports.py` 是新增文件，服务器上原本没有，
 > `install-watch.sh` 会直接装上；它的定时器 `douyu-esports.timer` **装完是 disabled 的**，
 > 是否启用另说，不在本流程范围内。
 
@@ -18,6 +18,7 @@
 | 提交 | 内容 | 你能看到的变化 |
 |---|---|---|
 | `78f0981` / `3bc7a79` | 新增 `esports.py`：CS2 每日赛程预告 + 知名队伍白名单 | 每天北京 09:30 推一条「今日赛程」（**需要另外启用 `douyu-esports.timer` 才会跑**） |
+| （本次） | 赛程预告改版：**一行文字 + 一张图片卡片**（带队标） | 群里收到的赛程变成长图；**新增 `card_font.otf` 一个文件**，画卡片还要 Pillow（`python3-pil`，装不上会自动退回纯文本） |
 
 下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 
@@ -52,20 +53,22 @@
 ```bash
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
-sha256sum watch.py selftest.py watchdog.py esports.py | cut -c1-16
-wc -c watch.py selftest.py watchdog.py esports.py
+sha256sum watch.py selftest.py watchdog.py esports.py card_font.otf | cut -c1-16
+wc -c watch.py selftest.py watchdog.py esports.py card_font.otf
 ```
 
-四个值必须完全一致：
+前四个（代码）必须完全一致，第五个（卡片字体）是二进制资产、单独对：
 
 | 文件 | sha256 前 16 位 | 字节数 |
 |---|---|---|
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `af414aa31c57d710` | 43143 |
+| `esports.py` | `ffd2fac439c15fe5` | 118381 |
+| `card_font.otf`（卡片字体） | `25640f16a8fad499` | 66612 |
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
+（字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
 
 > ⚠️ **这张表是权威**。不要把记忆里或旧文档里的值当基准 —— 这版 `watchdog.py` 的指纹
 > 和更早的 `UPDATE_PROMPT.md` 副本**已经不一样了**（那时是 `d49b24c4427fb108` / 84789，
@@ -117,12 +120,23 @@ python3 selftest.py; echo "退出码=$?"
 tail -3 selftest_result.txt
 
 python3 watchdog.py --selftest; echo "退出码=$?"
+
+python3 esports.py --selftest; echo "退出码=$?"
 ```
 
 - `selftest.py`：这一版是 **92 项**，**期望 0 项失败**、退出码 0。
 - `watchdog.py --selftest`：**期望 0 项失败**（项数随版本变，不用数）。
+- `esports.py --selftest`：这一版是 **173 项**，**期望 0 项失败**、退出码 0。
+  它**不联网**（队标那张断言用的是本地 fixture），所以跑得很快。
 
-**只要出现 `[FAIL]` 或退出码非 0 → 停下**，把 `selftest_result.txt` 全文发回来，不要继续。
+**只要出现 `[FAIL]` 或退出码非 0 → 停下**，把完整输出发回来，不要继续。
+
+顺便确认一下画卡片能不能用（**只读，不发消息**）：
+
+```bash
+python3 -c "import PIL; print('Pillow:', PIL.__version__)" || echo "Pillow: 没装（卡片会自动退回纯文本）"
+ls -l /opt/douyu-live-notify/card_font.otf /opt/douyu-live-notify/CARD_FONT_LICENSE.txt
+```
 
 ---
 
@@ -270,9 +284,9 @@ sudo cat /opt/douyu-live-notify/state_6979222.json
 
 ## 最后回报这几项
 
-1. 第 0 步四行 `sha256sum` 输出（原样）
-2. 第 2 步 `install-watch.sh` 的**完整输出**
-3. 第 3 步两个自检的**最后一行 + 退出码**（有 `[FAIL]` 就附全文）
+1. 第 0 步五行 `sha256sum` 输出（原样）
+2. 第 2 步 `install-watch.sh` 的**完整输出**（含它打印的指纹、以及 Pillow 那两行结论）
+3. 第 3 步三个自检的**最后一行 + 退出码**（有 `[FAIL]` 就附全文），外加 `card_font.otf` 是否就位、Pillow 是否可用
 4. 第 4 步改前 / 改后那两行配置对照（**token 不要打印**）
 5. 第 5 步离线格式验证的输出原文
 6. 第 6 步 `--status` 全文 + 最近几条 `daily_ok` 记录

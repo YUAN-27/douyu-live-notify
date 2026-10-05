@@ -43,6 +43,10 @@ REQUIRED = [
     "douyu-watchdog.timer",
     "watchdog.env.example",
     "esports.py",
+    # 图片卡片的两件套：字体（二进制）+ 它的许可证。
+    # 少了字体不会报错，但卡片会**静默降级成纯文本** —— 所以缺了就不让打包。
+    "card_font.otf",
+    "CARD_FONT_LICENSE.txt",
     "douyu-esports.service",
     "douyu-esports.timer",
     "preflight-check.sh",
@@ -135,7 +139,9 @@ def main():
     # ---- 回读校验：确认写的包真能用 ----
     with zipfile.ZipFile(OUT) as z:
         got = set(z.namelist())
-        crlf = [n for n in got if b"\r\n" in z.read(n)]
+        # 只对文本文件查 CRLF。二进制（如字体 card_font.ttf）里出现 \r\n 字节
+        # 纯属巧合，拿它当「换行符没归一」会误报，把好好的包拦下来。
+        crlf = [n for n in got if is_text(n) and b"\r\n" in z.read(n)]
     still = [f for f in REQUIRED if ("deploy/" + f) not in got]
     if still or crlf:
         if still:
@@ -160,6 +166,11 @@ def main():
             print("    %-16s  %s" % (sha16(entries[key]), rel))
         else:
             print("    %-16s  %s（!! 包里没有，指纹打不出来）" % ("-", rel), file=sys.stderr)
+    # 卡片字体也报一下：它是二进制资产、不参与上面 4 个代码指纹的核对，
+    # 但「卡片画不出来 / 字变方块」时第一个要确认的就是这个文件对不对得上。
+    if "card_font.otf" in entries:
+        print("    %-16s  deploy/card_font.otf（卡片字体）"
+              % sha16(entries["card_font.otf"]))
     return 0
 
 

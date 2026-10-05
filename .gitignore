@@ -13,6 +13,9 @@ selftest_result.txt
 # 世界排名（HLTV）的抓取缓存：只是排名的副本，随时可重建，没必要进仓库
 rank_cache.json
 rank_cache.json.tmp
+# 队标缓存：文件名是 sha256(url) 前 16 位，随时可从赛程页重建，没必要进仓库
+#（打包时会自动跳过：pack_deploy.py 只收 deploy/ 下的**文件**，目录不进包）
+deploy/logo_cache/
 # 登录二维码：本质是一次性登录凭据，生成一次就作废。绝不能进仓库。
 qr.png
 qr.svg

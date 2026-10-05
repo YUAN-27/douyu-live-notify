@@ -35,6 +35,8 @@
   且满足四条之一（或）的场次：**有中国队** / **有世界前 15 的队伍**（自动抓 HLTV 排名）/
   **大赛且对阵里有知名队伍** / **同一赛事当天凑够 4 支知名队伍**（整体放行）；
   **窗口 = 「现在 → 下一次预告」，不是「今天」这个自然日** —— 否则次日凌晨的比赛会永远漏掉。
+  推送形态是**一行文字 + 一张 880px 宽的图片卡片**（带队标），因为手机 QQ 对长文本换行处理很差；
+  图出不来就自动退回纯文本，**消息一定发得出去**。
   没比赛就静默，但连着静默满 7 天会报个平安 ——
   免得「今天没比赛」和「程序挂了」长得一样。独立功能，不要可以整个删掉 —— 详见 `deploy/ESPORTS.md`
 
@@ -122,9 +124,10 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
 | `python deploy/esports.py --teams` | **列出页面上的真实队名**并标出哪些已收录（含 `[知名]` / `[世界前15]` 标记），改白名单前用它抄名字（不发消息、不写状态） |
 | `python deploy/esports.py --rank` | **核世界前 15 的队名映射**：打印 HLTV 写法 → Liquipedia 队名，标出没映射上的（会请求一次 HLTV，不发消息、不写状态） |
-| `python deploy/esports.py --selftest` | 赛程预告离线自检（144 项），不联网、不发消息 |
+| `python deploy/esports.py --selftest` | 赛程预告离线自检（173 项），不联网、不发消息 |
 | `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
-| `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py`，并归一为 LF） |
+| `python deploy/esports.py --check`（同上） | 顺带把要发的那张卡片渲染到 `/tmp/esports_card_check.png`，可以下载下来看排版 |
+| `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py` / **`card_font.otf`** / `install-watch.sh`，并归一为 LF） |
 | `python qr_make.py --url "<日志里的二维码链接>"` | 把 NapCat 登录二维码在本地变成可扫的图片（见下方「扫码登录」） |
 
 ---
@@ -224,6 +227,9 @@ deploy/
 ├── WATCHDOG.md            看门狗设计说明 + 「怎么验证它真的会叫」
 ├── esports.py             CS2 每日赛程预告（独立功能，可选）
 ├── ESPORTS.md             赛程预告的口径、限制、排查，以及改选择器时的注意事项
+├── card_font.otf          卡片字体（Noto Sans SC 子集，65 KB，随包发布）
+├── CARD_FONT_LICENSE.txt  上面的字体许可证（SIL OFL 1.1 全文，OFL 要求随字体分发）
+├── make_card_font.py      重新生成 card_font.otf 的脚本（往卡片上加新中文文案时才要跑）
 ├── check-esports-net.py   赛程数据源连通性自检（上线前先跑，只读）
 ├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1，ACCOUNT 必填）
 ├── .env.example           WebUI token / 机器人 QQ 号 / 容器内存上限模板
@@ -232,7 +238,7 @@ deploy/
 ├── setup-docker-mirror.sh 探测可用的 Docker 镜像源
 ├── mem-report.sh          内存被谁占了（只读，含 OOM 历史）
 ├── add-swap.sh            加/删 swap（幂等、可撤销，小内存机器用）
-├── install-watch.sh       安装 watch.py / watchdog.py / esports.py 与 systemd 单元
+├── install-watch.sh       安装 watch.py / watchdog.py / esports.py / 卡片字体 与 systemd 单元
 ├── douyu-watch.{service,timer}  systemd 每分钟拉起 watch.py --tick
 ├── douyu-watchdog.{service,timer}  每 2 分钟体检一次，异常时告警 / 自愈
 ├── douyu-esports.{service,timer}   每天北京 09:30 推一次 CS2 赛程预告（覆盖到次日 09:30）
@@ -271,23 +277,38 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
 名单都在 `config.json` 的 `esports` 段里可改，**整段不写也行**（内置默认值就能跑）。
 不知道队名该怎么写就 `python3 esports.py --teams`；怕「世界前 15」映射不全就 `python3 esports.py --rank`。
 
-推送按**赛事分组**排版，赛事名只写一次当小标题，下面每场一行「时间  对阵」；
-跨天的场次时间前加「次日」；行尾用 `← 中国队` / `← 世界前15` 标出重点场次：
+推送形态是**一行文字 + 一张图片卡片**（手机 QQ 对小屏长文本的换行/缩进处理很差，
+8 场挤成一段文字根本扫不动）。那一行文字保证通知栏可见、群聊可搜索：
 
 ```
-【CS2 赛程】10-05 周一 09:30 → 10-06 周二 09:30
-
-ESL Pro League Season 24 - Round 3 · Bo3
-  17:00  PARIVISION vs FURIA  ← 世界前15
-  22:00  M80 vs TYLOO  ← 中国队
-  次日 00:30  Team Vitality vs Team Falcons  ← 世界前15
-
-共 3 场 · 数据来源：Liquipedia
+【CS2 赛程】10-05 周一 09:30 → 10-06 周二 09:30 · 共 8 场
 ```
+
+卡片是 880 px 宽的 PNG，带队标（队标是赛程页自带的，**零额外请求**），
+赛事名和 Bo 放在页脚，正文只有「时间 + 对阵」，跨天场次时间前加「次日」：
+
+```
+ CS2 赛程
+ 10-05 今天 09:30 → 10-06 明天 09:30　共 8 场
+ 17:00        PARIVISION ▣  vs  ▣ FURIA
+ 22:00              M80 ▣  vs  ▣ TYLOO
+ 次日 00:30  Team Vitality ▣  vs  ▣ Team Falcons
+ ESL Pro League Season 24 - Round 3 · Bo3  数据来源：Liquipedia
+```
+
+⚠️ **图出不来时自动退回纯文本版，消息一定发得出去**（没装 Pillow / 缺字体 /
+文案里有字体子集外的字 → 走这条路，日志留 `[warn]`）。画卡片要 Pillow，
+是**可选依赖**：`apt install -y python3-pil`（`install-watch.sh` 会尽力自动装）。
+字体随包发布（`card_font.otf`，65 KB 的 Noto Sans SC 子集），所以服务器和本地画出来一模一样。
+
+版面上**不带任何「入选标记」**（没有 `← 中国队` / `← 世界前15`，卡片上也没有中国队红标）——
+入选口径照旧，想看某场靠什么进来的看 `--check` 的逐场理由。
+
 没有符合条件的比赛就**静默**；连着静默满 7 天会发一条报平安，这样
 「今天没比赛」和「程序挂了」在群里长得不一样。
 抓取失败会单独告警，并明确写「这不等于今天没有比赛」。
-上线前先跑 `python3 esports.py --check` 看清楚会发什么（**只抓不发、不写状态**）。
+上线前先跑 `python3 esports.py --check` 看清楚会发什么（**只抓不发、不写状态**，
+顺带把卡片渲染到 `/tmp/esports_card_check.png` 给你看排版）。
 口径、已知限制与排查见 `ESPORTS.md`。
 
 用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
@@ -309,7 +330,15 @@ python pack_deploy.py        # 生成 deploy.zip
 （Windows 上工作区常是 CRLF，带进包里的 shell 脚本到 Linux 上会报 `$'\r': command not found`）。
 
 装完之后 `install-watch.sh` 会打印 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py`
-的 sha256 前 16 位，以后怀疑「服务器上是不是旧版」，和仓库里的对一下即可。
+的 sha256 前 16 位（外加一行 `card_font.otf`），以后怀疑「服务器上是不是旧版」，
+和仓库里的对一下即可。
+
+**依赖**：核心功能只用 Python 标准库。两个**可选**额外依赖，缺了不影响主流程：
+
+| 依赖 | 谁要 | 缺了会怎样 |
+|---|---|---|
+| `Pillow`（`apt install -y python3-pil`） | `esports.py` 画赛程卡片 | 卡片画不出来 → **自动退回纯文本**，赛程照发 |
+| `qrcode` + `pillow`（`pip install qrcode pillow`） | `qr_make.py`（本地把 NapCat 登录二维码变成图片） | 只有那个一次性脚本用不了，不影响服务器 |
 
 ### 扫码登录 QQ（不需要 SSH 隧道）
 
@@ -331,7 +360,7 @@ python qr_make.py --url "https://txz.qq.com/p?k=xxxx&f=xxxx"    # 生成 qr.png
 > 日志里没有 URL 时改为取图片：`docker exec napcat sh -c 'base64 -w0 /app/napcat/cache/qrcode.png'`，
 > 再用 `python qr_make.py --b64str "<粘贴>"` 还原。完整说明见 `deploy/SCAN_QR_WITHOUT_SSH.md`。
 
-`qr_make.py` 是本项目里**唯一需要额外依赖**的脚本（`pip install qrcode pillow`），
+`qr_make.py` 需要额外依赖（`pip install qrcode pillow`），
 而且只有「从 URL 生成」这条路径需要 —— `--b64str` 路径纯标准库。
 不想装也行：把那个 URL 贴到任意在线二维码工具即可（用完即弃，别留在页面上）。
 

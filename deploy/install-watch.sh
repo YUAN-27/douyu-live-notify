@@ -158,6 +158,40 @@ else
   echo "⚠️ 没找到 esports.py（症状：不会有每日赛程预告）"
 fi
 
+# 图片卡片要用的两个资产。都不是 .py，不参与 4 指纹核对，但缺了卡片就出不来：
+#   card_font.otf          卡片字体（Noto Sans SC 子集）。随包发布 → 服务器和开发机
+#                          画出来的卡片一模一样，不会「本地好看、服务器上缺字」。
+#   CARD_FONT_LICENSE.txt  字体许可证全文。OFL 要求随字体一起分发，删了就不合规。
+for cf in card_font.otf CARD_FONT_LICENSE.txt; do
+  if [[ -f "$UNIT_DIR/$cf" ]]; then
+    if [[ -f "$APP_DIR/$cf" ]] && cmp -s "$UNIT_DIR/$cf" "$APP_DIR/$cf"; then
+      echo "已放入 $APP_DIR/$cf（与原有版本一致）"
+    else
+      cp -a "$UNIT_DIR/$cf" "$APP_DIR/$cf"
+      echo "已放入 $APP_DIR/$cf"
+    fi
+  else
+    echo "⚠️ 没找到 $cf（症状：图片卡片画不出来，会自动改发纯文本）"
+  fi
+done
+
+# 画卡片要 Pillow。**装不上完全不影响推送** —— esports.py 会安静地退化成纯文本，
+# 所以这里只是「尽力装一下」，用的是只读查询 + 一次 apt，不阻断安装流程。
+if python3 -c "import PIL" >/dev/null 2>&1; then
+  echo "Pillow：已就绪，图片卡片可用"
+else
+  echo "Pillow：没装（图片卡片会自动降级为纯文本，推送功能不受影响）"
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "  正在尝试 apt install -y python3-pil …"
+    apt-get install -y -q python3-pil >/dev/null 2>&1 || true
+    if python3 -c "import PIL" >/dev/null 2>&1; then
+      echo "  ✅ python3-pil 装好了，图片卡片可用"
+    else
+      echo "  ⚠️ 没装上（大多是没有 apt 源 / 没网）。手动装：apt update && apt install -y python3-pil"
+    fi
+  fi
+fi
+
 # 诊断脚本：只读工具，「开播了但群里没收到」时先跑它。规矩同 watchdog.py ——
 # 要覆盖先比指纹，不一致就备份并说明，不静默换掉你在服务器上改过的版本。
 if [[ -f "$UNIT_DIR/why-no-notify.sh" ]]; then
@@ -190,6 +224,10 @@ if command -v sha256sum >/dev/null 2>&1; then
   echo "指纹（sha256 前 16 位）："
   ( cd "$APP_DIR" && sha256sum watch.py selftest.py watchdog.py esports.py 2>/dev/null ) \
     | awk '{ f = $2; sub(/^\*/, "", f); printf "  %s  %s\n", substr($1, 1, 16), f }'
+  # 卡片字体也报一下：它是二进制资产、不参与上面 4 个代码指纹的核对，
+  # 但「卡片字变方块 / 不出图」时第一件事就是确认这个文件对不对。
+  ( cd "$APP_DIR" && sha256sum card_font.otf 2>/dev/null ) \
+    | awk '{ f = $2; sub(/^\*/, "", f); printf "  %s  %s（卡片字体）\n", substr($1, 1, 16), f }'
 fi
 
 if [[ -f "$APP_DIR/config.json" ]]; then
@@ -327,6 +365,13 @@ cat <<'EOF'
        如果没内容，那是「窗口内这四条一条都没沾上」，正式跑会自动静默。
        连续静默满 7 天会发一条报平安 —— 免得「今天没比赛」和「程序挂了」长得一样。
        输出里 `[info] 入选依据…` 逐条列出四条各中了几场，`--check` 还会逐场打印理由。
+
+    b1) 推送是「**一行文字 + 一张图片卡片**」（手机 QQ 对长文本换行处理很差）。
+       `--check` 会把这张卡片渲染成 PNG 存到 /tmp，路径在输出里那行
+       `[check] 这次会发的卡片图已存到：…`，下载下来看看排版对不对。
+       ⚠️ 图出不来时**自动退回纯文本，消息一定发得出去**（没装 Pillow / 缺字体 /
+          文案里有子集外的字都走这条路），日志留 `[warn]`。装 Pillow：
+          apt update && apt install -y python3-pil   （本脚本已尽力自动装过）
 
     b2) 想调白名单先核队名 —— **不发消息、不写状态**，把页面上的队名原样打出来：
        cd /opt/douyu-live-notify && python3 esports.py --teams

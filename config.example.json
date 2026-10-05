@@ -42,8 +42,10 @@
   "_esports_keywords_comment": "major_keywords：子串匹配赛事名（大小写不敏感）。页面上拿不到赛事分级（S/A/B 按钮是客户端过滤，没写进 HTML），所以「算不算大赛」只能靠赛事名认，这份名单就是全部依据。注意第 3 条是「与」，光命中赛事名不会发。",
   "_esports_teams_comment": "cn_teams / notable_teams：**精确匹配**队名，不是子串。子串匹配会把 The MongolZ 这类蒙古国队伍误判成中国队；精确匹配则不会让 MOUZ 命中学院队 MOUZ NXT。大小写无所谓，但措辞必须和 Liquipedia 页面上完全一致 —— 写错了不报错、只会静默漏发，所以改之前先跑 `python3 deploy/esports.py --teams` 把真实队名打出来照着抄。完整名单（含 notable_teams 的 42 支）见 deploy/config.example.json。",
   "_esports_rank_comment": "rank_top_n / hltv_aliases / tournament_min_known_teams / preview_run_time：世界前 15、名队云集、预告窗口三处的调参。HLTV 与 Liquipedia 队名写法不一致（Spirit vs Team Spirit），不一致的要在 hltv_aliases 里配映射；用 `python3 deploy/esports.py --rank` 核对。rank_top_n=0 关掉「世界前 N」，tournament_min_known_teams=0 关掉第 4 条。preview_run_time 必须和定时器 OnCalendar 一致。",
+  "_esports_card_comment": "图片卡片（默认开）：推送形态是「一行文字 + 一张 880px 宽的 PNG」，因为手机 QQ 对长文本的换行/缩进处理很差，8 场挤成一段文字根本扫不动。card_enabled=false 退回纯文本；card_max_rows 是图上最多画几行。队标取自赛程页、零额外请求，缓存在 deploy/logo_cache/（logo_ttl_hours / logo_max_new_per_run / logo_timeout 可调）。⚠️ 图片出不来会自动退回纯文本、消息一定发得出去；队标下不动只画灰底占位块。字体随包发布，改卡片文案要同步两张字符表，见 deploy/ESPORTS.md。",
   "esports": {
     "enabled": true,
-    "cn_teams": ["TYLOO", "Lynn Vision Gaming"]
+    "cn_teams": ["TYLOO", "Lynn Vision Gaming"],
+    "card_enabled": true
   }
 }
