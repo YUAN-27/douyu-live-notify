@@ -39,18 +39,31 @@
 推送样子（2026-10-05 实测输出）：
 
 ```
-【CS2 今日赛程】2026-10-05
+【CS2 今日赛程】10-05 周一
 
-17:00  PARIVISION vs FURIA · Bo3 · ESL Pro League Season 24 - Round 3
-17:00  ShindeN vs G2 Esports · Bo3 · ESL Pro League Season 24 - Round 3
-19:30  9z Team vs Natus Vincere · Bo3 · ESL Pro League Season 24 - Round 3
-19:30  Legacy vs 1w Team · Bo3 · ESL Pro League Season 24 - Round 3
-22:00  Team Spirit vs MOUZ · Bo3 · ESL Pro League Season 24 - Round 3
-22:00  M80 vs TYLOO · Bo3 · ESL Pro League Season 24 - Round 3
+ESL Pro League Season 24 - Round 3 · Bo3
+  17:00  PARIVISION vs FURIA  ← 世界前15
+  17:00  ShindeN vs G2 Esports  ← 世界前15
+  19:30  9z Team vs Natus Vincere  ← 世界前15
+  19:30  Legacy vs 1w Team  ← 世界前15
+  22:00  Team Spirit vs MOUZ  ← 世界前15
+  22:00  M80 vs TYLOO  ← 中国队
 
-共 6 场。
-数据来源：Liquipedia
+共 6 场 · 数据来源：Liquipedia
 ```
+
+**版式的几条规矩**（都是踩出来的，改文案时别破坏）：
+
+- **赛事名当小标题，只写一次**。早先是每场都在行尾重复 `· Bo3 · <赛事名>`，
+  6 场就把同一串名字印了 6 遍，反而把「时间 + 对阵」挤到一边。
+- **按赛事分组、保持首次出现顺序**（= 一个赛事内仍按时间排）；组与组之间空一行。
+- **组内 Bo 一致就提到小标题上**（`… Round 3 · Bo3`），**不一致才逐场标**
+  —— 每行都写同一个 `Bo3` 是纯噪音。
+- **行尾标记**：命中中国队标 `← 中国队`，命中世界前 N 标 `← 世界前N`，**两条都中就都标**
+  （`← 中国队+世界前15`，用 `+` 连）。都不命中就不留尾巴。
+  拿不到世界排名时**不会**误标。
+- **标题用 `10-05 周一`，不写年份** —— 这是「今天」的预告，年份只占地方。
+- 没有赛事名时用兜底标题 `（未标注赛事）`，不出现空标题行。
 
 对照日志：`中国队 1 场 / 世界前 N 5 场 / 大赛+知名 0 场 / 名队云集的赛事 0 场` ——
 6 场里 5 场是因为有前 15 队伍（对上 G2 / NaVi / Legacy / FURIA / Spirit），
@@ -357,7 +370,7 @@ cd /opt/douyu-live-notify && python3 esports.py --check
 ## 8. 自检
 
 ```bash
-python3 esports.py --selftest    # 106 项：解析器 / 四条筛选 / 时间窗边界 / 折叠 / 静默计数 / 白名单 / 排名与别名 / 文案
+python3 esports.py --selftest    # 123 项：解析器 / 四条筛选 / 时间窗边界 / 正文版式 / 静默计数 / 白名单 / 排名与别名 / 文案
 ```
 
 离线、不联网、不发消息、不写状态。覆盖了几个容易写错的边界：
@@ -374,6 +387,10 @@ python3 esports.py --selftest    # 106 项：解析器 / 四条筛选 / 时间�
 - 「名队云集的赛事」计数：同队去重、不跨赛事累加、中国队不计入、`min_known=0` 可关闭
 - HLTV 排名解析：只取前 N、空 HTML 不炸、别名大小写不敏感、未映射的名字会被报出来
 - **别名指向选手页的坑有断言盯着**（`Spirit` 必须映射到 `Team Spirit`，绝不能是选手 `spirit`）
+- **版式**：同名赛事只出现一次、行尾不再重复赛事名、组内 Bo 一致就提到小标题、
+  Bo 不一致逐场标、没有赛事名时用兜底标题、多赛事各成组且按首次出现顺序
+- **行尾标记**：只中国队 / 只世界前 N / 两条都中（`← 中国队+世界前15`）/ 都不中不留尾巴 /
+  排名拿不到时不误标
 - 推送正文末尾**必须**署名 Liquipedia
 
 ---

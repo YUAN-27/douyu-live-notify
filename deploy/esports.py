@@ -676,31 +676,91 @@ def reasons_summary(counts):
 # 消息
 # ==========================================================================
 
-def format_daily(picked, now, fold_hint):
-    """拼「今日赛程」正文。末尾必须署名 Liquipedia（CC-BY-SA 3.0 的要求）。"""
-    if not picked:
-        return ""
-    lines = ["【CS2 今日赛程】%s" % now.strftime("%Y-%m-%d"), ""]
+WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
+# 赛事名缺失时的分组兜底，免得冒出一行空白标题
+NO_TOUR = "（未标注赛事）"
+
+
+def _day_label(d):
+    """`10-05 周一` —— 这是「今天」的预告，年份写出来只占地方。"""
+    return "%02d-%02d %s" % (d.month, d.day, WEEKDAYS_CN[d.weekday()])
+
+
+def _group_by_tour(picked, fold_hint):
+    """先按 fold_hint 截断，再按赛事名分组；返回 (截断后的列表, [(赛事名, [比赛…]), …])。
+
+    为什么要分组：同一天的比赛常常是同一个赛事的连续几场，逐场重复赛事名会把
+    「时间 + 对阵」这个真正的信息挤到一边（实测 6 场里赛事名一模一样重复 6 次）。
+    分组后赛事名只写一次，作为小标题。保持首次出现顺序（= 时间顺序）。
+    """
     shown = picked
     if fold_hint and fold_hint > 0 and len(picked) > fold_hint:
         shown = picked[:fold_hint]
 
+    order, groups = [], {}
     for m in shown:
-        d = datetime.fromtimestamp(m["ts"], CST)
-        seg = "%s  %s" % (d.strftime("%H:%M"), " vs ".join(m["teams"]))
-        if m.get("bo"):
-            seg += " · " + m["bo"]
-        if m.get("tour"):
-            seg += " · " + m["tour"]
-        lines.append(seg)
+        key = (m.get("tour") or "").strip() or NO_TOUR
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(m)
+    return shown, [(k, groups[k]) for k in order]
 
-    lines.append("")
+
+def _group_bo(group):
+    """组内 Bo 是否一致。一致就提到小标题上 —— 每行都写「Bo3」是纯噪音。"""
+    bos = {(m.get("bo") or "").strip() for m in group}
+    if len(bos) == 1:
+        return bos.pop() or None
+    return None
+
+
+def _marks(m, cn_teams, rank_names, rank_n):
+    """行尾标记，让「中国队 / 世界前 N」一眼可见。两条都命中的就都标。"""
+    out = []
+    if cn_teams and has_team(m, cn_teams):
+        out.append("中国队")
+    if rank_names and has_team(m, rank_names):
+        out.append("世界前%d" % rank_n if rank_n else "世界前列")
+    return out
+
+
+def format_daily(picked, now, es, rank_names=None):
+    """拼「今日赛程」正文。末尾必须署名 Liquipedia（CC-BY-SA 3.0 的要求）。
+
+    版式：赛事名当小标题只出现一次，下面每场一行「时间  对阵」；
+    同赛事内 Bo 一致就写在小标题上，不一致才逐场标。
+    """
+    if not picked:
+        return ""
+    es = es or {}
+    shown, grouped = _group_by_tour(picked, es.get("fold_hint"))
+    cn_teams = es.get("cn_teams")
+    rank_n = es.get("rank_top_n") or 0
+
+    lines = ["【CS2 今日赛程】%s" % _day_label(now), ""]
+    for name, group in grouped:
+        bo = _group_bo(group)
+        lines.append(name + (" · " + bo if bo else ""))
+        # Bo 不一致时逐场标，免得读者以为整组都是同一个 Bo
+        per_line = bo is None and any((m.get("bo") or "").strip() for m in group)
+        for m in group:
+            d = datetime.fromtimestamp(m["ts"], CST)
+            seg = "  %s  %s" % (d.strftime("%H:%M"), " vs ".join(m["teams"]))
+            if per_line and (m.get("bo") or "").strip():
+                seg += " · " + m["bo"]
+            mk = _marks(m, cn_teams, rank_names, rank_n)
+            if mk:
+                seg += "  ← " + "+".join(mk)
+            lines.append(seg)
+        lines.append("")
+
     if len(shown) < len(picked):
-        lines.append("共 %d 场，只列了前 %d 场（后面还有）。" % (len(picked), len(shown)))
+        lines.append("共 %d 场，只列了前 %d 场（后面还有）· 数据来源：Liquipedia"
+                     % (len(picked), len(shown)))
     else:
-        lines.append("共 %d 场。" % len(picked))
-    lines.append("数据来源：Liquipedia")
+        lines.append("共 %d 场 · 数据来源：Liquipedia" % len(picked))
     return "\n".join(lines)
 
 
@@ -897,7 +957,7 @@ def run_once(cfg, args):
 
     # ---- 组装 ----
     state = load_state()
-    body = format_daily(picked, now, es.get("fold_hint"))
+    body = format_daily(picked, now, es, rank["names"])
 
     _st, want_calm = streak_step(state, bool(picked), es.get("calm_after_empty_days"), now)
 
@@ -1324,22 +1384,79 @@ def selftest():
     t.check("已知队伍集合不含中国队（两件事分开）",
             known_team_set(dict(es, notable_teams=[]), None) == set())
 
-    # ---- 3. 折叠与正文 ----
+    # ---- 3. 正文与折叠 ----
     print("\n-- 3. 正文与折叠 --")
     many = [mk(ts(10) + i * 60, ["TYLOO", "X%d" % i], "IEM Cologne 2026") for i in range(20)]
-    body = format_daily(many, base, 15)
+    body = format_daily(many, base, es)
     t.check("超过 fold_hint 会折叠", "只列了前 15 场" in body)
     t.check("折叠后仍写明总场次", "共 20 场" in body)
     t.check("正文末尾署名 Liquipedia", body.rstrip().endswith("数据来源：Liquipedia"))
-    t.check("未超阈值时不折叠", "只列了前" not in format_daily(many[:3], base, 15))
+    t.check("未超阈值时不折叠", "只列了前" not in format_daily(many[:3], base, es))
 
-    one = format_daily(many[:1], base, 15)
+    one = format_daily(many[:1], base, es)
     t.check("单场正文含时间与对阵", "10:00" in one and "TYLOO vs X0" in one)
     t.check("单场正文含赛事名", "IEM Cologne 2026" in one)
-    t.check("空列表返回空串（调用方据此静默）", format_daily([], base, 15) == "")
+    t.check("空列表返回空串（调用方据此静默）", format_daily([], base, es) == "")
 
-    fb = format_daily([mk(ts(14), ["TYLOO", "B"], "IEM", bo="")], base, 15)
+    fb = format_daily([mk(ts(14), ["TYLOO", "B"], "IEM", bo="")], base, es)
     t.check("没有 Bo 信息时不写多余分隔符", "· ·" not in fb and fb.count("·") == 1)
+
+    # 版式：赛事名当小标题只写一次，每场一行「时间  对阵」
+    head = body.splitlines()[0]
+    t.check("标题是「月-日 周几」，不写年份",
+            head == "【CS2 今日赛程】%s" % _day_label(base)
+            and str(base.year) not in head)
+    t.check("同名赛事只出现一次（分组，不再逐场重复）",
+            body.count("IEM Cologne 2026") == 1)
+    t.check("对阵行不再重复赛事名",
+            all("IEM Cologne 2026" not in ln for ln in body.splitlines()
+                if "TYLOO vs" in ln))
+    t.check("对阵行有时间、对阵，且缩进两格",
+            "  10:00  TYLOO vs X0" in body)
+    t.check("组内 Bo 一致时提到小标题上，不逐场写",
+            "IEM Cologne 2026 · Bo3" in body
+            and all("Bo3" not in ln for ln in body.splitlines() if "TYLOO vs" in ln))
+    t.check("一组只有一场也不出岔子",
+            _group_bo([mk(ts(14), ["A", "B"], "T", bo="Bo5")]) == "Bo5")
+    t.check("组内 Bo 不一致时改为逐场标", _group_bo([
+        mk(ts(14), ["A", "B"], "T", bo="Bo3"),
+        mk(ts(15), ["C", "D"], "T", bo="Bo1")]) is None)
+    mixed = format_daily([
+        mk(ts(14), ["A", "B"], "T", bo="Bo3"),
+        mk(ts(15), ["C", "D"], "T", bo="Bo1")], base, es)
+    t.check("Bo 不一致时每行都带上自己的 Bo",
+            "T\n  14:00  A vs B · Bo3" in mixed and "· Bo1" in mixed)
+    t.check("没有赛事名时用兜底标题，不出现空标题行",
+            _group_by_tour([mk(ts(14), ["A", "B"], "")], 0)[1][0][0] == NO_TOUR)
+
+    # 分组：多个赛事按首次出现顺序排，不跨组混
+    two_tours = format_daily([
+        mk(ts(14), ["A", "B"], "Tournament One"),
+        mk(ts(15), ["C", "D"], "Tournament Two"),
+        mk(ts(16), ["E", "F"], "Tournament One")], base, es)
+    ordered = [n for n in ("Tournament One", "Tournament Two")
+               if n in two_tours]
+    t.check("多赛事各自成组、按首次出现顺序排", ordered == ["Tournament One", "Tournament Two"])
+    t.check("多赛事时同一个赛事不会拆成两段",
+            two_tours.count("Tournament One") == 1
+            and two_tours.count("Tournament Two") == 1)
+
+    # 行尾标记：中国队 / 世界前 N
+    mk_cn = format_daily([mk(ts(14), ["M80", "TYLOO"], "T")], base, es, TOP)
+    t.check("中国队那场行尾标「← 中国队」", "M80 vs TYLOO  ← 中国队" in mk_cn)
+    mk_top = format_daily([mk(ts(14), ["Unknown A", "G2 Esports"], "T")], base, es, TOP)
+    t.check("世界前 N 那场行尾标「← 世界前15」",
+            "Unknown A vs G2 Esports  ← 世界前15" in mk_top)
+    mk_both = format_daily([mk(ts(14), ["TYLOO", "Team Spirit"], "T")], base, es, TOP)
+    t.check("两条都命中就都标（中国队+世界前15）",
+            "TYLOO vs Team Spirit  ← 中国队+世界前15" in mk_both)
+    t.check("都不命中就不留标记尾巴（行尾干净）",
+            "  14:00  Unknown A vs Unknown B" in
+            format_daily([mk(ts(14), ["Unknown A", "Unknown B"], "T")], base, es, TOP))
+    t.check("排名拿不到时不会误标世界前 N",
+            "←" not in format_daily([mk(ts(14), ["Unknown A", "Unknown B"],
+                                        "T")], base, es, None))
+    t.check("标记不影响署名", mk_both.rstrip().endswith("数据来源：Liquipedia"))
 
     # ---- 4. 连续静默与报平安 ----
     print("\n-- 4. 连续静默 → 报平安 --")

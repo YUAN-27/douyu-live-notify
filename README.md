@@ -121,7 +121,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
 | `python deploy/esports.py --teams` | **列出页面上的真实队名**并标出哪些已收录（含 `[知名]` / `[世界前15]` 标记），改白名单前用它抄名字（不发消息、不写状态） |
 | `python deploy/esports.py --rank` | **核世界前 15 的队名映射**：打印 HLTV 写法 → Liquipedia 队名，标出没映射上的（会请求一次 HLTV，不发消息、不写状态） |
-| `python deploy/esports.py --selftest` | 赛程预告离线自检（106 项），不联网、不发消息 |
+| `python deploy/esports.py --selftest` | 赛程预告离线自检（123 项），不联网、不发消息 |
 | `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py`，并归一为 LF） |
 | `python qr_make.py --url "<日志里的二维码链接>"` | 把 NapCat 登录二维码在本地变成可扫的图片（见下方「扫码登录」） |
@@ -264,6 +264,19 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
 中国队和知名队伍靠**队名白名单**认（精确匹配，大小写不敏感）；大赛靠赛事名关键词认。
 名单都在 `config.json` 的 `esports` 段里可改，**整段不写也行**（内置默认值就能跑）。
 不知道队名该怎么写就 `python3 esports.py --teams`；怕「世界前 15」映射不全就 `python3 esports.py --rank`。
+
+推送按**赛事分组**排版，赛事名只写一次当小标题，下面每场一行「时间  对阵」；
+行尾用 `← 中国队` / `← 世界前15` 标出重点场次：
+
+```
+【CS2 今日赛程】10-05 周一
+
+ESL Pro League Season 24 - Round 3 · Bo3
+  17:00  PARIVISION vs FURIA  ← 世界前15
+  22:00  M80 vs TYLOO  ← 中国队
+
+共 2 场 · 数据来源：Liquipedia
+```
 没有符合条件的比赛就**静默**；连着静默满 7 天会发一条报平安，这样
 「今天没比赛」和「程序挂了」在群里长得不一样。
 抓取失败会单独告警，并明确写「这不等于今天没有比赛」。
