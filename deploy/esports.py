@@ -4552,9 +4552,16 @@ def selftest():
                 render_card([mk(ts(14), ["Team Spirit", "Team Falcons"], "T")],
                             base, dict(es, logo_max_new_per_run=0)) is not None)
 
-        # 有画不出来的字 → 整张不出，退回纯文本（不能画豆腐块）
-        t.check("有子集外的字就整张不出图",
-                render_card([mk(ts(14), ["測試隊", "B"], "T")], base, es) is None)
+        # 有画不出来的字：880px Pillow 层整张不出，退回纯文本（不能画豆腐块）。
+        # V2 HTML 层没有「子集」概念 —— 生僻字由系统字体（fonts-noto-cjk 等）兜底，
+        # 卡照常出、不拒画；所以这条防御只对关掉 HTML 一级的 pill 生效。
+        if find_chrome(es):
+            t.check("V2 开着：生僻字场次 HTML 卡照常出（系统字体兜底，不拒画）",
+                    render_card([mk(ts(14), ["測試隊", "B"], "T")], base, es)
+                    is not None)
+        t.check("有子集外的字 → 880px 旧卡层整张不出（关掉 HTML 一级验证）",
+                render_card([mk(ts(14), ["測試隊", "B"], "T")], base, pill)
+                is None)
         t.check("同一个有生僻字的场次，纯文本兜底照样能出",
                 "測試隊 vs B" in format_daily(
                     [mk(ts(14), ["測試隊", "B"], "T")], base, es))

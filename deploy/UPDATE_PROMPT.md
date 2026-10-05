@@ -79,7 +79,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `2f721bdfcd084acf` | 263808 |
+| `esports.py` | `a947b52d179c38e4` | 264343 |
 | `result_template.html`（V2 战报模板） | `eb38facb61241cb1` | 10494 |
 | `daily_template.html`（V2 总预告模板） | `716330d08df4242e` | 8784 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
@@ -88,7 +88,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `f93d2269ef85a165` | 5403 |
 
-`deploy.zip` 整包：`d2749d3ecab45570`（481.0 KB，44 个文件）。本版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、find_chrome 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选（systemd PATH 不含 /snap/bin 也能找到 snap 版 Chromium）、总预告 HTML 上限 30→22 场（杜绝 1080px 底边裁切险）、自检 +5 断言（模板无双前缀/字体三件套存在/chrome_bin isfile 分支/snap 候选/渲染 PNG 实际尺寸）。
+`deploy.zip` 整包：`5301f0610a4e39cb`（481.3 KB，44 个文件）。本版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、find_chrome 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选（systemd PATH 不含 /snap/bin 也能找到 snap 版 Chromium）、总预告 HTML 上限 30→22 场（杜绝 1080px 底边裁切险）、生僻字断言按 V2 行为拆分（HTML 层系统字体兜底照常出图 / 880px 层子集外字仍整张不出）、自检含真渲染 PNG 实际尺寸校验。
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
