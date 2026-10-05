@@ -152,8 +152,9 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 **全名**加回来，别用缩写。）
 发现有漏的中国队，同样按全名加进 `esports.cn_teams`。
 
-⏳ 2026-10-05 实测页面上还有 `JiJieHao` 这类中国队伍没在白名单里。
-**要不要收由用户定** —— 收窄到 2 支是用户明确要求的，别自作主张加回去。
+⛔ 2026-10-05 实测页面上还有 `JiJieHao` 这类中国队伍不在白名单里。
+**用户已明确拍板：不需要**（就保持 `TYLOO` / `Lynn Vision Gaming` 两支）。
+以后别再提「要不要加 JiJieHao」——已有决定，别自作主张加回去。
 
 ### ⚠️ 关于 `notable_teams`
 
