@@ -478,8 +478,9 @@ sudo bash install-watch.sh
 脚本会：
 - 检查 python3
 - 放 `watch.py` / `selftest.py` / `watchdog.py` 到 `/opt/douyu-live-notify/`（已有同名文件先备份）
-- 放 `esports.py`（CS2 赛程预告）与它的两个资产 `card_font.otf`（卡片字体）/
-  `CARD_FONT_LICENSE.txt`（字体许可证），并**尽力装 `python3-pil`**（画卡片用；
+- 放 `esports.py`（CS2 赛程预告）与它的三个配套文件 `card_font.otf`（卡片字体）/
+  `CARD_FONT_LICENSE.txt`（字体许可证）/ `make_card_font.py`（字体生成脚本，
+  自检要 import 它），并**尽力装 `python3-pil`**（画卡片用；
   装不上也不影响 —— 卡片会自动退回纯文本）
 - 打印这几个文件的 sha256 前 16 位（用来确认不是旧版；字体单独一行）
 - 放 `config.json`（**若已存在绝不覆盖**）

@@ -158,11 +158,16 @@ else
   echo "⚠️ 没找到 esports.py（症状：不会有每日赛程预告）"
 fi
 
-# 图片卡片要用的两个资产。都不是 .py，不参与 4 指纹核对，但缺了卡片就出不来：
+# 图片卡片要用的三个文件。都不参与那 4 个代码指纹的核对，但各有各的必要：
 #   card_font.otf          卡片字体（Noto Sans SC 子集）。随包发布 → 服务器和开发机
 #                          画出来的卡片一模一样，不会「本地好看、服务器上缺字」。
 #   CARD_FONT_LICENSE.txt  字体许可证全文。OFL 要求随字体一起分发，删了就不合规。
-for cf in card_font.otf CARD_FONT_LICENSE.txt; do
+#   make_card_font.py      重新生成上面那个字体的脚本。平时用不上（产物已入库），
+#                          但要装 —— 因为 `esports.py --selftest` 里有 2 条断言
+#                          **要 import 它**来核对「两张字符表 / 覆盖区间表是否一致」。
+#                          不装的话那 2 条被跳过，自检项数会从 173 变成 171，
+#                          以后看日志的人会以为少了什么。
+for cf in card_font.otf CARD_FONT_LICENSE.txt make_card_font.py; do
   if [[ -f "$UNIT_DIR/$cf" ]]; then
     if [[ -f "$APP_DIR/$cf" ]] && cmp -s "$UNIT_DIR/$cf" "$APP_DIR/$cf"; then
       echo "已放入 $APP_DIR/$cf（与原有版本一致）"
@@ -171,7 +176,11 @@ for cf in card_font.otf CARD_FONT_LICENSE.txt; do
       echo "已放入 $APP_DIR/$cf"
     fi
   else
-    echo "⚠️ 没找到 $cf（症状：图片卡片画不出来，会自动改发纯文本）"
+    case "$cf" in
+      card_font.otf)          echo "⚠️ 没找到 $cf（症状：图片卡片画不出来，会自动改发纯文本）" ;;
+      make_card_font.py)      echo "⚠️ 没找到 $cf（不影响运行，只会让自检少 2 项）" ;;
+      *)                      echo "⚠️ 没找到 $cf" ;;
+    esac
   fi
 done
 

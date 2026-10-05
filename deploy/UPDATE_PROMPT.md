@@ -126,8 +126,17 @@ python3 esports.py --selftest; echo "退出码=$?"
 
 - `selftest.py`：这一版是 **92 项**，**期望 0 项失败**、退出码 0。
 - `watchdog.py --selftest`：**期望 0 项失败**（项数随版本变，不用数）。
-- `esports.py --selftest`：这一版是 **173 项**，**期望 0 项失败**、退出码 0。
-  它**不联网**（队标那张断言用的是本地 fixture），所以跑得很快。
+- `esports.py --selftest`：**期望 0 项失败**、退出码 0。它**不联网**（队标断言用本地
+  fixture），跑得很快。**项数会随两个可选条件浮动，都是正常的**：
+
+  | 条件 | 项数 |
+  |---|---|
+  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **173** |
+  | 少了 `make_card_font.py` | 171（少 2 条「两张字符表是否一致」的断言） |
+  | 没装 Pillow | 164（卡片那 9 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
+
+  **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow 那行、
+  再 `ls card_font.otf make_card_font.py`。
 
 **只要出现 `[FAIL]` 或退出码非 0 → 停下**，把完整输出发回来，不要继续。
 

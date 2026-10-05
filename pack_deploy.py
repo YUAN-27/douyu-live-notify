@@ -43,10 +43,13 @@ REQUIRED = [
     "douyu-watchdog.timer",
     "watchdog.env.example",
     "esports.py",
-    # 图片卡片的两件套：字体（二进制）+ 它的许可证。
-    # 少了字体不会报错，但卡片会**静默降级成纯文本** —— 所以缺了就不让打包。
+    # 图片卡片的三件套：字体（二进制）+ 它的许可证 + 生成字体的脚本。
+    # 少了字体不会报错，但卡片会**静默降级成纯文本**；少了 make_card_font.py
+    # 则 `esports.py --selftest` 里 2 条「两张字符表是否一致」的断言会被跳过
+    # （项数从 173 掉到 171，容易被误判成「少了什么」）。所以缺了就不让打包。
     "card_font.otf",
     "CARD_FONT_LICENSE.txt",
+    "make_card_font.py",
     "douyu-esports.service",
     "douyu-esports.timer",
     "preflight-check.sh",
