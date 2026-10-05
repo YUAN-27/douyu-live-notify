@@ -135,6 +135,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -1683,14 +1685,280 @@ def _card_tour(grouped):
     return name + (" · " + bo if bo else "")
 
 
+# ==========================================================================
+# HTML 大图卡片（1920×1080，Chromium 无头截图）—— 2026-10-05 用户拍板的 V2 版式
+# --------------------------------------------------------------------------
+# 和上面 880px 的 Pillow 卡是**三级降级**关系：
+#   HTML 大图出不了（没装 Chromium / 缺模板 / 截图失败）
+#   → 退回 880px Pillow 旧卡 → 再出不了 → 纯文本。
+# 每一级都不影响「消息必须发出去」这条底线。开关：esports.card_html_enabled
+# （默认开）。esports.chrome_bin 可以钉死浏览器路径；不配就按惯例名找。
+# 模板占位符 __FONTDIR__ / __MATCH__ / __DAILY__ 在渲染时替换，模板本体不带数据。
+# ==========================================================================
+
+HTML_CARD_W, HTML_CARD_H = 1920, 1080
+HTML_FONT_DIR = os.path.join(HERE, "fonts")
+RESULT_TEMPLATE_FILE = os.path.join(HERE, "result_template.html")
+DAILY_TEMPLATE_FILE = os.path.join(HERE, "daily_template.html")
+
+IS_WINDOWS = sys.platform.startswith("win")
+_CHROME_CANDIDATES = ("chromium", "chromium-browser", "google-chrome",
+                      "google-chrome-stable", "chrome")
+_CHROME_CACHE = []
+
+
+class HtmlCardError(Exception):
+    """HTML 卡片渲染失败（找不到浏览器 / 截图超时 / 输出是空壳）。"""
+
+
+def _file_uri(path):
+    """本地路径 → file:// URI（模板里 @font-face 和 <img> 都用它）。"""
+    p = os.path.abspath(path).replace("\\", "/")
+    return "file:///" + p.lstrip("/")
+
+
+def find_chrome(es):
+    """找可用的 Chromium/Chrome，返回可执行文件路径；找不到返回 None。
+
+    esports.chrome_bin 指定了就**只用它**（钉死版本 / 测降级路径都靠它）；
+    没指定才按惯例名 + Windows 默认安装位置找。结果缓存在模块级：
+    一轮最多探测一次（which 不便宜，timer 每 10 分钟都会跑）。
+    """
+    es = es or {}
+    conf = (es.get("chrome_bin") or "").strip()
+    if conf:
+        if os.path.isfile(conf):
+            return conf
+        return shutil.which(conf)
+    if _CHROME_CACHE:
+        return _CHROME_CACHE[0]
+    cands = list(_CHROME_CANDIDATES)
+    if IS_WINDOWS:
+        cands += [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                  r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"]
+    for c in cands:
+        w = shutil.which(c)
+        if w:
+            _CHROME_CACHE.append(w)
+            return w
+    return None
+
+
+def render_html_png(template_html, data, es):
+    """模板 + 数据对象 → 1920×1080 PNG bytes。失败抛 HtmlCardError（上层降级）。"""
+    chrome = find_chrome(es)
+    if not chrome:
+        raise HtmlCardError("找不到 Chromium/Chrome")
+    inject = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    html = (template_html
+            .replace("__FONTDIR__", _file_uri(HTML_FONT_DIR))
+            .replace("__MATCH__", inject)
+            .replace("__DAILY__", inject))
+    work = tempfile.mkdtemp(prefix="htmlcard_")
+    try:
+        hp = os.path.join(work, "card.html")
+        with open(hp, "w", encoding="utf-8") as f:
+            f.write(html)
+        png = os.path.join(work, "out.png")
+        # --no-sandbox：systemd 以 root 跑 Chromium 必须加，否则起不来
+        cmd = [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+               "--no-first-run", "--hide-scrollbars",
+               "--allow-file-access-from-files",
+               "--window-size=%d,%d" % (HTML_CARD_W, HTML_CARD_H),
+               "--user-data-dir=" + os.path.join(work, "prof"),
+               "--screenshot=" + png, _file_uri(hp)]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=90, check=False)
+        except subprocess.TimeoutExpired:
+            raise HtmlCardError("Chromium 截图超时（>90 秒）")
+        except OSError as exc:
+            raise HtmlCardError("Chromium 起不来：%s" % exc)
+        if not os.path.isfile(png) or os.path.getsize(png) < 5000:
+            raise HtmlCardError("Chromium 没出图（或图是空壳）")
+        with open(png, "rb") as f:
+            return f.read()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _html_logo(url, es, budget):
+    """队标 URL → 本地缓存路径的 file:// URI；拿不到返回空串（模板画占位块）。"""
+    if not url:
+        return ""
+    p = ensure_logo(url, es, budget)
+    return _file_uri(p) if p else ""
+
+
+def _aggregate_players(row):
+    """把 csdb 的逐图选手数据聚成整场：K/D 累加，ADR/KAST/Rating 取平均。
+
+    返回 (按 rating 降序的行, 有数据的图数)。只聚合真有数据的图，
+    绝不复制填充 —— 和「不伪造数据」的总原则一致。
+    """
+    agg, n_maps = {}, 0
+    for pm in row.get("players") or []:
+        ps = pm.get("players") or []
+        if not ps:
+            continue
+        n_maps += 1
+        for p in ps:
+            e = agg.setdefault(p["name"], {
+                "name": p["name"], "team": (p.get("team") or "").strip(),
+                "k": 0, "d": 0, "adr": [], "kast": [], "rating": []})
+            e["k"] += int(p.get("k") or 0)
+            e["d"] += int(p.get("d") or 0)
+            e["adr"].append(float(p.get("adr") or 0))
+            e["kast"].append(float(p.get("kast") or 0))
+            e["rating"].append(float(p.get("rating") or 0))
+    rows = [dict(name=e["name"], team=e["team"], k=e["k"], d=e["d"],
+                 adr=sum(e["adr"]) / len(e["adr"]),
+                 kast=sum(e["kast"]) / len(e["kast"]),
+                 rating=sum(e["rating"]) / len(e["rating"]))
+            for e in agg.values()]
+    rows.sort(key=lambda x: -x["rating"])
+    return rows, n_maps
+
+
+def build_result_match(row, es):
+    """单场战报 V2 的数据对象（喂 result_template.html）。"""
+    es = es or {}
+    teams = list(row.get("teams") or []) + ["", ""]
+    shorts = list(row.get("shorts") or []) + ["", ""]
+    logos = list(row.get("logos") or []) + ["", ""]
+    nums = str(row.get("score") or "").split(":")
+    sa = int(nums[0]) if len(nums) == 2 and nums[0].isdigit() else 0
+    sb = int(nums[1]) if len(nums) == 2 and nums[1].isdigit() else 0
+    budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
+    event, _, stage = str(row.get("tour") or "").partition(" - ")
+    maps = []
+    for i, m in enumerate(list(row.get("maps") or [])[:5]):
+        r = list(m.get("rounds") or [])
+        x = int(r[0]) if len(r) > 0 and str(r[0]).isdigit() else 0
+        y = int(r[1]) if len(r) > 1 and str(r[1]).isdigit() else 0
+        maps.append({"number": i + 1,
+                     "name": m.get("map") or "Map %d" % (i + 1),
+                     "teamA": x, "teamB": y})
+    prows, n_maps = _aggregate_players(row)
+    # 分列用 _team_same（双向包含）：csdb 给缩写、Liquipedia 给全名都对得上；
+    # 归不进任何一队的宁可整列空着，也绝不错分到对面
+    rows_a = [r for r in prows if _team_same(r["team"], teams[0])]
+    rows_b = [r for r in prows if _team_same(r["team"], teams[1])]
+    mvp = dict(prows[0]) if prows else None
+    if mvp is not None and not mvp.get("team"):
+        mvp["team"] = teams[0]
+    ts = int(row.get("ts") or 0)
+    bo = (row.get("bo") or "").strip().upper()
+    return {
+        "event": event.strip(), "stage": stage.strip().upper(),
+        "date": datetime.fromtimestamp(ts, CST).strftime("%Y-%m-%d") if ts else "",
+        "format": bo or ("BO%d" % len(maps) if maps else ""),
+        "teamA": {"name": teams[0], "short": shorts[0],
+                  "logo": _html_logo(logos[0], es, budget), "score": sa},
+        "teamB": {"name": teams[1], "short": shorts[1],
+                  "logo": _html_logo(logos[1], es, budget), "score": sb},
+        "maps": maps, "mvp": mvp, "mvp_basis": n_maps,
+        "players": {"teamA": rows_a, "teamB": rows_b},
+    }
+
+
+def build_daily_data(picked, now, es):
+    """总预告 V2 的数据对象（喂 daily_template.html）。
+
+    场次太多（>30，版式兜不住）或空场次返回 None —— 退回 Pillow 旧卡，绝不硬画。
+    """
+    es = es or {}
+    ms = sorted(picked or [], key=lambda m: int(m.get("ts") or 0))
+    if not ms or len(ms) > 30:
+        return None
+    budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
+    start = now.date()
+    out, events = [], []
+    for m in ms:
+        ts = int(m.get("ts") or 0)
+        dt = datetime.fromtimestamp(ts, CST)
+        teams = list(m.get("teams") or []) + ["", ""]
+        shorts = list(m.get("shorts") or []) + ["", ""]
+        logos = list(m.get("logos") or []) + ["", ""]
+        ev = (m.get("tour") or "").strip()
+        if ev and ev not in events:
+            events.append(ev)
+        out.append({
+            "ts": ts, "time": dt.strftime("%H:%M"),
+            "day": (dt.date() - start).days,
+            "dateLabel": dt.strftime("%b %d").upper(),
+            "teamA": {"name": teams[0], "short": shorts[0] or teams[0],
+                      "logo": _html_logo(logos[0], es, budget)},
+            "teamB": {"name": teams[1], "short": shorts[1] or teams[1],
+                      "logo": _html_logo(logos[1], es, budget)},
+            "event": ev, "bo": (m.get("bo") or "").strip().upper(),
+            "status": "UPCOMING",
+        })
+    end = datetime.fromtimestamp(int(ms[-1].get("ts") or 0), CST)
+    w0, w1 = preview_window(now, es.get("preview_run_time"))
+    return {
+        "generatedAt": now.strftime("%H:%M"),
+        "dateLabel": start.strftime("%b %d").upper(),
+        "endDateLabel": end.strftime("%b %d").upper(),
+        "windowLabel": "%s → %s" % (w0.strftime("%H:%M"), w1.strftime("%H:%M")),
+        "matches": out,
+    }
+
+
+def render_result_card_html(row, es):
+    """单场战报 HTML 大图（1920×1080）。出不了返回 None（上层退回 880px 旧卡）。"""
+    if not row:
+        return None
+    try:
+        if not os.path.isfile(RESULT_TEMPLATE_FILE):
+            raise HtmlCardError("缺模板 %s" % RESULT_TEMPLATE_FILE)
+        with open(RESULT_TEMPLATE_FILE, encoding="utf-8") as f:
+            tmpl = f.read()
+        png = render_html_png(tmpl, build_result_match(row, es), es)
+        log("[info] 单场战报大图（HTML 1920×1080）：PNG %.1f KB"
+            % (len(png) / 1024))
+        return png
+    except HtmlCardError as exc:
+        log("[info] HTML 战报大图出不了（%s）→ 退回 880px 旧卡" % exc)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] HTML 战报大图构建出错（%s: %s）→ 退回 880px 旧卡"
+            % (type(exc).__name__, exc))
+    return None
+
+
+def render_card_html(picked, now, es):
+    """总预告 HTML 大图（1920×1080）。出不了返回 None（上层退回 880px 旧卡）。"""
+    try:
+        if not os.path.isfile(DAILY_TEMPLATE_FILE):
+            raise HtmlCardError("缺模板 %s" % DAILY_TEMPLATE_FILE)
+        data = build_daily_data(picked, now, es)
+        if data is None:
+            raise HtmlCardError("空场次或超过 30 场，版式兜不住")
+        with open(DAILY_TEMPLATE_FILE, encoding="utf-8") as f:
+            tmpl = f.read()
+        png = render_html_png(tmpl, data, es)
+        log("[info] 总预告大图（HTML 1920×1080）：PNG %.1f KB" % (len(png) / 1024))
+        return png
+    except HtmlCardError as exc:
+        log("[info] HTML 总预告出不了（%s）→ 退回 880px 旧卡" % exc)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] HTML 总预告构建出错（%s: %s）→ 退回 880px 旧卡"
+            % (type(exc).__name__, exc))
+    return None
+
+
 def render_card(picked, now, es, rank_names=None):
     """把赛程画成一张 PNG 返回 bytes。**任何一项前置条件不满足就返回 None。**
 
-    为什么是「返回 None」而不是抛异常：图片只是锦上添花，没图也必须把赛程发出去。
-    所以下面每条 return None 都对应一种**安静降级**：
-      没装 Pillow / 没字体文件 / 有画不出来的字 / 画的途中出任何错
+    优先出 2026-10-05 用户拍板的 HTML 大图（1920×1080）；出不了退回 880px
+    Pillow 旧卡。为什么是「返回 None」而不是抛异常：图片只是锦上添花，
+    没图也必须把赛程发出去。所以每条 return None 都对应一种**安静降级**：
+      没装 Chromium&Pillow / 没字体文件 / 有画不出来的字 / 画的途中出任何错
     → 上层拿不到 bytes 就改发纯文本（format_daily），功能不会因此消失。
     """
+    if picked and (es or {}).get("card_html_enabled", True):
+        png = render_card_html(picked, now, es)
+        if png:
+            return png
     if Image is None:
         log("[info] 没装 Pillow，跳过图片卡片（本次发纯文本）")
         return None
@@ -2527,7 +2795,12 @@ def _round_win(rounds, side):
 
 
 def render_result_card(row, now, es):
-    """**单场战报**卡片。前置条件不满足一律返回 None，由上层退回纯文本。"""
+    """**单场战报**卡片。优先 HTML 大图（1920×1080），出不了退 880px 旧卡，
+    再不行返回 None，由上层退回纯文本。"""
+    if row and (es or {}).get("card_html_enabled", True):
+        png = render_result_card_html(row, es)
+        if png:
+            return png
     if Image is None:
         log("[info] 没装 Pillow，跳过单场战报卡片（本次发纯文本）")
         return None
@@ -4201,12 +4474,16 @@ def selftest():
     t.check("没有 onebot 通道时不硬塞图片",
             len(with_card_image([fake_con], b"abc")) == 1)
 
+    # 这一块全部在测 **880px Pillow 旧卡**（card_html_enabled=False 钉死，
+    # 否则装了 Chromium 的机器会拿到 1920×1080 的 HTML 大图，高度断言全崩）。
+    # HTML 大图的断言在下面 3f-2。
+    pill = dict(es, card_html_enabled=False)
     if Image is None:
         t.check("本机没有 Pillow → 不出图，返回 None（上层据此退回纯文本）",
-                render_card(many[:2], base, es) is None)
+                render_card(many[:2], base, pill) is None)
         print("   （本机没装 Pillow，跳过渲染断言）")
     else:
-        png = render_card(many[:2], base, es)
+        png = render_card(many[:2], base, pill)
         t.check("有 Pillow + 有字体时能出 PNG",
                 isinstance(png, (bytes, bytearray))
                 and bytes(png[:8]) == b"\x89PNG\r\n\x1a\n", type(png))
@@ -4218,7 +4495,7 @@ def selftest():
             t.check("卡片宽度 = CARD_W", im.width == CARD_W, im.size)
             t.check("出图是好几十 KB 的真图，不是空壳", len(png) > 5000, len(png))
 
-        png3 = render_card(many, base, dict(es, card_max_rows=3))
+        png3 = render_card(many, base, dict(pill, card_max_rows=3))
         if png3:
             t.check("超过 card_max_rows 时按上限截断",
                     Image.open(io.BytesIO(png3)).height
@@ -4229,17 +4506,17 @@ def selftest():
         try:
             globals()["CARD_FONT_FILE"] = os.path.join(HERE, "__no-such-font__.otf")
             t.check("找不到字体文件时返回 None（不抛异常）",
-                    render_card(many[:2], base, es) is None)
+                    render_card(many[:2], base, pill) is None)
         finally:
             globals()["CARD_FONT_FILE"] = _keep
         t.check("恢复字体路径后又能出图",
-                isinstance(render_card(many[:2], base, es), (bytes, bytearray)))
+                isinstance(render_card(many[:2], base, pill), (bytes, bytearray)))
 
         # 队标预算为 0 → 不去联网，画占位块照旧出图
         png_b = render_card(
             [mk(ts(14), ["A", "B"], "T",
                 logos=["https://example.invalid/never.png", ""])],
-            base, dict(es, logo_max_new_per_run=0))
+            base, dict(pill, logo_max_new_per_run=0))
         t.check("队标下载预算为 0 时不出网、照样出图",
                 isinstance(png_b, (bytes, bytearray)), type(png_b))
 
@@ -4581,7 +4858,7 @@ def selftest():
             datetime.fromtimestamp(1791104400, CST).strftime("%m-%d") in scap, scap)
 
     if Image is not None:
-        spng = render_result_card(srow, base_now, es)
+        spng = render_result_card(srow, base_now, pill)
         t.check("单场战报卡片能出 PNG",
                 isinstance(spng, (bytes, bytearray))
                 and bytes(spng[:8]) == b"\x89PNG\r\n\x1a\n", type(spng))
@@ -4591,7 +4868,7 @@ def selftest():
                     im.size == (CARD_W, CARD_HDR_H + CARD_FIX_H + CARD_MAP_H * 3
                                 + CARD_FTR_H), im.size)
         # ⚑ 抓不到逐图时的降级路径：卡片照样出，只是矮了 3 行 —— 绝不能因此不发。
-        nomap = render_result_card(dict(srow, maps=[]), base_now, es)
+        nomap = render_result_card(dict(srow, maps=[]), base_now, pill)
         t.check("⚑ 没有逐图数据照样出图（只是矮一截，不是失败）",
                 isinstance(nomap, (bytes, bytearray)))
         if nomap:
@@ -4601,16 +4878,83 @@ def selftest():
         t.check("单场战报缺字时整张不出（退回纯文本，不画豆腐块）",
                 render_result_card(dict(srow, teams=["測試隊", "PARIVISION"],
                                         shorts=["測試隊", "PARIVISION"]),
-                                   base_now, es) is None)
+                                   base_now, pill) is None)
         t.check("单场战报在「两边队标都没有」时照样出图（画占位块）",
                 render_result_card(srow, base_now,
-                                   dict(es, logo_max_new_per_run=0)) is not None)
+                                   dict(pill, logo_max_new_per_run=0)) is not None)
         # 这一条是 2026-10-05 预览时真踩到的：忘了补「报」「地」，整张卡片静默消失。
         t.check("⚑ 单场战报要画的中文全在字体子集里（报 / 地 最容易漏）",
                 card_missing_chars(["CS2 战报", "地图 1", "地图 3", "Dust II",
                                     "PARIVISION"]) == set())
         t.check("「报」「地」在固定字符表里",
                 "报" in CARD_UI_CHARS and "地" in CARD_UI_CHARS)
+
+    # ---- 3f-2. HTML 大图（1920×1080）：V2 版式，三级降级的头一级 ----
+    print("\n-- 3f-2. HTML 大图（V2 版式 / Chromium 截图 / 三级降级头一级）--")
+    t.check("chrome_bin 钉死到不存在的路径 → find_chrome 只认它、返回 None",
+            find_chrome(dict(es, chrome_bin="/nonexistent/chrome")) is None)
+    t.check("chrome_bin 没配时探测不炸（返回路径或 None 都是合法结果）",
+            find_chrome(es) is None or isinstance(find_chrome(es), str))
+    hrow = dict(srow, players=[
+        {"map": "Dust II", "players": [
+            {"name": "pA", "team": "Legacy", "k": 20, "d": 18, "a": 5, "pm": 2,
+             "adr": 88.4, "kast": 75, "rating": 1.21},
+            {"name": "pB", "team": "PARIVISION", "k": 25, "d": 16, "a": 3, "pm": 9,
+             "adr": 96.2, "kast": 81, "rating": 1.45}]},
+        {"map": "Inferno", "players": [
+            {"name": "pA", "team": "Legacy", "k": 10, "d": 22, "a": 2, "pm": -12,
+             "adr": 61.0, "kast": 55, "rating": 0.72},
+            {"name": "pC", "team": "PARIVISION", "k": 22, "d": 12, "a": 6, "pm": 10,
+             "adr": 92.8, "kast": 79, "rating": 1.38}]}])
+    hm = build_result_match(hrow, es)
+    t.check("V2 数据：比分拆列、赛事按「 - 」拆名与赛段",
+            hm["teamA"]["score"] == 1 and hm["teamB"]["score"] == 2
+            and hm["event"] == "ESL Pro League Season 24"
+            and hm["stage"] == "ROUND 1",
+            (hm["teamA"]["score"], hm["event"], hm["stage"]))
+    t.check("V2 数据：逐图回合数转数字、编号从 1 起",
+            [mp["teamA"] for mp in hm["maps"]] == [13, 2, 12]
+            and hm["maps"][0]["number"] == 1, hm["maps"])
+    t.check("V2 数据：MVP 取跨图聚合后 rating 最高的（pB 1.45）",
+            hm["mvp"]["name"] == "pB" and abs(hm["mvp"]["rating"] - 1.45) < 1e-9,
+            hm["mvp"])
+    t.check("V2 数据：跨图聚合 K 累加（20+10）、ADR 取平均（(88.4+61.0)/2）",
+            hm["players"]["teamA"][0]["k"] == 30
+            and abs(hm["players"]["teamA"][0]["adr"] - 74.7) < 1e-9,
+            hm["players"]["teamA"])
+    t.check("V2 数据：mvp_basis = 真有选手数据的图数（不是 maps 长度）",
+            hm["mvp_basis"] == 2, hm["mvp_basis"])
+    t.check("V2 数据：日期取比赛时间不是当前时间",
+            hm["date"] == datetime.fromtimestamp(1791104400, CST).strftime("%Y-%m-%d"),
+            hm["date"])
+    t.check("V2 数据：赛制转大写（Bo3 → BO3）", hm["format"] == "BO3", hm["format"])
+    hm0 = build_result_match(dict(srow, maps=[], players=[]), es)
+    t.check("⚑ V2 数据：没逐图没选手也不炸（空列表 + 空 MVP，模板走居中形态）",
+            hm0["maps"] == [] and hm0["mvp"] is None
+            and hm0["players"] == {"teamA": [], "teamB": []}, (hm0["maps"], hm0["mvp"]))
+
+    if find_chrome(es):
+        hpng = render_result_card_html(hrow, es)
+        t.check("有 Chromium 时单场战报出 1920×1080 HTML 大图",
+                isinstance(hpng, (bytes, bytearray))
+                and bytes(hpng[:8]) == b"\x89PNG\r\n\x1a\n", type(hpng))
+        dpng = render_card_html(many[:2], base, es)
+        t.check("有 Chromium 时总预告出 1920×1080 HTML 大图",
+                isinstance(dpng, (bytes, bytearray))
+                and bytes(dpng[:8]) == b"\x89PNG\r\n\x1a\n", type(dpng))
+        hpng0 = render_result_card_html(dict(srow, maps=[], players=[]), es)
+        t.check("⚑ 没逐图没选手的 HTML 大图照样出（居中形态，不是失败）",
+                isinstance(hpng0, (bytes, bytearray)), type(hpng0))
+    else:
+        t.check("没 Chromium 时 HTML 卡安静退回 None（再退 Pillow/纯文本）",
+                render_result_card_html(srow, es) is None)
+    _keep_tpl = globals()["RESULT_TEMPLATE_FILE"]
+    try:
+        globals()["RESULT_TEMPLATE_FILE"] = os.path.join(HERE, "__no-tpl__.html")
+        t.check("缺模板时 HTML 卡安静退回 None（不外抛异常）",
+                render_result_card_html(srow, es) is None)
+    finally:
+        globals()["RESULT_TEMPLATE_FILE"] = _keep_tpl
 
     # ---- 4. 连续静默与报平安 ----
     print("\n-- 4. 连续静默 → 报平安 --")

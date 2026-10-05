@@ -31,7 +31,8 @@
 | `08cbb23`（上一次） | 新增**战果公布**：预告过的比赛打完后补一条比分 | 预告后还会收到战果消息；**新增两个单元** `douyu-esports-results.{service,timer}`（只装不启用）。零新增数据源 —— 还是那一个页面、同一份解析器 |
 | **（本次）** | **战果改成两条通道 + 队名按胜负上色** | ① **每场一条**「单场战报」（胜方绿名 / 负方红名，卡片里逐图一行，比分按该图胜负上色）；② 新增 `douyu-esports-daily.{service,timer}`，**次日 09:40** 发上一个赛程日的**全天整合版**（一场一行、不带逐图，**不联网**）。逐图比分来自 Liquipedia **赛事页**（页面路径是链接里自带的，不用维护别名表），抓不到就少画几行、不影响发送。**⚠️ 卡片字体多带了「地」「报」两个字，`card_font.otf` 必须一起更新**，否则卡片会静默退回纯文本 |
 | `e3788b3` | **单场战报带逐图选手数据**（csdb.gg）+ 卡片重排版 | 战报卡片下部多两列 5v5 选手数据（K-D/ADR/KAST/Rating，取自 csdb.gg 单场页）；拿不到选手数据时自动少画，不影响发送。新增配置键 `card_players_enabled`（默认开）/ `card_players_per_team`（默认 3） |
-| `4f24807`（**本次**） | 队标优先取 **darkmode** 变体 | 亮/暗双图队伍（Vitality/G2/NAVI/Spirit…）在深色卡片上恢复彩色版（Vitality 黑蜜蜂→黄蜜蜂）；单图队伍不受影响 |
+| `4f24807` | 队标优先取 **darkmode** 变体 | 亮/暗双图队伍（Vitality/G2/NAVI/Spirit…）在深色卡片上恢复彩色版（Vitality 黑蜜蜂→黄蜜蜂）；单图队伍不受影响 |
+| **（本次）** | **卡片全部换成 V2 大图（1920×1080 HTML 渲染）** | 战报卡和总预告卡变成用户拍板的深色大图版式。**新增 5 个文件**：`result_template.html`、`daily_template.html`、`fonts/`（3 个 ttf）。渲染优先走 Chromium 截图，没装 Chromium / 渲染失败**自动退回 880px 旧卡**，再不行退纯文本 —— 消息永远照发。**服务器要装 Chromium + 中文字体**（见第 2.5 步），不装就一直是旧 880px 卡 |
 
 下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 
@@ -66,20 +67,28 @@
 ```bash
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
-sha256sum watch.py selftest.py watchdog.py esports.py card_font.otf make_card_font.py | cut -c1-16
-wc -c watch.py selftest.py watchdog.py esports.py card_font.otf make_card_font.py
+sha256sum watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html card_font.otf make_card_font.py fonts/*.ttf | cut -c1-16
+wc -c watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html card_font.otf make_card_font.py fonts/*.ttf
+sha256sum ../deploy.zip | cut -c1-16
 ```
 
-前四个（代码）必须完全一致，后两个（卡片资产）单独对：
+代码与模板必须完全一致，资产（字体）单独对：
 
 | 文件 | sha256 前 16 位 | 字节数 |
 |---|---|---|
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `2b43516f9886144e` | 244830 |
-| `card_font.otf`（卡片字体） | `15c77181345f84d5` | 68720 |
+| `esports.py` | `a234e2ed65905874` | 261436 |
+| `result_template.html`（V2 战报模板） | `461df01be5d89d33` | 10518 |
+| `daily_template.html`（V2 总预告模板） | `3d5c9fda90c215e6` | 8808 |
+| `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
+| `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
+| `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
+| `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `f93d2269ef85a165` | 5403 |
+
+`deploy.zip` 整包：`01a57f00ae04e86a`（479.3 KB，44 个文件；比上一版多的 1 个文件是 `fonts/LICENSE-OFL.txt` 字体许可证）。
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
@@ -126,6 +135,21 @@ sudo bash install-watch.sh
 
 安装脚本**只放文件 + `daemon-reload`**，不启用、不重启任何定时器，已有的定时器状态不受影响。
 所以这一步**不需要**手动重启服务。
+
+---
+
+## 第 2.5 步 · 装 Chromium + 中文字体（V2 大图卡片的前提，**只做一次**）
+
+这一版卡片用 Chromium 无头截图渲染 1920×1080 大图。**不装的话消息照发**，
+但卡片会一直走 880px 旧卡降级 —— 装完才出用户拍板的新版式。
+
+```bash
+sudo snap install chromium          # Ubuntu 24.04；约 150MB，耐心等
+sudo apt-get install -y fonts-noto-cjk   # 卡片上有中文（「跨图平均 Rating」等）
+which chromium || ls /snap/bin/chromium  # 确认可执行文件在 PATH 里
+```
+
+装完不用重启任何服务 —— 渲染是每次发卡时现起的，下一轮 timer 自动用上。
 
 ---
 

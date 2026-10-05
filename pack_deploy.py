@@ -43,6 +43,15 @@ REQUIRED = [
     "douyu-watchdog.timer",
     "watchdog.env.example",
     "esports.py",
+    # 2026-10-05 用户拍板的 V2 大图卡片：两个 HTML 模板 + 三个字体（OFL 许可，
+    # 可随包分发）。缺了不会报错，但卡片会**安静退回 880px Pillow 旧卡**，
+    # 所以必须进 REQUIRED —— 免得打出一个「看起来正常、实际上全退旧版」的包。
+    "result_template.html",
+    "daily_template.html",
+    "fonts/BebasNeue-Regular.ttf",
+    "fonts/IBMPlexMono-Regular.ttf",
+    "fonts/IBMPlexMono-SemiBold.ttf",
+    "fonts/LICENSE-OFL.txt",
     # 图片卡片的三件套：字体（二进制）+ 它的许可证 + 生成字体的脚本。
     # 少了字体不会报错，但卡片会**静默降级成纯文本**；少了 make_card_font.py
     # 则 `esports.py --selftest` 里 2 条「两张字符表是否一致」的断言会被跳过
@@ -74,15 +83,22 @@ REQUIRED = [
 FROM_ROOT = ["watch.py", "selftest.py"]
 
 # 这些文件在 deploy/ 里，装到服务器上时要打印指纹
-FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py", "deploy/esports.py"]
+FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py", "deploy/esports.py",
+               "deploy/result_template.html", "deploy/daily_template.html",
+               "deploy/fonts/BebasNeue-Regular.ttf",
+               "deploy/fonts/IBMPlexMono-Regular.ttf",
+               "deploy/fonts/IBMPlexMono-SemiBold.ttf"]
 
 # 文本文件统一转 LF 的扩展名
 TEXT_EXT = {".sh", ".py", ".md", ".json", ".yml", ".yaml", ".service", ".timer",
-            ".example", ".txt", ""}
+            ".example", ".txt", ".html", ""}
 
 SKIP_NAMES = {"__pycache__", "pack_deploy.py", "deploy.zip", "selftest_result.txt",
               # 世界排名的抓取缓存：服务器上会自己生成，别把开发机上的那份打进包
               "rank_cache.json", "rank_cache.json.tmp",
+              # 队标缓存目录（ensure_logo 运行期下载的 PNG）：同上，服务器自己会长出来。
+              # 2026-10-05 打包脚本改递归后踩到 —— 47 张本地缓存差点混进部署包。
+              "logo_cache",
               # 生成 card_font.otf 用的**源字体**（Noto Sans SC，8 MB）。
               # 产出的卡片字体是 card_font.otf（66 KB），这个源文件只在重跑
               # make_card_font.py 时才需要 —— 进了包 deploy.zip 会从 260 KB 涨到 8 MB。
@@ -143,14 +159,16 @@ def main():
         print("找不到 deploy/ 目录", file=sys.stderr)
         return 1
 
-    # ---- 收集 deploy/ 里的文件 ----
+    # ---- 收集 deploy/ 里的文件（**递归**：fonts/ 子目录里的字体也要进包）----
     entries = {}
-    for name in sorted(os.listdir(DEPLOY_DIR)):
-        if name in SKIP_NAMES or name.endswith(SKIP_SUFFIX) or is_runtime_state(name):
-            continue
-        full = os.path.join(DEPLOY_DIR, name)
-        if os.path.isfile(full):
-            entries[name] = read_normalized(full)
+    for root, dirs, files in os.walk(DEPLOY_DIR):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_NAMES)
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, DEPLOY_DIR).replace("\\", "/")
+            if name in SKIP_NAMES or name.endswith(SKIP_SUFFIX) or is_runtime_state(rel):
+                continue
+            entries[rel] = read_normalized(full)
     for name in FROM_ROOT:
         entries[name] = read_normalized(os.path.join(HERE, name))
 
@@ -217,7 +235,8 @@ def main():
     print("")
     print("指纹（sha256 前 16 位）—— 服务器装完会打印同样的值，可用来确认不是旧版：")
     for rel in FINGERPRINT:
-        key = os.path.basename(rel) if rel.startswith("deploy/") else rel
+        # entries 的键是「相对 deploy/ 的路径」（含子目录，如 fonts/xxx.ttf）
+        key = rel[len("deploy/"):] if rel.startswith("deploy/") else rel
         if key in entries:
             print("    %-16s  %s" % (sha16(entries[key]), rel))
         else:

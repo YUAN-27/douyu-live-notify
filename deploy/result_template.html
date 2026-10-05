@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family:"Bebas Neue"; src:url("file:///__FONTDIR__/BebasNeue-Regular.ttf"); }
+@font-face { font-family:"IBM Plex Mono"; src:url("file:///__FONTDIR__/IBMPlexMono-Regular.ttf"); font-weight:400; }
+@font-face { font-family:"IBM Plex Mono"; src:url("file:///__FONTDIR__/IBMPlexMono-SemiBold.ttf"); font-weight:600; }
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:1920px; height:1080px; overflow:hidden; }
+body { background:#08090C; color:#F1F3F5;
+  font-family:"IBM Plex Mono","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+  -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums; }
+#app { width:100%; height:100%; display:flex; flex-direction:column;
+  background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
+                   linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:48px 48px; }
+.accent { color:#00D66B; }
+.dim { color:#7D8796; }
+
+/* ---- 顶部事件条 ---- */
+.evt { height:66px; flex:none; display:flex; align-items:center;
+  justify-content:space-between; padding:0 64px;
+  border-bottom:1px solid #272D36; }
+.evt .l { display:flex; align-items:baseline; gap:18px; }
+.evt .name { font-family:"Bebas Neue"; font-size:30px; letter-spacing:2px; color:#F1F3F5; }
+.evt .stage { font-size:15px; letter-spacing:3px; color:#7D8796; }
+.evt .r { display:flex; gap:22px; align-items:center; font-size:15px;
+  letter-spacing:2px; color:#7D8796; }
+.evt .bo { color:#00D66B; border:1px solid rgba(0,214,107,.5); padding:3px 14px;
+  border-radius:4px; font-weight:600; font-size:14px; }
+
+/* ---- FINAL SCORE ---- */
+.hero { flex:none; height:258px; display:flex; align-items:center;
+  padding:0 96px; position:relative; }
+.hero .tm { flex:1; display:flex; align-items:center; gap:28px; min-width:0; }
+.hero .tm.r { flex-direction:row-reverse; text-align:right; }
+.hero .logo { height:92px; flex:none; display:flex; align-items:center; }
+.hero .logo img { max-height:92px; max-width:120px; }
+.hero .tag { font-size:14px; letter-spacing:4px; color:#7D8796; margin-bottom:8px; }
+.hero .tag.w { color:#00D66B; }
+.hero .nm { font-family:"Bebas Neue"; font-size:56px; letter-spacing:2px;
+  white-space:nowrap; overflow:hidden; line-height:1; }
+.hero .tm.w .nm { color:#F1F3F5; }
+.hero .tm.l .nm { color:#7D8796; }
+.hero .fs { flex:none; font-family:"Bebas Neue"; font-size:150px; line-height:1;
+  padding:0 72px; display:flex; align-items:baseline; letter-spacing:6px; }
+.hero .fs .sep { color:#3A4250; padding:0 26px; font-size:110px; }
+.hero .underline { position:absolute; bottom:0; left:96px; right:96px;
+  height:2px; background:linear-gradient(90deg,transparent,#00D66B 30%,#00D66B 70%,transparent);
+  opacity:.55; }
+
+/* ---- MAP SUMMARY ---- */
+.maps { flex:none; height:190px; display:flex; gap:20px; padding:26px 64px;
+  align-items:stretch; }
+.maps.solo { justify-content:center; }
+.mcard { flex:1; background:#151A22; border:1px solid #272D36; border-radius:10px;
+  padding:20px 28px 16px; display:flex; flex-direction:column; }
+.maps.bo5 .mcard { padding:16px 20px 12px; }
+.mcard .row1 { display:flex; justify-content:space-between; align-items:baseline; }
+.mcard .no { font-size:13px; letter-spacing:3px; color:#7D8796; }
+.mcard .mnm { font-family:"Bebas Neue"; font-size:30px; letter-spacing:2px; }
+.maps.bo5 .mcard .mnm { font-size:24px; }
+.mcard .sc { font-size:44px; font-weight:600; margin-top:12px; text-align:center; flex:1; }
+.maps.bo5 .mcard .sc { font-size:36px; margin-top:8px; }
+.mcard .sc .sep { color:#3A4250; padding:0 12px; font-weight:400; }
+.mcard .sc .w { color:#00D66B; } .mcard .sc .l { color:#7D8796; }
+.mcard .row3 { display:flex; justify-content:center; font-size:13px;
+  letter-spacing:2px; color:#7D8796; }
+.mcard .row3 b { color:#00D66B; font-weight:600; }
+
+/* ---- MVP ---- */
+.mvp { flex:none; height:196px; display:flex; align-items:center;
+  padding:0 96px; gap:44px; border-top:1px solid #272D36;
+  border-bottom:1px solid #272D36; background:rgba(21,26,34,.45); }
+.mvp .ava { width:92px; height:92px; border-radius:50%; flex:none;
+  border:2px solid rgba(0,214,107,.65); background:#11151C;
+  display:flex; align-items:center; justify-content:center;
+  font-family:"Bebas Neue"; font-size:44px; color:#00D66B; }
+.mvp .who { flex:1; min-width:0; }
+.mvp .lbl { font-size:14px; letter-spacing:4px; color:#7D8796; margin-bottom:10px; }
+.mvp .lbl b { color:#00D66B; font-weight:600; }
+.mvp .pn { font-family:"Bebas Neue"; font-size:52px; letter-spacing:2px; line-height:1; }
+.mvp .pt { font-size:15px; color:#7D8796; margin-top:8px; letter-spacing:1px; }
+.mvp .st { display:flex; gap:0; align-items:center; flex:none; }
+.mvp .cell { padding:0 40px; text-align:center; border-left:1px solid #272D36; }
+.mvp .cell .v { font-size:44px; font-weight:600; line-height:1.1; }
+.mvp .cell .v.big { font-size:60px; color:#00D66B; }
+.mvp .cell .k { font-size:13px; letter-spacing:3px; color:#7D8796; margin-top:8px; }
+
+/* ---- FULL STATS ---- */
+.stats { flex:1; display:flex; gap:64px; padding:26px 96px 18px; min-height:0; }
+.stats .col { flex:1; min-width:0; }
+.stats .th { display:flex; align-items:baseline; gap:14px; margin-bottom:12px; }
+.stats .th .tn { font-family:"Bebas Neue"; font-size:26px; letter-spacing:1.5px; }
+.stats .th .ts { font-size:13px; color:#7D8796; letter-spacing:2px; }
+.stats table { width:100%; border-collapse:collapse; }
+.stats th { font-size:13px; font-weight:400; letter-spacing:2px; color:#7D8796;
+  text-align:right; padding:6px 0 8px; border-bottom:1px solid #272D36; }
+.stats th:first-child { text-align:left; }
+.stats td { font-size:19px; padding:9px 0; text-align:right;
+  border-bottom:1px solid rgba(39,45,54,.55); }
+.stats td:first-child { text-align:left; font-weight:600; color:#F1F3F5;
+  white-space:nowrap; overflow:hidden; }
+.stats td.c { font-weight:600; }
+.stats td.best { color:#00D66B; }
+.stats td .sub { color:#7D8796; font-size:13px; margin-left:10px; }
+
+/* 没有选手数据时：内容整体垂直居中，页脚仍贴底（整卡保持 1920×1080） */
+.mid { flex:1; min-height:0; display:flex; flex-direction:column; justify-content:center; }
+
+/* ---- 页脚 ---- */
+.ftr { flex:none; height:48px; display:flex; align-items:center;
+  justify-content:space-between; padding:0 64px;
+  border-top:1px solid #272D36; font-size:14px; letter-spacing:1px; color:#5C6570; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const match = __MATCH__;
+
+function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+function short(t){ return t.short || t.name; }
+
+function render(m){
+  const app = document.getElementById("app");
+  const a = m.teamA, b = m.teamB;
+  const aWin = a.score > b.score, bWin = b.score > a.score;
+
+  // ---- hero ----
+  function team(t, win){
+    return `<div class="tm ${win?"w":"l"}">
+      <div class="logo">${t.logo?`<img src="${t.logo}">`:`<div class="logo">${esc(short(t))}</div>`}</div>
+      <div><div class="tag ${win?"w":""}">${win?"WINNER":"LOSER"}</div>
+      <div class="nm">${esc(t.name)}</div></div>
+    </div>`;
+  }
+  const hero = `<div class="hero">
+    ${team(a, aWin)}
+    <div class="fs"><span class="${aWin?"accent":"dim"}">${a.score}</span><span class="sep">:</span><span class="${bWin?"accent":"dim"}">${b.score}</span></div>
+    ${team(b, bWin)}
+    <div class="underline"></div>
+  </div>`;
+
+  // ---- maps ----
+  // ---- maps（一张图都没有就整段不渲染，不留空白带）----
+  const bo5 = m.maps.length > 3;
+  const cards = m.maps.map(mp => {
+    const aw = mp.teamA > mp.teamB, bw = mp.teamB > mp.teamA;
+    const win = aw ? esc(short(a)) : (bw ? esc(short(b)) : "");
+    return `<div class="mcard">
+      <div class="row1"><span class="no">MAP ${mp.number}</span><span class="mnm">${esc(mp.name)}</span></div>
+      <div class="sc"><span class="${aw?"w":"l"}">${mp.teamA}</span><span class="sep">—</span><span class="${bw?"w":"l"}">${mp.teamB}</span></div>
+      <div class="row3">${win?`<b>${win}</b>&nbsp;WIN`:""}</div>
+    </div>`;
+  }).join("");
+  const maps = m.maps.length
+    ? `<div class="maps ${bo5?"bo5":(m.maps.length===1?"solo":"")}">${cards}</div>`
+    : "";
+
+  // ---- mvp ----
+  const v = m.mvp;
+  const mvpHtml = v ? `<div class="mvp">
+    <div class="ava">${esc(v.name[0]||"?")}</div>
+    <div class="who">
+      <div class="lbl">★ <b>PLAYER OF THE MATCH</b></div>
+      <div class="pn">${esc(v.name)}</div>
+      <div class="pt">${esc(v.team)} · ${m.mvp_basis>1?"跨图平均":"单图"} Rating</div>
+    </div>
+    <div class="st">
+      <div class="cell"><div class="v">${v.k}-${v.d}</div><div class="k">K-D</div></div>
+      <div class="cell"><div class="v">${v.adr.toFixed(1)}</div><div class="k">ADR</div></div>
+      <div class="cell"><div class="v">${Math.round(v.kast)}%</div><div class="k">KAST</div></div>
+      <div class="cell"><div class="v big">${v.rating.toFixed(2)}</div><div class="k">RATING</div></div>
+    </div>
+  </div>` : "";
+
+  // ---- full stats ----
+  function col(t, rows){
+    const best = Math.max(...rows.map(r=>r.rating));
+    const tr = rows.map(r =>
+      `<tr><td>${esc(r.name)}</td><td class="c">${r.k}-${r.d}</td>
+       <td>${r.adr.toFixed(1)}</td><td>${Math.round(r.kast)}%</td>
+       <td class="${r.rating>=best?"best":""}">${r.rating.toFixed(2)}</td></tr>`).join("");
+    return `<div class="col">
+      <div class="th"><span class="tn">${esc(t.name)}</span><span class="ts">${aWin&&t===b||bWin&&t===a?"LOSER":"WINNER"}</span></div>
+      <table><tr><th>PLAYER</th><th>K-D</th><th>ADR</th><th>KAST</th><th>RTG</th></tr>${tr}</table>
+    </div>`;
+  }
+  const stats = `<div class="stats">${col(a, m.players.teamA)}${col(b, m.players.teamB)}</div>`;
+
+  // 没有选手数据（csdb 没抓到）→ 不渲染空表格，内容整体居中
+  const hasStats = m.players
+    && ((m.players.teamA || []).length + (m.players.teamB || []).length) > 0;
+  const core = hasStats
+    ? `${hero}${maps}${mvpHtml}${stats}`
+    : `<div class="mid">${hero}${maps}${mvpHtml}</div>`;
+
+  app.innerHTML = `
+    <div class="evt">
+      <div class="l"><span class="name">${esc(m.event)}</span><span class="stage">${esc(m.stage)}</span></div>
+      <div class="r"><span>${esc(m.date)}</span><span class="bo">${esc(m.format)}</span></div>
+    </div>
+    ${core}
+    <div class="ftr"><span>数据来源：Liquipedia · csdb.gg</span><span>Generated by douyu-live-notify</span></div>`;
+}
+render(match);
+</script>
+</body>
+</html>
