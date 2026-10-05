@@ -75,14 +75,14 @@ wc -c watch.py selftest.py watchdog.py esports.py card_font.otf make_card_font.p
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `cf9fa533307c09c1` | 224672 |
-| `card_font.otf`（卡片字体） | `e2cb3887c14f9534` | 68012 |
-| `make_card_font.py`（生成字体的脚本） | `b26d87f2201d1738` | 5391 |
+| `esports.py` | `8be5b4232c8c41fc` | 244263 |
+| `card_font.otf`（卡片字体） | `15c77181345f84d5` | 68720 |
+| `make_card_font.py`（生成字体的脚本） | `f93d2269ef85a165` | 5403 |
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
-> ⚠️ 本次 `card_font.otf` **必须一起更新**：新版卡片要画「地」「报」两个字
-> （「地图 1」「CS2 战报」）。只更新 `esports.py` 不更新字体的话，
+> ⚠️ 本次 `card_font.otf` **必须一起更新**：新版卡片要画「选手评分」四个字
+> （选手段的表头）。只更新 `esports.py` 不更新字体的话，
 > 卡片会**静默退回纯文本** —— 消息照样发得出去，但图片全没了。
 
 > ⚠️ **这张表是权威**。不要把记忆里或旧文档里的值当基准 —— 这版 `watchdog.py` 的指纹
@@ -146,10 +146,10 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **278** |
-  | 少了 `make_card_font.py` | 276（少 2 条「两张字符表是否一致」的断言） |
-  | 没装 Pillow | 247（三张卡片的 32 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
-  | 两样都没有 | 245 |
+  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **297** |
+  | 少了 `make_card_font.py` | 295（少 2 条「两张字符表是否一致」的断言） |
+  | 没装 Pillow | 266（四张卡片的 31 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
+  | 两样都没有 | 264 |
 
   **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow 那行、
   再 `ls card_font.otf make_card_font.py`。

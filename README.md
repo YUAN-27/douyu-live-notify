@@ -124,7 +124,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
 | `python deploy/esports.py --teams` | **列出页面上的真实队名**并标出哪些已收录（含 `[知名]` / `[世界前15]` 标记），改白名单前用它抄名字（不发消息、不写状态） |
 | `python deploy/esports.py --rank` | **核世界前 15 的队名映射**：打印 HLTV 写法 → Liquipedia 队名，标出没映射上的（会请求一次 HLTV，不发消息、不写状态） |
-| `python deploy/esports.py --selftest` | 赛程预告离线自检（正常 278 项；少 `make_card_font.py` 是 276、没装 Pillow 是 247、都没有是 245，**只看有没有 0 失败**），不联网、不发消息 |
+| `python deploy/esports.py --selftest` | 赛程预告离线自检（正常 297 项；少 `make_card_font.py` 是 295、没装 Pillow 是 266、都没有是 264，**只看有没有 0 失败**），不联网、不发消息 |
 | `python deploy/esports.py --check-results` | **看单场战报会发什么**：结算「已经打完、还没发过」的场次并逐场出图（`/tmp/esports_result_check_01.png` …，**一场一张**），不发消息、不写状态。**清单空着也会演练**（拿页面上最近打完的 8 场演示），所以刚装好就能验收。会真的去抓赛事页拿逐图比分，所以整轮可能要等 30 秒 × 赛事数 |
 | `python deploy/esports.py --results` | 结算到期场次并发**单场战报**（定时器调的就是它；没到窗口会**一个请求都不发**就退出）。**每两队打完就发这一条**（一场一条，不再合并） |
 | `python deploy/esports.py --check-daily` | **看全天整合版长什么样**：出图到 `/tmp/esports_daily_check.png`，不发消息、不写状态。**完全不联网**，只读清单快照 |

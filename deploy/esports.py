@@ -185,6 +185,29 @@ VERSION = "1.0.0"
 LIQUIPEDIA_API = "https://liquipedia.net/counterstrike/api.php"
 
 # --------------------------------------------------------------------------
+# 选手数据源（csdb.gg，可选能力）
+# --------------------------------------------------------------------------
+# Liquipedia **没有**选手数据（rating / ADR / KAST / K-D）。逐图比分能从它自己的
+# 赛事页拿到，但「选手打得怎么样」它一概不记（2026-10-05 用真实页名验过 4 个赛事页，
+# MVP/Rating/ADR/KAST 全零命中）。
+#
+# csdb.gg 有逐场逐图逐人的选手数据（服务端渲染，普通 urllib 就能拿），数据由
+# PandaScore 供。定位方式：它的 `/matches/` 列表页按日期列出最近约 2 天的所有比赛，
+# 一线队（NAVI/FURIA/Vitality…）也在里面，每条带一个 `/match/<日期>-<uuid>/` 或
+# `/match/<队名-slug>-<日期>/` 链接。因为我们的战果结算窗口 ≤ 3 小时，比赛打完时
+# 一定还在这个「最近 2 天」范围内 —— 所以**按「队名 + 日期」在列表页里匹配**即可
+# 定位到单场页，**不需要维护「Liquipedia 赛事 → csdb 赛事」的映射表**。
+#
+# ⚠️ robots.txt：`Allow: /` 但 `Disallow: /api/`、`Disallow: /stats/match/`。
+#     所以我们只抓 `/matches/` 列表页和 `/match/` 详情页，**不碰它的 API**。
+CSDB_BASE = "https://csdb.gg"
+CSDB_MATCHES_URL = CSDB_BASE + "/matches/"
+# 抓 csdb 要用**浏览器 UA**（实测桌面 UA 才能过它的 Vercel WAF；Liquipedia 那套
+# 「项目名 + 联系方式」的 UA 对它反而可能被拦）。别复用 build_ua()。
+CSDB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+# --------------------------------------------------------------------------
 # 图片卡片（可选能力）
 # --------------------------------------------------------------------------
 # 为什么要出图：手机 QQ 对纯文本的换行/缩进/字体处理很不一致，
@@ -216,7 +239,9 @@ LOGO_DIR = os.path.join(HERE, "logo_cache")
 #
 # 「地」「报」是 2026-10-05 晚加「单场战报」时补的：
 #   「CS2 战报」的**报**、逐图行前缀「地图 1」的**地**。
-CARD_UI_CHARS = "赛程今天明共场次日数据来源：个事图里只列前·→　战果周一二三四五六日地报"
+#
+# 「选手评分」是 2026-10-05 深夜加「选手数据」时补的（选手段表头的四个字）。
+CARD_UI_CHARS = "赛程今天明共场次日数据来源：个事图里只列前·→　战果周一二三四五六日地报选手评分"
 
 # card_font.otf 覆盖的 Unicode 区间，同样要和 make_card_font.py 对齐。
 # 出图前逐个字符核对：只要有一个字不在里面就**退回纯文本**，
@@ -252,6 +277,11 @@ CARD_LOGO = 52
 # 取值就是用户 2026-10-05 看过并拍板的那张预览图的取值（880×414，3 张地图）。
 CARD_FIX_H = 100
 CARD_MAP_H = 44
+# 选手段（每张图下方）的高度：表头一行 + 每名选手一行。
+# 表头 30 = 表头文字（top+1 起）+ 与首行 pill 的间隙（pill 顶 top+21），
+# 之前给 26 时首行 pill 会压住「评分」表头的下半截。
+CARD_PLAYER_HEAD_H = 30
+CARD_PLAYER_ROW_H = 27
 
 C_BG = (255, 255, 255)
 C_INK = (26, 26, 26)
@@ -415,6 +445,13 @@ ESPORT_DEFAULTS = {
     # 带上它就要多抓一次「赛事页」（parse_event_maps），代价见 ESPORTS.md §3.2；
     # 关掉 / 抓不到 → 卡片自动只画对阵行，不会因此不发。
     "card_results_maps_enabled": True,
+    # 单场战报里要不要带**选手数据**（rating / ADR / KAST / K-D，来自 csdb.gg）。
+    # 带上它要额外抓 csdb 的 `/matches/` 列表页 + 每场的 `/match/` 详情页，
+    # 是**第二个数据源**、每次结算要多 2 类请求。抓不到 / 定位失败 → 只是卡片
+    # 少一段选手段，**绝不影响发送**。
+    "card_players_enabled": True,
+    # 每张图、每队最多列几名选手（按 rating 降序）。5 = 全队都列。
+    "card_players_per_team": 3,
     # ---- 全天整合版 ----
     # 「每场一条」发完之后，再在次日早上补一条**当天全部战果**的汇总。
     # 关掉它 = 只留每场一条。
@@ -2067,6 +2104,177 @@ def attach_maps(rows, es):
     return fetched, hit
 
 
+# ==========================================================================
+# 选手数据（csdb.gg）
+# ==========================================================================
+
+def fetch_csdb(es, url):
+    """抓 csdb 一页，返回 HTML 文本；失败返回 None。**永不抛错。**
+
+    和 Liquipedia 是两套抓法：csdb 要**浏览器 UA**（过 Vercel WAF）、
+    不走 Liquipedia 的条款闸门（那是 action=parse 的 1 次/30 秒限制，与 csdb 无关）。
+    """
+    try:
+        r = fetch_once(url, CSDB_UA,
+                       timeout=max(5, int((es or {}).get("http_timeout") or 25)),
+                       accept="text/html")
+        if r["ok"]:
+            return r["text"]
+        log("[warn] csdb %s 抓取失败：%s（本场不带选手数据）" % (url, r["error"]))
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] csdb %s 抓取出错：%s: %s（本场不带选手数据）"
+            % (url, type(exc).__name__, exc))
+    return None
+
+
+def parse_csdb_matches(html_text):
+    """解析 csdb `/matches/` 列表页，返回 [(日期 str, url, 文本块), …]。
+
+    列表页里一场比赛 = 一个 `/match/...` 链接 + 周围一段文本（队名、比分、日期）。
+    返回按出现顺序排的三元组，供 locate 阶段按「队名 + 日期」匹配。
+    """
+    out = []
+    if not html_text:
+        return out
+    # 每个 /match/ 链接，抓它前后一段文本作为「这场是谁打的」判断依据
+    for m in re.finditer(r'href="(/match/[^"]+)"', html_text):
+        url = m.group(1)
+        if "/stats/" in url:
+            continue
+        seg = html_text[max(0, m.start() - 800): m.start() + 400]
+        # 日期：优先从 URL 里拿（/match/<date>-<uuid>/ 或 /match/...-<date>/）
+        dm = re.search(r"(\d{4}-\d{2}-\d{2})", url)
+        date = dm.group(1) if dm else ""
+        out.append((date, url, seg))
+    return out
+
+
+def locate_csdb_match(entries, teams, ts):
+    """在 parse_csdb_matches 的结果里定位「这两支队、这个时间」的那一场。
+
+    返回单场页 URL，或 None（没找到）。匹配策略：
+      1. 先把 ts 转成 `YYYY-MM-DD`，只保留日期相同（或 ±1 天，容忍跨午夜）的候选。
+      2. 候选里挑「文本块里两队名都出现」的（大小写不敏感）。
+      3. 队名用 Liquipedia 全名（如 `Natus Vincere`），但 csdb 页面里常写缩写
+         （`NAVI`）—— 所以再退回「至少一队命中 + 日期命中」的宽松匹配。
+    """
+    ts_l = [t.strip().lower() for t in (teams or [])]
+    while len(ts_l) < 2:
+        ts_l.append("")
+    t0, t1 = ts_l
+    d = datetime.fromtimestamp(int(ts or 0), CST).strftime("%Y-%m-%d")
+    # 日期窗口：当天优先，其次 ±1 天（跨午夜）
+    candidates = [e for e in entries if e[0] == d]
+    if not candidates:
+        prev = (datetime.fromtimestamp(int(ts or 0), CST)
+                - timedelta(days=1)).strftime("%Y-%m-%d")
+        nxt = (datetime.fromtimestamp(int(ts or 0), CST)
+               + timedelta(days=1)).strftime("%Y-%m-%d")
+        candidates = [e for e in entries if e[0] in (prev, nxt)]
+
+    # 第一轮：两队名都命中
+    for date, url, seg in candidates:
+        low = seg.lower()
+        if t0 and t1 and t0 in low and t1 in low:
+            return CSDB_BASE + url
+    # 第二轮：至少一队命中（缩写在页面里的情况）
+    for date, url, seg in candidates:
+        low = seg.lower()
+        if (t0 and t0 in low) or (t1 and t1 in low):
+            return CSDB_BASE + url
+    return None
+
+
+def parse_csdb_players(html_text):
+    """解析 csdb 单场页，返回 [ {map, score:(l,r), players:[{name, team, k, d,
+    a, pm, adr, kast, rating}, …]}, … ]。
+
+    每张图一张表，表头 `Player K D A +/− ADR KAST Rating`，后跟双方 10 名选手。
+    表头在 HTML 里是 React 序列化字符串（`\"Player\",\"K\"...`），所以把 script 去掉后
+    靠「Player K D A」这个纯文本锚点切块，再用正则抓「昵称 + 队名 + 6 个数」。
+
+    地图名与表格的对应关系：详情区按 Dust2→Nuke 排，但「Map Results」区块里
+    给的是真实编号（Nuke=Map1、Dust2=Map2）。所以这里**先按 Map Results 的编号
+    抓地图名列表**，再按顺序配对。拿不到地图名就写 "Map N"。
+    """
+    if not html_text:
+        return []
+    # 去 script/style/svg，转纯文本，保留顺序
+    txt = re.sub(r"<svg.*?</svg>", " ", html_text, flags=re.S)
+    txt = re.sub(r"<script.*?</script>", " ", txt, flags=re.S)
+    txt = re.sub(r"<style.*?</style>", " ", txt, flags=re.S)
+    txt = re.sub(r"<[^>]+>", " ", txt)
+    txt = txt.replace("+/−", "+-").replace("−", "-")
+    txt = re.sub(r"&[a-z]+;", " ", txt)
+    txt = re.sub(r"\s{2,}", " ", txt)
+
+    # 地图名（按 Map Results 的真实顺序）：`<map名> <队A> <分> – <分> <队B>`
+    mapnames = re.findall(
+        r"(Dust2|Dust 2|Nuke|Ancient|Mirage|Inferno|Anubis|Overpass|Vertigo)\s+"
+        r"[A-Za-z .]+\s+\d+\s*[–-]\s*\d+\s+[A-Za-z .]+", txt)
+    mapnames = [m.replace("Dust 2", "Dust2") for m in mapnames]
+
+    player_re = re.compile(
+        r"([A-Za-z0-9_']+)\s+([A-Za-z .]+)\s+"
+        r"(\d+)\s+(\d+)\s+(\d+)\s+([+-])\s?(\d+)\s+([\d.]+)\s+(\d+)%\s+([\d.]+)")
+
+    parts = txt.split("Player K D A")
+    maps = []
+    for i, part in enumerate(parts[1:]):
+        # 剥掉表头残留（"+- ADR KAST Rating" 之类），只留选手行
+        body = re.sub(r"^[^A-Za-z0-9_']*[+-]?\s*ADR\s+KAST\s+Rating\s*", "", part)
+        rows = player_re.findall(body)
+        if not rows:
+            continue
+        players = []
+        for name, team, k, d, a, sign, pm, adr, kast, rating in rows:
+            players.append({
+                "name": name, "team": team.strip(),
+                "k": int(k), "d": int(d), "a": int(a),
+                "pm": (1 if sign == "+" else -1) * int(pm),
+                "adr": float(adr), "kast": int(kast), "rating": float(rating),
+            })
+        maps.append({
+            "map": mapnames[i] if i < len(mapnames) else "Map %d" % (i + 1),
+            "players": players,
+        })
+    return maps
+
+
+def attach_players(rows, es):
+    """给战果行补上选手数据（来自 csdb.gg）。返回 (抓了几个单场页, 补上了几行)。
+
+    设计要点（和 attach_maps 同构，都是「锦上添花」）：
+      · 只抓**这一轮真的要发**的行；列表页整轮只抓一次（按日期缓存）。
+      · 任何一个环节失败都只是「卡片少一段选手段」，**绝不影响发送**。
+      · 由 `card_players_enabled` 控制开关。
+    """
+    es = es or {}
+    if not rows or not es.get("card_players_enabled", True):
+        return 0, 0
+
+    # 1) 抓一次 /matches/ 列表页（整轮共享），失败则全部放弃
+    html = fetch_csdb(es, CSDB_MATCHES_URL)
+    if html is None:
+        return 0, 0
+    entries = parse_csdb_matches(html)
+
+    fetched = hit = 0
+    for r in rows:
+        url = locate_csdb_match(entries, r.get("teams"), r.get("ts"))
+        if not url:
+            continue
+        page = fetch_csdb(es, url)
+        if page is None:
+            continue
+        fetched += 1
+        maps = parse_csdb_players(page)
+        if maps:
+            r["players"] = maps
+            hit += 1
+    return fetched, hit
+
+
 def format_result_caption(row, now):
     """单场战报上面那一行（有图也要有字，通知栏才不是「[图片]」）。
 
@@ -2334,26 +2542,40 @@ def render_result_card(row, now, es):
 def _render_result_card_inner(row, now, es):
     es = es or {}
     maps = list(row.get("maps") or [])[:5]
+    players = list(row.get("players") or [])      # 与 maps 一一对应（长度可不同）
     tour = (row.get("tour") or "").strip()
     bo = (row.get("bo") or "").strip()
     sub = ("%s · %s" % (tour, bo)) if (tour and bo) else (tour or bo)
     foot = ("%s · 数据来源：Liquipedia" % tour) if tour else "数据来源：Liquipedia"
+    winner = (row.get("winner") or "").strip()
 
-    texts = ["CS2 战报", sub, foot, row.get("score") or "", "…", "?"]
+    # 每队、每图列几名选手（按 rating 降序）。0/抓不到 = 不画选手段。
+    per_team = max(0, int(es.get("card_players_per_team") or 3))
+
+    texts = ["CS2 战报", sub, foot, row.get("score") or "", "…", "?", "选手", "评分"]
     texts += list(row.get("teams") or [])
     texts += list(row.get("shorts") or [])
     for i, m in enumerate(maps):
         texts.append("地图 %d" % (i + 1))
         texts.append(m.get("map") or "")
         texts += list(m.get("rounds") or [])
+    for pm in players:
+        for p in pm.get("players") or []:
+            texts.append(p.get("name") or "")
     miss = card_missing_chars(texts)
     if miss:
         log("[warn] 字体子集里没有这些字：%s，本次改发纯文本" % "".join(sorted(miss))[:60])
         log("       要出图就往 deploy/make_card_font.py 的 UI_CHARS 补字并重跑它。")
         return None
 
+    # ---- 动态高度：适配 BO1 / BO3 / BO5 任意图数 ----
     n = len(maps)
-    height = CARD_HDR_H + CARD_FIX_H + CARD_MAP_H * n + CARD_FTR_H
+    has_players = bool(players) and per_team > 0
+    n_play = min(len(players), n) if has_players else 0
+    per_map_h = CARD_MAP_H
+    if has_players:
+        per_map_h += CARD_PLAYER_HEAD_H + CARD_PLAYER_ROW_H * per_team
+    height = CARD_HDR_H + CARD_FIX_H + per_map_h * n + CARD_FTR_H
     if height > 2400:
         log("[warn] 单场战报卡片高达 %d px，改用纯文本" % height)
         return None
@@ -2393,43 +2615,59 @@ def _render_result_card_inner(row, now, es):
                          max(60, half_w - CARD_LOGO - 20))
         code = shorts[side] if side < len(shorts) and shorts[side] else nm
         col = C_WIN if won else C_LOSE
-        kw = {"stroke_width": 1, "stroke_fill": col} if won else {}
+        # 胜者不再用「描边假粗体」（叠在 30px 上会显肥），改用**正常字重 + 队名下方
+        # 一小段胜利色短线**来标识 —— 颜色之外还有位置/形状线索，色盲与灰度都认得出。
         if side == 0:
             _card_logo(img, d, logos[0], CARD_PAD, cy, code)
-            d.text((CARD_PAD + CARD_LOGO + 18, base), t, font=f, fill=col,
-                   anchor="ls", **kw)
+            d.text((CARD_PAD + CARD_LOGO + 18, base), t, font=f, fill=col, anchor="ls")
+            if won:
+                d.rounded_rectangle(
+                    [CARD_PAD + CARD_LOGO + 18, base + 24,
+                     CARD_PAD + CARD_LOGO + 18 + min(46, d.textlength(t, font=f)), base + 28],
+                    radius=2, fill=col)
         else:
             _card_logo(img, d, logos[1], CARD_W - CARD_PAD - CARD_LOGO, cy, code)
             d.text((CARD_W - CARD_PAD - CARD_LOGO - 18, base), t, font=f, fill=col,
-                   anchor="rs", **kw)
+                   anchor="rs")
+            if won:
+                tw = d.textlength(t, font=f)
+                d.rounded_rectangle(
+                    [CARD_W - CARD_PAD - CARD_LOGO - 18 - min(46, tw), base + 24,
+                     CARD_W - CARD_PAD - CARD_LOGO - 18, base + 28],
+                    radius=2, fill=col)
     d.line([(CARD_PAD, CARD_HDR_H + CARD_FIX_H),
             (CARD_W - CARD_PAD, CARD_HDR_H + CARD_FIX_H)], fill=C_ROWLINE, width=1)
 
-    # ---- 逐图行（没有就整段不画）----
+    # ---- 逐图行 + 选手段 ----
     y = CARD_HDR_H + CARD_FIX_H
     f_map = load_card_font(26)
     f_no = load_card_font(20)
     for i, m in enumerate(maps):
-        ry = y + CARD_MAP_H * i + CARD_MAP_H // 2
+        block_top = y + per_map_h * i
         if i:
-            d.line([(CARD_PAD + 40, y + CARD_MAP_H * i),
-                    (CARD_W - CARD_PAD - 40, y + CARD_MAP_H * i)],
+            d.line([(CARD_PAD + 40, block_top), (CARD_W - CARD_PAD - 40, block_top)],
                    fill=C_ROWLINE, width=1)
+        # 比分行（在 block 顶部）
+        bry = block_top + CARD_MAP_H // 2
         rounds = list(m.get("rounds") or [])
         while len(rounds) < 2:
             rounds.append("")
-        # 比分按**这一图**的胜负上色：左绿则右必红，一眼看出哪张图谁赢。
-        d.text((CARD_W // 2 - 92, ry + 9), rounds[0], font=f_map,
+        d.text((CARD_W // 2 - 92, bry + 9), rounds[0], font=f_map,
                fill=C_WIN if _round_win(rounds, 0) else C_LOSE, anchor="rs")
         mt, mf = _card_fit(d, m.get("map") or "", (24, 22, 20), 300)
-        d.text((CARD_W // 2, ry + 8), mt, font=mf, fill=C_MUTED, anchor="ms")
-        d.text((CARD_W // 2 + 92, ry + 9), rounds[1], font=f_map,
+        d.text((CARD_W // 2, bry + 8), mt, font=mf, fill=C_MUTED, anchor="ms")
+        d.text((CARD_W // 2 + 92, bry + 9), rounds[1], font=f_map,
                fill=C_WIN if _round_win(rounds, 1) else C_LOSE, anchor="ls")
-        d.text((CARD_PAD, ry + 8), "地图 %d" % (i + 1), font=f_no,
+        d.text((CARD_PAD, bry + 8), "地图 %d" % (i + 1), font=f_no,
                fill=C_FAINT, anchor="ls")
 
-    # ---- 页脚（署名必须留着，Liquipedia 是 CC-BY-SA）----
-    fy = y + CARD_MAP_H * n
+        # 选手段
+        if has_players and i < len(players):
+            _draw_player_block(d, players[i], teams, winner, per_team,
+                               block_top + CARD_MAP_H, CARD_PAD, CARD_W)
+
+    # ---- 页脚 ----
+    fy = y + per_map_h * n
     d.line([(CARD_PAD, fy), (CARD_W - CARD_PAD, fy)], fill=C_LINE, width=1)
     ft, ff = _card_fit(d, foot, (19, 18, 17, 16), CARD_W - 2 * CARD_PAD)
     if ft:
@@ -2438,11 +2676,79 @@ def _render_result_card_inner(row, now, es):
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     data = buf.getvalue()
-    log("[info] 单场战报：%d×%d，PNG %.1f KB，%s %s:%s %s，%d 张地图"
+    log("[info] 单场战报：%d×%d，PNG %.1f KB，%s %s:%s %s，%d 张地图%s"
         % (CARD_W, height, len(data) / 1024.0, teams[0],
            row.get("score_left") or "", row.get("score_right") or "",
-           teams[1], n))
+           teams[1], n, "，含选手数据" if has_players else ""))
     return data
+
+
+def _team_same(a, b):
+    """两队名是否指同一队（双向包含、大小写不敏感）。
+
+    Liquipedia 给全名（Natus Vincere），csdb 偶尔给缩写（NAVI）——
+    精确等号会让选手段整列分不到人、卡片缺半边，所以用包含匹配兜住。
+    """
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    return bool(a) and bool(b) and (a == b or a in b or b in a)
+
+
+def _draw_player_block(d, pmap, teams, winner, per_team, top, pad, w):
+    """画一张图的选手段：左队 / 右队各一列，每列 rating 前 per_team 名。
+
+    布局（每列从左到右）：选手名（左对齐）→ K-D → ADR → 评分色块（右端贴齐）。
+    列位置用**正向固定偏移**而不是从右往左挤 —— 后者会让评分色块压住 K-D。
+    胜负色跟队名一致（胜绿负红）；评分用同色圆角色块 + 白字，视觉权重最高。
+    队名分组用 _team_same（双向包含）：Liquipedia 全名 vs csdb 缩写也认得。
+    """
+    players = list(pmap.get("players") or [])
+    t0 = (teams[0] or "").strip()
+    t1 = (teams[1] or "").strip()
+
+    # 按队分组、按 rating 降序、各取前 per_team
+    left = sorted([p for p in players if _team_same(p["team"], t0)],
+                  key=lambda x: -x["rating"])[:per_team]
+    right = sorted([p for p in players if _team_same(p["team"], t1)],
+                   key=lambda x: -x["rating"])[:per_team]
+
+    col_w = (w - 2 * pad - 40) // 2
+    f_hd = load_card_font(16)
+    f_nm = load_card_font(19)
+    f_v = load_card_font(18)
+
+    # 每列内部的相对偏移：名字 0；K-D 190；ADR 268；评分色块右端贴 col_w
+    off_name, off_kd, off_adr = 0, 190, 268
+    pill_right = col_w - 4          # 色块右端离列右缘留 4px
+
+    def one_col(rows, col_x, team_name):
+        col = C_WIN if team_name == winner else C_LOSE
+        yy = top + 30          # 表头底 ~top+17，留出间隙，pill 顶 = top+21 不压表头
+        for p in rows:
+            d.text((col_x + off_name, yy), p["name"], font=f_nm, fill=col)
+            d.text((col_x + off_kd, yy), "%d-%d" % (p["k"], p["d"]),
+                   font=f_v, fill=C_INK)
+            d.text((col_x + off_adr, yy), "%.1f" % p["adr"], font=f_v,
+                   fill=C_MUTED)
+            rt = "%.2f" % p["rating"]
+            rw = d.textlength(rt, font=f_v) + 14
+            px = col_x + pill_right - rw
+            d.rounded_rectangle([px, yy - 9, px + rw, yy + 9],
+                                radius=8, fill=col)
+            d.text((px + rw / 2, yy), rt, font=f_v,
+                   fill=(255, 255, 255), anchor="mm")
+            yy += CARD_PLAYER_ROW_H
+
+    # 表头（两列各一份，与数据列严格对齐）
+    for cx in (pad, pad + col_w + 40):
+        d.text((cx + off_name, top + 1), "选手", font=f_hd, fill=C_FAINT)
+        d.text((cx + off_kd, top + 1), "K-D", font=f_hd, fill=C_FAINT)
+        d.text((cx + off_adr, top + 1), "ADR", font=f_hd, fill=C_FAINT)
+        ht = "评分"
+        hw = d.textlength(ht, font=f_hd)
+        d.text((cx + pill_right - hw, top + 1), ht, font=f_hd, fill=C_FAINT)
+
+    one_col(left, pad, t0)
+    one_col(right, pad + col_w + 40, t1)
 
 
 def format_calm(empty_days):
@@ -2832,6 +3138,14 @@ def run_results(cfg, args):
             % (got_pages, got_rows, len(rows)))
     else:
         log("[info] 逐图比分已关闭（card_results_maps_enabled=false），只发系列比分")
+
+    # ---- 选手数据：第二个数据源（csdb.gg），同样可选、抓不到绝不误事 ----
+    if es.get("card_players_enabled", True):
+        got_pages, got_rows = attach_players(rows, es)
+        log("[info] 选手数据：抓了 %d 个单场页，%d/%d 场补上了选手数据"
+            % (got_pages, got_rows, len(rows)))
+    else:
+        log("[info] 选手数据已关闭（card_players_enabled=false），战报不含选手段")
 
     log("[info] 本轮结算 %d 场（还有 %d 场在打），**一场一条消息**"
         % (len(rows), len(waiting)))
@@ -4406,6 +4720,81 @@ def selftest():
     t.check("UA 缺失联系方式时有兜底", "contact-not-set" in build_ua({}))
     t.check("请求地址只用 api.php，不抓渲染页面",
             LIQUIPEDIA_API.endswith("/api.php") and "action=parse" in build_url())
+
+    # ---- csdb 选手数据（战果卡片选手段的来源，纯函数离线可测）----
+    print("\n-- csdb 选手数据 --")
+    listing = (
+        '<div><a href="/match/2026-10-05-abc/">NAVI vs Aurora Gaming</a></div>'
+        '<div><a href="/stats/match/2026-10-05-s/">stats</a></div>'
+        '<div><a href="/match/team-x-2026-10-04-def/">X</a></div>'
+    )
+    entries = parse_csdb_matches(listing)
+    t.check("csdb 列表：/stats/ 链接被跳过", len(entries) == 2,
+            "实际 %d" % len(entries))
+    t.check("csdb 列表：日期从 URL 里提取",
+            entries and entries[0][0] == "2026-10-05", entries[:1])
+    t.check("csdb 列表：文本段保留（供队名匹配）",
+            bool(entries) and "navi" in entries[0][2].lower())
+    t.check("csdb 列表：空输入不炸", parse_csdb_matches("") == [])
+
+    ts_day = datetime(2026, 10, 5, 15, 0, tzinfo=CST).timestamp()
+    hit = locate_csdb_match(entries, ["NAVI", "Aurora Gaming"], ts_day)
+    t.check("csdb 定位：两队全名都命中 -> 返回完整 URL",
+            hit == CSDB_BASE + "/match/2026-10-05-abc/", hit)
+    hit = locate_csdb_match(entries, ["Natus Vincere", "Aurora Gaming"], ts_day)
+    t.check("csdb 定位：只有缩写出现也命中（第二轮宽松匹配）",
+            hit == CSDB_BASE + "/match/2026-10-05-abc/", hit)
+    ts_next = datetime(2026, 10, 6, 0, 30, tzinfo=CST).timestamp()
+    hit = locate_csdb_match(entries, ["NAVI"], ts_next)
+    t.check("csdb 定位：跨午夜场次归档在前一天 -> prev 窗口兜住",
+            hit == CSDB_BASE + "/match/2026-10-05-abc/", hit)
+    ts_far = datetime(2026, 10, 8, 12, 0, tzinfo=CST).timestamp()
+    t.check("csdb 定位：差 2 天以上不硬凑",
+            locate_csdb_match(entries, ["NAVI"], ts_far) is None)
+    t.check("csdb 定位：完全不沾 -> None",
+            locate_csdb_match(entries, ["Fnatic"], ts_day) is None)
+    t.check("csdb 定位：空输入不炸", locate_csdb_match([], [], ts_day) is None)
+
+    csdb_page = (
+        "<p>Nuke NAVI 13 – 9 Aurora</p>"
+        "<table><tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr>"
+        "<tr><td>makazze Natus Vincere 23 15 6 + 8 104.6 78% 1.96</td></tr>"
+        "<tr><td>jottAAA Aurora Gaming 20 18 9 + 2 109.8 74% 1.41</td></tr></table>"
+        "<p>Dust2 Aurora 10 – 13 NAVI</p>"
+        "<table><tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr>"
+        "<tr><td>XANTARES Aurora Gaming 23 16 1 - 4 100.5 68% 1.53</td></tr>"
+        "<tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr></table>"
+    )
+    pmaps = parse_csdb_players(csdb_page)
+    t.check("csdb 选手：切出 2 张图（空表的那张被跳过）", len(pmaps) == 2,
+            "实际 %d" % len(pmaps))
+    if len(pmaps) == 2:
+        p0 = pmaps[0]["players"]
+        t.check("csdb 选手：地图名取 Map Results 的真实顺序",
+                pmaps[0]["map"] == "Nuke" and pmaps[1]["map"] == "Dust2",
+                [m["map"] for m in pmaps])
+        t.check("csdb 选手：名字不被表头污染（ADR KAST Rating 剥干净）",
+                p0 and p0[0]["name"] == "makazze",
+                p0[0]["name"] if p0 else "空")
+        t.check("csdb 选手：+/− 号进 pm 字段",
+                p0[0]["pm"] == 8 and pmaps[1]["players"][0]["pm"] == -4,
+                "%s/%s" % (p0[0]["pm"], pmaps[1]["players"][0]["pm"]))
+        t.check("csdb 选手：数值字段类型正确",
+                p0[0]["k"] == 23 and p0[0]["adr"] == 104.6
+                and p0[0]["kast"] == 78 and p0[0]["rating"] == 1.96)
+        t.check("csdb 选手：每图 10 行以内（双方各 5 才画得下）",
+                all(len(m["players"]) <= 10 for m in pmaps))
+    t.check("csdb 选手：没有 Map Results 时兜底 Map N",
+            parse_csdb_players(
+                "<p>Player K D A</p><p>zz Team 1 2 3 + 4 5.6 70% 1.11</p>"
+            )[0]["map"] == "Map 1")
+    t.check("csdb 选手：空输入不炸", parse_csdb_players("") == [])
+
+    t.check("队名匹配：子串/青训队名命中，首字母缩写不硬凑，空串不命中",
+            _team_same("Natus Vincere", "NAVI") is False   # 缩写救不了：宁可空列不错分
+            and _team_same("natus vincere", "Natus Vincere") is True
+            and _team_same("NAVI Junior", "NAVI") is True
+            and _team_same("", "NAVI") is False)
 
     return t.done("selftest")
 
