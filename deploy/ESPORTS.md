@@ -36,18 +36,26 @@
 - 凑够之后，**该赛事当天的所有比赛**都会推，包括一对无名队那场 —— 这是刻意的：
   「名队云集的赛事整体捞进来」比「只挑有名队的场次」更符合看比赛的习惯。
 
-推送样子：
+推送样子（2026-10-05 实测输出）：
 
 ```
 【CS2 今日赛程】2026-10-05
 
 17:00  PARIVISION vs FURIA · Bo3 · ESL Pro League Season 24 - Round 3
+17:00  ShindeN vs G2 Esports · Bo3 · ESL Pro League Season 24 - Round 3
 19:30  9z Team vs Natus Vincere · Bo3 · ESL Pro League Season 24 - Round 3
+19:30  Legacy vs 1w Team · Bo3 · ESL Pro League Season 24 - Round 3
+22:00  Team Spirit vs MOUZ · Bo3 · ESL Pro League Season 24 - Round 3
 22:00  M80 vs TYLOO · Bo3 · ESL Pro League Season 24 - Round 3
 
-共 3 场。
+共 6 场。
 数据来源：Liquipedia
 ```
+
+对照日志：`中国队 1 场 / 世界前 N 5 场 / 大赛+知名 0 场 / 名队云集的赛事 0 场` ——
+6 场里 5 场是因为有前 15 队伍（对上 G2 / NaVi / Legacy / FURIA / Spirit），
+`M80 vs TYLOO` 按优先级记在中国队名下（它两边都不在前 15）。
+「大赛+知名」是 0 是因为这几个队都已经由前 15 那条先捞走了 —— **不是这条坏了**。
 
 ### 不做什么
 
