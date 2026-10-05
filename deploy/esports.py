@@ -969,14 +969,16 @@ OPPONENT_MARK = 'class="match-info-header-opponent'
 # ⚠️ 队标 class **必须用前缀匹配，不能写完整的等号形式**：
 #    只上传了一张图的队伍是 `class="team-template-image-icon"`（图名 *_allmode.png），
 #    而**同时有亮/暗两套图**的队伍会多两个 class（实测 87 / 39 / 39）：
-#        <span class="team-template-image-icon team-template-lightmode">  ← 白底用这张
-#        <span class="team-template-image-icon team-template-darkmode">   ← 深色用这张
+#        <span class="team-template-image-icon team-template-lightmode">  ← 浅色页面用这张（黑蜜蜂）
+#        <span class="team-template-image-icon team-template-darkmode">   ← 深色页面用这张（黄蜜蜂）
 #    写成等号形式就只认得第一类，G2 / NAVI / Vitality / Spirit 这些名队
 #    会**静默地**变成灰色占位块（不报错、日志里也没有 warn），很难发现。
-#    前缀匹配后 lightmode 在文档里天然排在 darkmode 之前，取到的就是白底那张；
-#    卡片是白底，正好。
+#    我们所有卡片（Pillow / HTML）都是深色底，所以**先认 darkmode**：
+#    darkmode 那张就是为深色背景准备的（Vitality=黄蜜蜂，lightmode 是黑蜜蜂，
+#    黑图贴深底=整只蜜蜂凭空消失，2026-10-05 晚真实预览踩到）。
+#    只有 lightmode 一张图的队伍极罕见；那种情况退回前缀匹配也能取到图。
 TEAM_ICON_MARK = 'class="team-template-image-icon'
-TEAM_ICON_LIGHT_MARK = 'class="team-template-image-icon team-template-lightmode"'
+TEAM_ICON_DARK_MARK = 'class="team-template-image-icon team-template-darkmode"'
 
 
 def _logo_urls(seg):
@@ -1004,12 +1006,15 @@ def _logo_urls(seg):
          `team-template-image-icon"` 这种带等号的写法，会让有亮/暗两套图的队伍
          （G2、NAVI、Vitality、Spirit…）整支变成占位块，而且是静默的 ——
          2026-10-05 修过一次，自检里钉着 fixture 里的双图分支。
+         同日晚些时候又改过一次**优先级**：最早「先认 lightmode」是白底卡片时代
+         的遗留，转深色卡后黑蜜蜂贴深底直接隐身 —— 现在**先认 darkmode**。
     """
     parts = seg.split(OPPONENT_MARK)[1:]
     out = []
     for part in parts[:2]:
-        # 先认「亮色版」；认不到再退回前缀匹配（单图队伍 / 只有暗色图的队伍）
-        m = (re.search(re.escape(TEAM_ICON_LIGHT_MARK), part)
+        # 先认「暗色版」（深色卡片专用，如 Vitality 黄蜜蜂）；
+        # 认不到再退回前缀匹配（单图 allmode 队伍 / 只有亮色图的队伍）
+        m = (re.search(re.escape(TEAM_ICON_DARK_MARK), part)
              or re.search(re.escape(TEAM_ICON_MARK), part))
         tag = ""
         if m:
@@ -3877,19 +3882,19 @@ def selftest():
                 "BLAST_Premier_icon" not in ms[0]["logos"][1]
                 and "commons" in ms[0]["logos"][1],
                 ms[0]["logos"][1])
-        t.check("⚑ 亮/暗两套图的队伍取「亮色版」（卡片是白底）",
-                ms[1]["logos"][1].endswith("50px-Beta_lightmode.png"),
+        t.check("⚑ 亮/暗两套图的队伍取「暗色版」（卡片全是深色底，黑蜜蜂之鉴）",
+                ms[1]["logos"][1].endswith("50px-Beta_darkmode.png"),
                 ms[1]["logos"][1])
         t.check("⚑ 队标 class 用前缀匹配，同时带 mode 后缀也认得（否则名队会变占位块）",
                 ms[1]["logos"][1] != ""
-                and "Beta_darkmode" not in ms[1]["logos"][1],
+                and "Beta_" in ms[1]["logos"][1],
                 ms[1]["logos"][1])
         t.check("左/右队标各就各位，不串位",
                 ms[1]["logos"] == [
                     "https://liquipedia.net/commons/images/thumb/a/aa/"
                     "Alpha_allmode.png/50px-Alpha_allmode.png",
-                    "https://liquipedia.net/commons/images/thumb/b/bb/"
-                    "Beta_lightmode.png/50px-Beta_lightmode.png"],
+                    "https://liquipedia.net/commons/images/thumb/d/dd/"
+                    "Beta_darkmode.png/50px-Beta_darkmode.png"],
                 ms[1]["logos"])
         t.check("TBD 场次没有队标", ms[2]["logos"] == ["", ""], ms[2]["logos"])
         t.check("两个队标始终是 2 个（对齐 teams，缺也给空串）",
