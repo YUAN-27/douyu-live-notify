@@ -679,12 +679,18 @@ def parse_matches(text):
         if not ts:
             continue
 
-        teams = [t for t in (tidy(x) for x in re.findall(
-            r'class="name"[^>]*>\s*<a[^>]*\stitle="([^"]+)"', seg)) if t]
+        # 一对 (长名, 短名)：title 是长名，<a> 的内层文本是页面自己的缩写
+        #   <span class="name"><a href="/…" title="G2 Esports">G2</a></span>
+        # 短名只给「队标拿不到时的灰色占位块」用（见 _card_placeholder）。
+        pairs = [(tidy(a), tidy(b)) for a, b in re.findall(
+            r'class="name"[^>]*>\s*<a[^>]*\stitle="([^"]+)"[^>]*>([^<]*)</a>', seg)]
+        teams = [t for t, _s in pairs if t]
+        shorts = [s for t, s in pairs if t]
         if len(teams) < 2:
             # 退化路径：TBD 之类没有词条、也没 title 属性的占位队名
             teams = [t for t in (tidy(x) for x in re.findall(
                 r'class="name"[^>]*>\s*(?:<a[^>]*>)?([^<]+)', seg)) if t]
+            shorts = []
 
         bo = re.search(r'scoreholder-lower">\s*\(?(Bo\d)\)?', seg)
 
@@ -694,10 +700,14 @@ def parse_matches(text):
             tour = re.search(r'match-info-tournament.{0,400}?title="([^"]+)"', seg, re.S)
 
         teams = teams[:2]
+        # 短名必须和 teams **一一对齐**，否则占位块会写成对手的缩写（比不写更坏）。
+        # 少了补空串、多了截掉，长度对齐这一件事只在这一行做。
+        shorts = (shorts[:len(teams)] + [""] * len(teams))[:len(teams)]
         logos = _logo_urls(seg)
         out.append({
             "ts": int(ts.group(1)),
             "teams": teams,
+            "shorts": shorts,
             "logos": logos if len(logos) == len(teams) else ["", ""],
             "bo": bo.group(1) if bo else "",
             "tour": tidy(re.sub(r"#.*$", "", tour.group(1))) if tour else "",
@@ -1145,8 +1155,8 @@ def _card_fit(draw, text, sizes, max_w):
     return ((out + "…") if out else ""), f
 
 
-def _card_logo(img, draw, path, box_x, cy, name, f_ph):
-    """贴队标。读不出来就画灰底占位 —— 一张图坏掉不该毁掉整张卡片。"""
+def _card_logo(img, draw, path, box_x, cy, code):
+    """贴队标。读不出来就画灰底占位块 —— 一张图坏掉不该毁掉整张卡片。"""
     box = CARD_LOGO
     if path:
         try:
@@ -1157,10 +1167,46 @@ def _card_logo(img, draw, path, box_x, cy, name, f_ph):
             return
         except Exception as exc:  # noqa: BLE001
             log("[warn] 队标读不出来（%s）：%s" % (os.path.basename(path), exc))
+    _card_placeholder(draw, box_x, cy, code)
+
+
+# 占位块里那行字从大到小试，塞不进方块就缩一档。最长的短名是 "Vitality"（8 字），
+# 缩到 11~12 px 正好；再长（页面偶尔会有）就走截断 + 省略号。
+_PLACEHOLDER_SIZES = (15, 14, 13, 12, 11, 10, 9)
+
+
+def _card_placeholder(draw, box_x, cy, code):
+    """队标拿不到时的灰底占位块，里面写**页面上那个短名**。
+
+    为什么不用「队名前两个字母」（最初就是这么写的）：
+    `Team Spirit` / `Team Vitality` / `Team Falcons` 全都会变成 **`TE`** ——
+    同一张卡片上摆三块一模一样的方块，等于什么都没写。
+    页面自带 <span class="name"> 的短名（`Spirit` / `Vitality` / `NAVI` / `BB`）
+    **整页零重复**（实测 45 支），所以直接用它。
+
+    短名长短差很多（`PV` 2 字 vs `Vitality` 8 字），而方块只有 52 px，
+    所以字号跟着缩；缩到最小还放不下才截断。**宁可变小，不要溢出压到队名。**
+    """
+    box = CARD_LOGO
     draw.rounded_rectangle([box_x, cy - box // 2, box_x + box, cy + box // 2],
                            radius=8, fill=C_PLACE)
-    draw.text((box_x + box // 2, cy - 1), (name or "?")[:2].upper(),
-              font=f_ph, fill=C_MUTED, anchor="mm")
+    text, f = _placeholder_label(draw, code)
+    draw.text((box_x + box // 2, cy - 1), text, font=f, fill=C_MUTED, anchor="mm")
+
+
+def _placeholder_label(draw, code):
+    """挑出占位块里那行字，返回 (文本, 字体)。抽成纯函数是为了能断言它。"""
+    room = CARD_LOGO - 8
+    text = (code or "").strip() or "?"
+    f = load_card_font(_PLACEHOLDER_SIZES[-1])
+    for size in _PLACEHOLDER_SIZES:
+        f = load_card_font(size)
+        if draw.textlength(text, font=f) <= room:
+            return text, f
+    out = text
+    while out and draw.textlength(out + "…", font=f) > room:
+        out = out[:-1]
+    return (((out + "…") if out else "?"), f)
 
 
 def _card_window(now, es):
@@ -1225,9 +1271,12 @@ def _render_card_inner(picked, now, es, rank_names=None):
     sub = "%s　%s" % (_card_window(now, es), count)
 
     # 出图之前先把要画的字全核一遍：缺字就整张不出，绝不画豆腐块
-    texts = ["CS2 赛程", sub, tour, "数据来源：Liquipedia", "次日", "…"]
+    texts = ["CS2 赛程", sub, tour, "数据来源：Liquipedia", "次日", "…", "?"]
     for m in rows:
         texts += list(m.get("teams") or [])
+        # ⚠️ 短名也要一起核 —— 队标拿不到时它就是画在占位块里的那行字。
+        #    漏核的后果是「有字不在子集里 → 画出豆腐块」，正是这个检查要防的事。
+        texts += list(m.get("shorts") or [])
     miss = card_missing_chars(texts)
     if miss:
         log("[warn] 字体子集里没有这些字：%s，本次改发纯文本" % "".join(sorted(miss))[:60])
@@ -1249,7 +1298,6 @@ def _render_card_inner(picked, now, es, rank_names=None):
     f_name = load_card_font(27)
     f_vs = load_card_font(20)
     f_ft = load_card_font(19)
-    f_ph = load_card_font(15)
 
     # ---- 页头 ----
     # stroke_width=1 是「伪粗体」：子集里只带了 Regular 一个字重，
@@ -1296,16 +1344,19 @@ def _render_card_inner(picked, now, es, rank_names=None):
         d.text((vs_cx, base), "vs", font=f_vs, fill=C_FAINT, anchor="ms")
 
         # 两侧队伍：左侧「队名 队标」右对齐，右侧「队标 队名」左对齐
+        shorts = list(m.get("shorts") or [])
         for side, name in enumerate((m.get("teams") or [])[:2]):
             room = side_w - CARD_LOGO - 14
             nm, f = _card_fit(d, name, (27, 25, 23, 21, 20), max(60, room))
+            # 占位块里写的短名：没有就退回长名（_card_placeholder 会自己缩字号）
+            code = shorts[side] if side < len(shorts) and shorts[side] else name
             if side == 0:
-                _card_logo(img, d, logos[i][0], left_x1 - CARD_LOGO, cy, name, f_ph)
+                _card_logo(img, d, logos[i][0], left_x1 - CARD_LOGO, cy, code)
                 x = left_x1 - CARD_LOGO - 14
                 d.text((int(x - d.textlength(nm, font=f)), base), nm, font=f,
                        fill=C_INK, anchor="ls")
             else:
-                _card_logo(img, d, logos[i][1], right_x0, cy, name, f_ph)
+                _card_logo(img, d, logos[i][1], right_x0, cy, code)
                 x = right_x0 + CARD_LOGO + 14
                 d.text((int(x), base), nm, font=f, fill=C_INK, anchor="ls")
 
@@ -1903,10 +1954,14 @@ class _T:
         return 1 if self.fail else 0
 
 
-def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None):
+def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None, shorts=None):
+    n = len(list(teams))
     return {"ts": ts, "teams": list(teams), "bo": bo, "tour": tour, "tbd": tbd,
+            # 页面自带的短名，只给「队标拿不到时的灰色占位块」用。
+            # 不传就空着 —— 占位块会退回长名（自动缩字号）。
+            "shorts": (list(shorts) if shorts else [""] * n)[:n],
             # 默认给空 URL：自检**绝不能联网**去下队标，
-            # ensure_logo("") 在上面就返回 None，卡片会画占位圆。
+            # ensure_logo("") 在上面就返回 None，卡片会画占位块。
             "logos": list(logos) if logos else ["", ""]}
 
 
@@ -1965,6 +2020,14 @@ def selftest():
         t.check("TBD 场次没有队标", ms[2]["logos"] == ["", ""], ms[2]["logos"])
         t.check("两个队标始终是 2 个（对齐 teams，缺也给空串）",
                 all(len(m["logos"]) == 2 for m in ms))
+
+        # 短名：页面上 <span class="name"> 里那个缩写，只给「队标拿不到时的占位块」用
+        t.check("短名取的是 <a> 内层文本，不是长名 title",
+                ms[0]["shorts"] == ["TYL", "LVG"], ms[0]["shorts"])
+        t.check("短名与长名一一对齐（数量一致，不串位）",
+                all(len(m["shorts"]) == len(m["teams"]) for m in ms))
+        t.check("TBD 那场没有 <a>，短名给空串而不是乱塞",
+                ms[2]["shorts"] == ["", ""], ms[2]["shorts"])
     t.check("空输入不炸", parse_matches("") == [])
 
     # ---- 2. 筛选 ----
@@ -2293,13 +2356,39 @@ def selftest():
         t.check("恢复字体路径后又能出图",
                 isinstance(render_card(many[:2], base, es), (bytes, bytearray)))
 
-        # 队标预算为 0 → 不去联网，画占位圆照旧出图
+        # 队标预算为 0 → 不去联网，画占位块照旧出图
         png_b = render_card(
             [mk(ts(14), ["A", "B"], "T",
                 logos=["https://example.invalid/never.png", ""])],
             base, dict(es, logo_max_new_per_run=0))
         t.check("队标下载预算为 0 时不出网、照样出图",
                 isinstance(png_b, (bytes, bytearray)), type(png_b))
+
+        # 占位块：写页面短名，并随长度缩字号（曾经的「前两个字母」会撞车）
+        _d = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+        t.check("占位块写页面短名，不是「队名前两个字母」",
+                _placeholder_label(_d, "Spirit")[0] == "Spirit",
+                _placeholder_label(_d, "Spirit"))
+        t.check("短名短的用大字号、长的自动缩小（都不溢出方块）",
+                _placeholder_label(_d, "PV")[1].size
+                > _placeholder_label(_d, "Vitality")[1].size)
+        t.check("缩到最小还放不下才截断，且带省略号",
+                _placeholder_label(_d, "A" * 60)[0].endswith("…"),
+                _placeholder_label(_d, "A" * 60))
+        t.check("没有短名时写「?」，不画空白",
+                _placeholder_label(_d, "")[0] == "?"
+                and _placeholder_label(_d, "   ")[0] == "?")
+        t.check("⚑ 曾经的 bug 不会复现：Spirit / Vitality / Falcons 三个块不再都是 TE",
+                len({_placeholder_label(_d, x)[0]
+                     for x in ("Spirit", "Vitality", "Falcons")}) == 3)
+        t.check("⚑ 整张卡一个队标都没有时，仍然出图（不退回纯文本）",
+                render_card(
+                    [mk(ts(14), ["Team Spirit", "Team Falcons"], "T",
+                        shorts=["Spirit", "Falcons"])],
+                    base, dict(es, logo_max_new_per_run=0)) is not None)
+        t.check("短名缺失时不炸（退回长名占位）",
+                render_card([mk(ts(14), ["Team Spirit", "Team Falcons"], "T")],
+                            base, dict(es, logo_max_new_per_run=0)) is not None)
 
         # 有画不出来的字 → 整张不出，退回纯文本（不能画豆腐块）
         t.check("有子集外的字就整张不出图",
