@@ -184,11 +184,11 @@ for cf in card_font.otf CARD_FONT_LICENSE.txt make_card_font.py; do
   fi
 done
 
-# V2 HTML 大图卡（esports.py 渲染 1920x1080 时用）：两份模板 + fonts/ 字体目录。
-# esports.py 按「脚本同目录」找它们（RESULT_TEMPLATE_FILE / DAILY_TEMPLATE_FILE，
-# HTML_FONT_DIR=HERE/fonts）。缺了不致命 —— 会静默降级回 880px 旧卡，
-# 但那就白部署这一版了，所以缺失时给出显眼警告。
-for vf in result_template.html daily_template.html; do
+# V2 HTML 大图卡（esports.py 渲染 1920x1080 时用）：三份模板 + fonts/ 字体目录。
+# esports.py 按「脚本同目录」找它们（RESULT_TEMPLATE_FILE / DAILY_TEMPLATE_FILE /
+# PREVIEW_TEMPLATE_FILE，HTML_FONT_DIR=HERE/fonts）。缺了不致命 ——
+# 会静默降级回 880px 旧卡，但那就白部署这一版了，所以缺失时给出显眼警告。
+for vf in result_template.html daily_template.html preview_template.html; do
   if [[ -f "$UNIT_DIR/$vf" ]]; then
     if [[ -f "$APP_DIR/$vf" ]] && cmp -s "$UNIT_DIR/$vf" "$APP_DIR/$vf"; then
       echo "已放入 $APP_DIR/$vf（与原有版本一致）"
@@ -328,6 +328,18 @@ if [[ -f "$UNIT_DIR/douyu-esports-daily.service" \
   install -m 644 "$UNIT_DIR/douyu-esports-daily.timer" \
     /etc/systemd/system/douyu-esports-daily.timer
   echo "已安装 douyu-esports-daily.service / .timer（尚未启用）"
+fi
+
+# CS2 开赛提醒单元（每分钟看一次「有没有比赛快开打了」）。同样**只装不 enable**。
+# 这一轮也是**零网络请求**（开赛时刻是同赛事前一场串场级联估算的，不抓页面），
+# 每分钟一拍的开销只有读清单 + 判断，命中才渲染发消息。
+if [[ -f "$UNIT_DIR/douyu-esports-announce.service" \
+   && -f "$UNIT_DIR/douyu-esports-announce.timer" ]]; then
+  install -m 644 "$UNIT_DIR/douyu-esports-announce.service" \
+    /etc/systemd/system/douyu-esports-announce.service
+  install -m 644 "$UNIT_DIR/douyu-esports-announce.timer" \
+    /etc/systemd/system/douyu-esports-announce.timer
+  echo "已安装 douyu-esports-announce.service / .timer（尚未启用）"
 fi
 
 # 看门狗的告警通道配置。**已存在绝不覆盖** —— 里面是你要填的 webhook 密钥。
@@ -503,13 +515,35 @@ cat <<'EOF'
        ⚠️ 已发过的场次会被标成 reported，不会重复发；超过 36 小时还没结算的会被
           标成 abandoned 丢掉（免得服务器停机几天后开机一次性补发一堆旧战果）。
 
+    e2) 开赛提醒（可选）—— 比赛快开打时发一张 Match Preview 大图
+        **零网络请求**：开赛时刻不抓页面，是从同赛事前一场的结果**串场级联估算**的
+        （Bo1 80 / Bo3 140 / Bo5 240 分钟 + 中场 30 分钟，只沿同赛事串，不跨赛事传染）。
+        估算有 ±误差，所以文案里写的是「约 N 分钟后」；估算漂移超过 10 分钟会补发
+        一次「时间有调整」（每场最多 1 次）。
+
+        看会发什么 —— **不发消息、不写状态**（也零网络，清单空就什么都没有）：
+          cd /opt/douyu-live-notify && python3 esports.py --check-announce
+          出图到 /tmp/esports_announce_check.png，人工过目后再启用。
+
+        启用（每分钟一拍，只在「估算开赛时刻落入未来 5 分钟窗口」且没提醒过时发）：
+          systemctl enable --now douyu-esports-announce.timer
+          systemctl list-timers douyu-esports-announce.timer
+          tail -f /var/log/douyu-watch/esports-announce.log
+
+        ⚠️ 前提同战果：douyu-esports.timer 必须在跑（预告写入清单，提醒才有料）。
+        ⚠️ 提醒锁在 state_esports_announce.json，同一场（队名+开打时刻）只发一次；
+           想强制重发某场，删掉锁里对应的 key 再等下一拍。
+        ⚠️ 想改提前量：config.json esports.announce_lead_minutes（默认 5 分钟）。
+           开打之后不再提醒（防迟到刷屏）。
+
 【回滚】
     # 只回滚赛程预告：
     systemctl disable --now douyu-esports.timer douyu-esports-results.timer \
-        douyu-esports-daily.timer
+        douyu-esports-daily.timer douyu-esports-announce.timer
     rm -f /etc/systemd/system/douyu-esports.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-results.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-daily.{service,timer}
+    rm -f /etc/systemd/system/douyu-esports-announce.{service,timer}
     systemctl daemon-reload
     # 只回滚看门狗：
     systemctl disable --now douyu-watchdog.timer
@@ -517,19 +551,22 @@ cat <<'EOF'
     systemctl daemon-reload
     # 全部回滚：
     systemctl disable --now douyu-watch.timer douyu-watchdog.timer \
-        douyu-esports.timer douyu-esports-results.timer douyu-esports-daily.timer
+        douyu-esports.timer douyu-esports-results.timer douyu-esports-daily.timer \
+        douyu-esports-announce.timer
     rm -f /etc/systemd/system/douyu-watch.{service,timer}
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     rm -f /etc/systemd/system/douyu-esports.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-results.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-daily.{service,timer}
+    rm -f /etc/systemd/system/douyu-esports-announce.{service,timer}
     systemctl daemon-reload
     # 注意：不回滚 /var/log/douyu-watch（日志留着排错）和
     #       /var/lib/douyu-watchdog（告警历史留着）、/etc/default/douyu-watchdog（你的密钥）、
     #       /opt/douyu-live-notify/state_esports.json（连续静默天数）、
     #       /opt/douyu-live-notify/state_results_pending.json（待结算清单）、
     #       /opt/douyu-live-notify/state_esports_parse.json（条款节流时间戳）、
-    #       /opt/douyu-live-notify/state_esports_daily.json（整合版幂等标记）
+    #       /opt/douyu-live-notify/state_esports_daily.json（整合版幂等标记）、
+    #       /opt/douyu-live-notify/state_esports_announce.json（开赛提醒锁）
     #       确认不再用的时候自己删。
 
 ===============================================================

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family:"Bebas Neue"; src:url("__FONTDIR__/BebasNeue-Regular.ttf"); }
+@font-face { font-family:"IBM Plex Mono"; src:url("__FONTDIR__/IBMPlexMono-Regular.ttf"); font-weight:400; }
+@font-face { font-family:"IBM Plex Mono"; src:url("__FONTDIR__/IBMPlexMono-SemiBold.ttf"); font-weight:600; }
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:1920px; height:1080px; overflow:hidden; }
+body { background:#08090C; color:#F1F3F5;
+  font-family:"IBM Plex Mono","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+  -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums; }
+#app { width:100%; height:100%; display:flex; flex-direction:column; position:relative;
+  background-image:
+    radial-gradient(1000px 760px at 16% 44%, rgba(0,214,107,.05), transparent 66%),
+    radial-gradient(1000px 760px at 84% 44%, rgba(0,214,107,.05), transparent 66%),
+    linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px);
+  background-size:auto,auto,48px 48px,48px 48px; }
+/* 背景大 VS（规范二十六：2%~5% 透明度，纯构图） */
+.bgvs { position:absolute; left:50%; top:50%; transform:translate(-50%,-54%);
+  font-family:"Bebas Neue"; font-size:820px; line-height:.8; color:rgba(241,243,245,.024);
+  letter-spacing:36px; pointer-events:none; }
+
+/* ---- 顶部：赛事名 + 状态/BO ---- */
+.hd { flex:none; height:96px; display:flex; align-items:center; justify-content:space-between;
+  padding:0 64px; border-bottom:1px solid #272D36; position:relative; }
+.hd .t1 { font-family:"Bebas Neue"; font-size:34px; line-height:1.05; letter-spacing:2.5px; }
+.hd .t2 { font-size:13px; letter-spacing:3px; color:#7D8796; margin-top:7px; min-height:13px; }
+.hd .r { display:flex; align-items:center; gap:14px; }
+.st { display:flex; align-items:center; gap:9px; font-size:14px; font-weight:600;
+  letter-spacing:2.5px; color:#00D66B; border:1px solid rgba(0,214,107,.45);
+  border-radius:999px; padding:8px 18px; }
+.st .dot { width:8px; height:8px; border-radius:50%; background:#00D66B; }
+.bo { font-size:15px; font-weight:600; letter-spacing:1.5px; color:#F1F3F5;
+  border:1px solid #272D36; border-radius:7px; padding:8px 16px; background:rgba(21,26,34,.5); }
+
+/* ---- 中央对阵 ---- */
+.main { flex:1; min-height:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; position:relative; }
+.mp { display:flex; align-items:center; gap:22px; margin-bottom:50px; }
+.mp .ln { width:90px; height:1px; background:#272D36; }
+.mp .tx { font-size:15px; letter-spacing:7px; color:#7D8796; font-weight:600; }
+.duel { display:flex; align-items:flex-start; width:1720px; }
+.side { width:620px; display:flex; flex-direction:column; align-items:center; min-width:0; }
+.side .lgw { height:150px; width:230px; display:flex; align-items:center; justify-content:center; }
+.side .lgw img { max-height:150px; max-width:230px; object-fit:contain; }
+.side .lgw.ph { font-family:"Bebas Neue"; font-size:64px; color:#7D8796;
+  border:2px solid #272D36; border-radius:18px; height:150px; width:150px;
+  display:flex; align-items:center; justify-content:center; }
+.side .nm { font-family:"Bebas Neue"; font-size:60px; line-height:1; letter-spacing:3px;
+  margin-top:22px; max-width:620px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.vsmid { flex:1; display:flex; align-items:center; gap:20px; margin-top:104px; }
+.vsmid .ln { flex:1; height:1px;
+  background:linear-gradient(90deg,transparent,#272D36 25%,#272D36 75%,transparent); }
+.vsmid .tx { font-family:"Bebas Neue"; font-size:38px; letter-spacing:4px; color:#5C6570; }
+.timeblock { margin-top:54px; display:flex; flex-direction:column; align-items:center; }
+.tm { font-size:78px; font-weight:600; letter-spacing:2px; line-height:1; }
+.dt { font-size:18px; letter-spacing:4px; color:#7D8796; margin-top:16px; }
+.dt b { color:#F1F3F5; font-weight:600; }
+.sin { font-size:22px; font-weight:600; letter-spacing:3px; color:#00D66B; margin-top:18px; }
+
+/* ---- 底部信息条 ---- */
+.strip { flex:none; min-height:96px; display:flex; align-items:center; justify-content:space-between;
+  gap:64px;
+  padding:0 64px; border-top:1px solid #272D36; background:rgba(21,26,34,.4); }
+.grp { display:flex; flex-direction:column; gap:9px; min-width:0; }
+.grp .k { font-size:12px; letter-spacing:3px; color:#5C6570; font-weight:600; }
+.grp .v { font-size:17px; letter-spacing:1px; color:#C9CFD6; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.grp .v.tba { color:#7D8796; letter-spacing:2px; }
+.grp .v .lp { color:#7D8796; font-weight:600; margin-right:10px; }
+.grp.grow { flex:1; }
+
+/* ---- 页脚 ---- */
+.ftr { flex:none; height:46px; display:flex; align-items:center; justify-content:space-between;
+  padding:0 64px; border-top:1px solid #272D36; font-size:13px; letter-spacing:1.5px; color:#5C6570; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bgvs">VS</div>
+  <div class="hd">
+    <div>
+      <div class="t1" id="hdname"></div>
+      <div class="t2" id="hdstage"></div>
+    </div>
+    <div class="r">
+      <div class="st" id="st"><span class="dot"></span><span id="sttx"></span></div>
+      <div class="bo" id="bo"></div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="mp"><div class="ln"></div><div class="tx">MATCH PREVIEW</div><div class="ln"></div></div>
+    <div class="duel" id="duel"></div>
+    <div class="timeblock">
+      <div class="tm" id="tm"></div>
+      <div class="dt" id="dt"></div>
+      <div class="sin" id="sin" style="display:none"></div>
+    </div>
+  </div>
+  <div class="strip" id="strip"></div>
+  <div class="ftr"><span id="src"></span><span id="gen"></span></div>
+</div>
+<script>
+const m = __MATCH__;
+function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+const $ = id => document.getElementById(id);
+
+/* 顶部 */
+$("hdname").textContent = esc(m.event || "");
+$("hdstage").textContent = esc(m.stage || "");
+const live = m.status === "LIVE";
+$("sttx").textContent = live ? "LIVE" : (m.status || "UPCOMING");
+$("bo").textContent = m.bo || "";
+$("bo").style.display = m.bo ? "" : "none";
+
+/* 中央对阵 */
+function side(t){
+  const lg = t.logo
+    ? `<div class="lgw"><img src="${t.logo}"></div>`
+    : `<div class="lgw ph">${esc((t.short || t.name || "?")[0])}</div>`;
+  return `<div class="side">${lg}<div class="nm">${esc((t.name || "").toUpperCase())}</div></div>`;
+}
+$("duel").innerHTML =
+  side(m.teamA) +
+  `<div class="vsmid"><div class="ln"></div><div class="tx">VS</div><div class="ln"></div></div>` +
+  side(m.teamB);
+
+/* 时间（静态图不伪造倒计时：startsIn 为空就不显示） */
+$("tm").textContent = m.time || "";
+$("dt").innerHTML = `<b>${esc(m.dateFull || "")}</b>&nbsp;&nbsp;·&nbsp;&nbsp;${esc(m.tz || "")}`;
+if (m.startsIn){
+  $("sin").style.display = "";
+  $("sin").textContent = "STARTS IN " + m.startsIn;
+}
+
+/* 底部信息条：MAP POOL / STAGE&FORMAT / MATCH NOTES / LINEUPS，缺数据的组直接不渲染 */
+const groups = [];
+const hasPool = m.mapPool && m.mapPool.length;
+groups.push({ k:"MAP POOL", cls: hasPool ? "" : "tba",
+  v: hasPool ? m.mapPool.map(x => esc(String(x).toUpperCase())).join(" &nbsp;·&nbsp; ") : "MAPS TBA" });
+const sf = [m.stage, m.bo].filter(Boolean).join("  ·  ");
+if (sf) groups.push({ k:"STAGE &amp; FORMAT", v: esc(sf) });
+if (m.notes && m.notes.length) groups.push({ k:"MATCH NOTES", v: m.notes.map(esc).join(" &nbsp;·&nbsp; "), grow:true });
+const la = m.lineupA || [], lb = m.lineupB || [];
+if (la.length && lb.length){
+  groups.push({ k:"LINEUPS", html:
+    `<div class="v"><span class="lp">${esc(m.teamA.short || m.teamA.name).toUpperCase()}</span>${la.map(esc).join(" &nbsp;·&nbsp; ")}</div>` +
+    `<div class="v"><span class="lp">${esc(m.teamB.short || m.teamB.name).toUpperCase()}</span>${lb.map(esc).join(" &nbsp;·&nbsp; ")}</div>` });
+}
+$("strip").innerHTML = groups.map(g =>
+  `<div class="grp${g.grow ? " grow" : ""}"><div class="k">${g.k}</div>` +
+  (g.html ? g.html : `<div class="v${g.cls ? " " + g.cls : ""}">${g.v}</div>`) + `</div>`
+).join("");
+
+/* 页脚 */
+$("src").textContent = "DATA SOURCE: " + (m.dataSource || "LIQUIPEDIA");
+$("gen").textContent = "GENERATED " + (m.generatedAt || "");
+</script>
+</body>
+</html>

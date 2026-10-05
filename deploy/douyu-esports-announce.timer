@@ -1,0 +1,25 @@
+[Unit]
+Description=每分钟看一次「有没有比赛快开打了，该发开赛提醒了」
+
+[Timer]
+# 每分钟一拍：开赛提醒的提前量默认 5 分钟（announce_lead_minutes），
+# 粒度粗了就会发出「还有 9 分 40 秒开打」这种不体面的提醒。
+#
+# **零网络请求**：esports.py --announce 只读本地清单 state_results_pending.json，
+# 开赛时间是从同赛事前一场的结果**串场级联估算**出来的，不抓任何页面，
+# 所以每分钟一拍不会碰 Liquipedia 的「1 次 / 30 秒」条款
+# （results.timer 已把分钟数错开 :30，那是为了真正的抓页请求，这里无关）。
+OnCalendar=*-*-* *:*:00
+
+# ⚠️ 故意**不设** Persistent。
+#    漏一拍完全没有影响：估算的开赛时刻还在提醒窗口内的话，下一拍照样提醒；
+#    而且 state_esports_announce.json 里有提醒锁防重。
+#    而 Persistent=true 会在开机时**立刻补跑一次** —— 停机期间攒下的
+#    过点场次会被逐条判断，容易一次发出一堆迟到的「马上开打」。
+#    这里的「漏」是安全的，「补」不是。
+Persistent=false
+
+Unit=douyu-esports-announce.service
+
+[Install]
+WantedBy=timers.target

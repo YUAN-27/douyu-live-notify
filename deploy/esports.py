@@ -53,6 +53,10 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
                                        # 所以刚部署、还没跑过一次预告时也能用它验收
     python3 esports.py --daily         # 发上一个赛程日的**全天整合版**（不联网，只读清单）
     python3 esports.py --check-daily   # 同上但只打印/出图，**不发消息、不写状态**
+    python3 esports.py --announce      # 开赛提醒一轮（**零网络**：读清单 + 估算开赛时刻，
+                                       # 命中提醒窗口才渲染发图；由 announce.timer 每分钟拉起）
+    python3 esports.py --check-announce # 同上但只打印/出图，**不发消息、不写状态**
+                                        # （清单空着就没东西可看，等预告写过一轮再验收）
     python3 esports.py --teams         # 列出页面上的真实队名 + 是否已收录，用来校白名单
     python3 esports.py --test-notify   # 往配置的通道发一条测试消息（验证链路用）
     python3 esports.py --selftest      # 离线自检，不联网、不发消息
@@ -1700,6 +1704,18 @@ HTML_CARD_W, HTML_CARD_H = 1920, 1080
 HTML_FONT_DIR = os.path.join(HERE, "fonts")
 RESULT_TEMPLATE_FILE = os.path.join(HERE, "result_template.html")
 DAILY_TEMPLATE_FILE = os.path.join(HERE, "daily_template.html")
+PREVIEW_TEMPLATE_FILE = os.path.join(HERE, "preview_template.html")
+ANNOUNCE_STATE_FILE = os.path.join(HERE, "state_esports_announce.json")
+
+# ---- 开赛提醒（STARTING SOON）的估算参数 ----
+# 数据源没有「比赛实际开打」的实时信号（Liquipedia 计时器到点变 LIVE 需要轮询，
+# 和条款网关冲突），所以 estimatedStart 只能**纯本地**算：自己的计划时刻，
+# 与「同赛事前面那场串场」的推算结束时间取大者。
+ANNOUNCE_TURNAROUND_MIN = 30      # 前一场打完到下一场开始的最短间隔
+ANNOUNCE_DURATE_MIN = {"Bo1": 80, "Bo3": 140, "Bo5": 240}   # fallback 时长模型
+ANNOUNCE_REMIND_DRIFT_SEC = 600   # estimated 漂移超过 10 分钟才考虑重提醒
+ANNOUNCE_REMIND_MAX = 1           # 最多重提醒 1 次
+ANNOUNCE_TOO_LATE_SEC = 300       # estimated 已过 5 分钟 → 过时不候（战报马上来）
 
 IS_WINDOWS = sys.platform.startswith("win")
 # 惯例名走 PATH；但 systemd 的 PATH 通常不含 /snap/bin，snap 装的 Chromium
@@ -1948,6 +1964,77 @@ def render_card_html(picked, now, es):
         log("[info] HTML 总预告出不了（%s）→ 退回 880px 旧卡" % exc)
     except Exception as exc:  # noqa: BLE001
         log("[warn] HTML 总预告构建出错（%s: %s）→ 退回 880px 旧卡"
+            % (type(exc).__name__, exc))
+    return None
+
+
+def build_preview_data(item, est_ts, now, es):
+    """单场开赛提醒卡（Match Preview）的数据对象，喂 preview_template.html。
+
+    字段与模板 JS 逐一对应（teamA/teamB 用 {name, short, logo}）。
+    **不伪造数据**：赛前地图池未定 → mapPool 空（模板显示 MAPS TBA）；
+    没有赛前阵容数据源 → lineupA/B 空（模板整组隐藏）；notes 同理。
+    startsIn 按**渲染时刻**真实计算 —— 每分钟 timer 拉起时正好是 est 前 LEAD 分钟。
+    """
+    es = es or {}
+    teams = list(item.get("teams") or [])
+    while len(teams) < 2:
+        teams.append("?")
+    shorts = list(item.get("shorts") or [])
+    while len(shorts) < 2:
+        shorts.append("")
+    logos = list(item.get("logos") or [])
+    while len(logos) < 2:
+        logos.append("")
+
+    def side(i):
+        name = teams[i] or "?"
+        return {"name": name,
+                "short": (shorts[i] or name)[:12],
+                "logo": logos[i] or ""}
+
+    tour = (item.get("tour") or "").strip()
+    ev, _, stage = tour.partition(" - ")
+    dt = datetime.fromtimestamp(est_ts, CST)
+    lead = max(0, int(est_ts - now.timestamp()))
+    h, rem = divmod(lead, 3600)
+    mnt, sec = divmod(rem, 60)
+    return {
+        "event": ev.strip() or "CS2 MATCH",
+        "stage": stage.strip().upper(),
+        "status": "UPCOMING",
+        "dateFull": dt.strftime("%b %d · %Y").upper(),
+        "time": dt.strftime("%H:%M"),
+        "tz": "UTC+8",
+        "startsIn": "%02d:%02d:%02d" % (h, mnt, sec) if lead > 0 else "",
+        "bo": (item.get("bo") or "").strip().upper(),
+        "teamA": side(0),
+        "teamB": side(1),
+        "mapPool": [],
+        "lineupA": [],
+        "lineupB": [],
+        "notes": [],
+        "dataSource": "LIQUIPEDIA",
+        "generatedAt": now.strftime("%H:%M") + " UTC+8",
+    }
+
+
+def render_preview_card_html(item, est_ts, now, es):
+    """开赛提醒 HTML 大图（1920×1080）。出不了返回 None（上层退纯文本）。"""
+    try:
+        if not os.path.isfile(PREVIEW_TEMPLATE_FILE):
+            raise HtmlCardError("缺模板 %s" % PREVIEW_TEMPLATE_FILE)
+        with open(PREVIEW_TEMPLATE_FILE, encoding="utf-8") as f:
+            tmpl = f.read()
+        data = build_preview_data(item, est_ts, now, es)
+        png = render_html_png(tmpl, data, es)
+        log("[info] 开赛提醒大图（HTML 1920×1080）：PNG %.1f KB"
+            % (len(png) / 1024))
+        return png
+    except HtmlCardError as exc:
+        log("[info] HTML 开赛提醒出不了（%s）→ 退回纯文本" % exc)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] HTML 开赛提醒构建出错（%s: %s）→ 退回纯文本"
             % (type(exc).__name__, exc))
     return None
 
@@ -2243,6 +2330,11 @@ def note_pending(picked, now, es, path=RESULTS_STATE_FILE):
             "status": "pending",
             "noted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "reported_at": None,
+            # 开赛提醒（--announce）渲染 Match Preview 卡要用的快照：
+            # 登记时页面手上就有，不存的话提醒卡只能画灰底占位块。
+            "shorts": list(m.get("shorts") or []),
+            "logos": list(m.get("logos") or []),
+            "tour": m.get("tour") or "",
         })
         have.add(key)
         added += 1
@@ -3502,6 +3594,208 @@ def run_results(cfg, args):
             % (len(rows), len(sent), len(not_sent)))
         return 1
     return 0
+
+
+# ==========================================================================
+# 开赛提醒（STARTING SOON，2026-10-06 用户拍板实现）
+# ==========================================================================
+#
+# 每分钟 timer（douyu-esports-announce.timer）拉起 `--announce`：
+#   读 pending 清单 → estimate_starts 算 estimatedStart（**纯本地、0 网络请求**）
+#   → est 落进「未来 LEAD 分钟」的场次发一条 Match Preview 卡。
+# 为什么不做真实赛况轮询：Liquipedia 计时器到点才变 LIVE，盯它就得高频抓页，
+# 和条款网关（≤1 次/30 秒）直接冲突 —— 所以按 47 节规范的务实映射，
+# estimatedStart 只在**同赛事串场对**上做级联修正，其余场次信登记的 ts。
+# 提醒锁在 state_esports_announce.json：每场（默认）只提醒一次；
+# estimated 漂移 ≥10 分钟且没重提醒过 → 再提醒一次；之后绝不再打扰。
+
+
+def _match_duration_sec(item):
+    """fallback 时长模型：Bo1 80 / Bo3 140 / Bo5 240 分钟，认不出按 Bo3。"""
+    bo = (item.get("bo") or "").strip()
+    return ANNOUNCE_DURATE_MIN.get(bo, ANNOUNCE_DURATE_MIN["Bo3"]) * 60
+
+
+def estimate_starts(items):
+    """给清单条目算 estimatedStart（秒级 epoch），返回 {下标: est_ts}。
+
+    · 基准 = 自己登记的 ts（预告时页面报出的开赛时间）；
+    · **同赛事串场对**才级联：同一 tour 里更早的那场，推算结束时间
+      （它的 est + fallback 时长）+ turnaround 就是本场的最早开赛时间；
+      级联用 est 而不是 ts —— A→B→C 连环串场能一路推下去；
+    · 并行场次（不同赛事）互不传染。
+    """
+    order = sorted(range(len(items or [])),
+                   key=lambda i: int((items or [])[i].get("ts") or 0))
+    est = {}
+    for pos, i in enumerate(order):
+        it = items[i]
+        floor_ts = int(it.get("ts") or 0)
+        tour = (it.get("tour") or "").strip()
+        if tour:
+            for j in order[:pos]:
+                prev = items[j]
+                if (prev.get("tour") or "").strip() != tour:
+                    continue
+                cand = est[j] + _match_duration_sec(prev) \
+                    + ANNOUNCE_TURNAROUND_MIN * 60
+                if cand > floor_ts:
+                    floor_ts = cand
+        est[i] = floor_ts
+    return est
+
+
+def announce_key(item):
+    """提醒锁的键：队名规范键 + 登记的开赛时间。est 会漂，ts 不会。"""
+    return "%s|%d" % (_teams_key(item.get("teams")), int(item.get("ts") or 0))
+
+
+def load_announce_state(path=ANNOUNCE_STATE_FILE):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict) and isinstance(data.get("announced"), dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {"announced": {}}
+
+
+def save_announce_state(state, path=ANNOUNCE_STATE_FILE):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(state, fp, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def announce_due(items, est_map, now_ts, lead_minutes, announced):
+    """挑出「现在该提醒」的条目，返回 [(下标, est_ts, key, 第几次提醒)]。
+
+    窗口：now <= est <= now + LEAD（已开打的不提醒 —— 战报马上就来了）。
+    锁：没提醒过 → 提醒；提醒过但 est 漂移 ≥ ANNOUNCE_REMIND_DRIFT_SEC
+    且重提醒次数 < ANNOUNCE_REMIND_MAX → 再提醒一次；其余跳过。
+    """
+    due = []
+    window = max(1, lead_minutes) * 60
+    for i, it in enumerate(items or []):
+        if it.get("status") != "pending":
+            continue
+        est_ts = int(est_map.get(i) or it.get("ts") or 0)
+        if est_ts < now_ts or est_ts > now_ts + window:
+            continue
+        key = announce_key(it)
+        rec = announced.get(key)
+        if not rec:
+            due.append((i, est_ts, key, 0))
+            continue
+        reminders = int(rec.get("reminders") or 0)
+        if reminders >= ANNOUNCE_REMIND_MAX:
+            continue
+        if abs(est_ts - int(rec.get("est_ts") or 0)) < ANNOUNCE_REMIND_DRIFT_SEC:
+            continue
+        due.append((i, est_ts, key, reminders + 1))
+    return due
+
+
+def format_announce_caption(item, est_ts, now, reminder):
+    """开赛提醒的一行文字。第二次提醒会注明「时间有调整」。"""
+    teams = list(item.get("teams") or [])
+    while len(teams) < 2:
+        teams.append("?")
+    dt = datetime.fromtimestamp(est_ts, CST)
+    mins = max(0, int(round((est_ts - now.timestamp()) / 60)))
+    head = "【CS2 开赛提醒】"
+    if reminder:
+        head = "【CS2 开赛提醒 · 时间有调整】"
+    return "%s %s %s vs %s（%s）· %s 开打 · 约 %d 分钟后" % (
+        head, dt.strftime("%H:%M"), teams[0], teams[1],
+        (item.get("bo") or "Bo3").strip().upper() or "BO?",
+        dt.strftime("%H:%M"), mins)
+
+
+def run_announce(cfg, args):
+    check = bool(getattr(args, "check_announce", False))
+    es = dict(cfg.get("esports") or {})
+    if not es.get("announce_enabled", True) and not check:
+        log("[info] 开赛提醒已关闭（announce_enabled=false），本轮不做事")
+        return 0
+    try:
+        lead = max(1, int(es.get("announce_lead_minutes") or 5))
+    except (TypeError, ValueError):
+        lead = 5
+    now = datetime.now(CST)
+    data = load_results_pending()
+    items = data.get("items") or []
+    if not items and not check:
+        log("[info] 清单为空，没有可提醒的场次（0 网络请求）")
+        return 0
+    est_map = estimate_starts(items)
+
+    if check:
+        # 演练：取清单里 est 最近的一场（不管窗口），渲染出图存 $TEMP 看效果。
+        pending = [(i, it) for i, it in enumerate(items)
+                   if it.get("status") == "pending"]
+        if pending:
+            i, it = max(pending, key=lambda p: int(est_map.get(p[0]) or 0))
+            est_ts = int(est_map.get(i) or it.get("ts") or 0)
+        else:
+            it = {"teams": ["Team Spirit", "Team Falcons"],
+                  "shorts": ["Spirit", "Falcons"], "logos": ["", ""],
+                  "ts": int(now.timestamp()) + 4 * 60, "bo": "Bo3",
+                  "tour": "ESL Pro League Season 24 - Round 3",
+                  "status": "pending"}
+            est_ts = int(now.timestamp()) + 4 * 60
+        log("[check] 演练：%s vs %s（est %s）"
+            % ((it.get("teams") or ["?"])[0], (it.get("teams") or ["?", "?"])[1],
+               datetime.fromtimestamp(est_ts, CST).strftime("%H:%M")))
+        png = render_preview_card_html(it, est_ts, now, es)
+        log("[check] 文字版：%s" % format_announce_caption(it, est_ts, now, 0))
+        if png:
+            path = os.path.join(tempfile.gettempdir(), "esports_announce_check.png")
+            try:
+                with open(path, "wb") as fp:
+                    fp.write(png)
+                log("[check] 预览图已存到：%s" % path)
+            except OSError as exc:
+                log("[warn] 预览图写不出来：%s" % exc)
+        else:
+            log("[check] 卡片没出（退回纯文本的样子，见上面文字版）")
+        log("\n[check] 以上是将会发送的内容（未发送、未写状态）")
+        return 0
+
+    due = announce_due(items, est_map, now.timestamp(), lead,
+                       load_announce_state().get("announced") or {})
+    if not due:
+        log("[info] 没有进入提醒窗口的场次（清单 %d 条，0 网络请求）" % len(items))
+        return 0
+    log("[info] %d 场进入提醒窗口（LEAD=%d 分钟）" % (len(due), lead))
+
+    state = load_announce_state()
+    announced = state.setdefault("announced", {})
+    notifiers = watch.build_notifiers(cfg)
+    want_card = bool(es.get("card_enabled", True))
+    sent_cnt = 0
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    for i, est_ts, key, reminder in due:
+        it = items[i]
+        pair = " vs ".join(list(it.get("teams") or [])[:2])
+        png = render_preview_card_html(it, est_ts, now, es) if want_card else None
+        body = format_announce_caption(it, est_ts, now, reminder)
+        delivered, failed = send_with_retry(with_card_image(notifiers, png),
+                                            body, es)
+        if not delivered or failed:
+            log("[error] %s 的开赛提醒发送失败：%s（不写锁，下一分钟重试）"
+                % (pair, "、".join(failed) or "未知"))
+            continue
+        log("[sent] %s 的开赛提醒已送达（%s）"
+            % (pair, "第 %d 次" % (reminder + 1) if reminder else "首次"))
+        announced[key] = {"announced_at": stamp, "est_ts": est_ts,
+                          "reminders": reminder + 1}
+        sent_cnt += 1
+    if sent_cnt:
+        save_announce_state(state)
+    return 0 if sent_cnt == len(due) else (1 if sent_cnt == 0 else 0)
 
 
 # ==========================================================================
@@ -4904,6 +5198,15 @@ def selftest():
 
     # ---- 3f-2. HTML 大图（1920×1080）：V2 版式，三级降级的头一级 ----
     print("\n-- 3f-2. HTML 大图（V2 版式 / Chromium 截图 / 三级降级头一级）--")
+
+    def _png_wh(b):
+        # PNG IHDR：宽高在字节 16~24，大端两个 uint32。
+        # 定义在 3f-2 开头 —— 3f-3 也要用它；嵌套 def 在同函数内后置会
+        # 让前面的引用吃 UnboundLocalError（局部名遮蔽），所以必须前置。
+        import struct as _struct
+        return (_struct.unpack(">II", bytes(b[16:24]))
+                if b and len(b) > 24 else (0, 0))
+
     t.check("chrome_bin 钉死到不存在的路径 → find_chrome 只认它、返回 None",
             find_chrome(dict(es, chrome_bin="/nonexistent/chrome")) is None)
     t.check("chrome_bin 没配时探测不炸（返回路径或 None 都是合法结果）",
@@ -4971,12 +5274,6 @@ def selftest():
             and hm0["players"] == {"teamA": [], "teamB": []}, (hm0["maps"], hm0["mvp"]))
 
     if find_chrome(es):
-        import struct as _struct
-
-        def _png_wh(b):
-            # PNG IHDR：宽高在字节 16~24，大端两个 uint32
-            return _struct.unpack(">II", bytes(b[16:24])) if b and len(b) > 24 else (0, 0)
-
         hpng = render_result_card_html(hrow, es)
         t.check("有 Chromium 时单场战报出 1920×1080 HTML 大图（PNG 魔数 + 实际尺寸）",
                 isinstance(hpng, (bytes, bytearray))
@@ -5004,6 +5301,94 @@ def selftest():
                 render_result_card_html(srow, es) is None)
     finally:
         globals()["RESULT_TEMPLATE_FILE"] = _keep_tpl
+
+    # ---- 3f-3. 开赛提醒（STARTING SOON）：估算 / 提醒锁 / Match Preview 卡 ----
+    print("\n-- 3f-3. 开赛提醒（estimatedStart 级联 / 提醒锁 / Match Preview）--")
+    # _png_wh 定义在 3f-2 开头（那里第一次用），这里直接复用。
+
+    def mk_it(ts, a, b, bo="Bo3", tour=""):
+        return {"teams": [a, b], "shorts": [a[:6], b[:6]], "logos": ["", ""],
+                "ts": ts, "bo": bo, "tour": tour, "status": "pending"}
+
+    items = [mk_it(1000, "A", "B", "Bo3", "X League - Day 1"),
+             mk_it(2000, "A", "C", "Bo3", "X League - Day 1"),
+             mk_it(3000, "D", "E", "Bo3", "Y Cup")]
+    est = estimate_starts(items)
+    dur = _match_duration_sec(items[0])
+    t.check("估算：自己 ts 可满足时不级联（A/B 照常开打）", est[0] == 1000, est)
+    t.check("估算：同赛事串场对级联（A/C = A/B est + Bo3 时长 + turnaround）",
+            est[1] == 1000 + dur + ANNOUNCE_TURNAROUND_MIN * 60, est)
+    t.check("估算：不同赛事并行不传染（D/E 保留自己的 ts）", est[2] == 3000, est)
+    chain = [mk_it(1000, "A", "B", "Bo3", "L - R1"),
+             mk_it(1200, "C", "D", "Bo3", "L - R1"),
+             mk_it(1400, "E", "F", "Bo3", "L - R1")]
+    estc = estimate_starts(chain)
+    d3 = _match_duration_sec(chain[0])
+    t.check("估算：连环串场基于前一场的 est（B 基于 A 的 est，C 基于 B 的 est）",
+            estc[1] == estc[0] + d3 + ANNOUNCE_TURNAROUND_MIN * 60
+            and estc[2] == estc[1] + d3 + ANNOUNCE_TURNAROUND_MIN * 60, estc)
+
+    ann_one = {announce_key(items[0]): {"est_ts": 1000, "reminders": 1}}
+    t.check("提醒窗口：只有 est 落进 [now, now+LEAD] 的场次被提醒",
+            [i for i, _e, _k, _r in announce_due(items, est, 900, 5, {})] == [0],
+            est)
+    t.check("提醒锁：已提醒过一次 → 不再打扰",
+            announce_due(items, est, 1000, 5, ann_one) == [], ann_one)
+    ann_drift = {announce_key(items[0]): {"est_ts": 100, "reminders": 0}}
+    due3 = announce_due(items, est, 1000, 5, ann_drift)
+    t.check("提醒锁：est 漂移 ≥10 分钟且没重提醒过 → 重提醒一次（第 2 次）",
+            [(i, r) for i, _e, _k, r in due3] == [(0, 1)], due3)
+    ann_same = {announce_key(items[0]): {"est_ts": 1000, "reminders": 0}}
+    t.check("提醒锁：est 漂移 <10 分钟 → 不重提醒",
+            announce_due(items, est, 1050, 5, ann_same) == [], ann_same)
+    done = dict(items[0])
+    done["status"] = "reported"
+    est_d = estimate_starts([done, items[1], items[2]])
+    t.check("提醒跳过：非 pending（已战报）不提醒",
+            announce_due([done, items[1], items[2]], est_d, 900, 5, {}) == [],
+            "reported")
+    t.check("提醒跳过：已开打（est < now）不提醒 —— 战报马上就来",
+            announce_due(items, est, 2000, 5, {}) == [], "late")
+
+    pv_now = datetime.fromtimestamp(760, CST)
+    pvd = build_preview_data(
+        dict(items[0], tour="ESL Pro League Season 24 - Round 3",
+             shorts=["AAA", "BBB"], logos=["u1", "u2"]), 1000, pv_now, es)
+    t.check("预览数据：tour 按「 - 」拆、bo 大写、startsIn 按渲染时刻真实计算",
+            pvd["event"] == "ESL Pro League Season 24"
+            and pvd["stage"] == "ROUND 3" and pvd["bo"] == "BO3"
+            and pvd["startsIn"] == "00:04:00", pvd)
+    t.check("预览数据：队名/短名/队标快照进 teamA；不伪造数据（地图池/阵容/notes 全空）",
+            pvd["teamA"] == {"name": "A", "short": "AAA", "logo": "u1"}
+            and pvd["teamB"]["logo"] == "u2"
+            and pvd["mapPool"] == [] and pvd["lineupA"] == []
+            and pvd["lineupB"] == [] and pvd["notes"] == [], pvd)
+    t.check("预览文案：含【CS2 开赛提醒】、剩余分钟；第二次注明时间有调整",
+            "【CS2 开赛提醒】" in format_announce_caption(items[0], 1000, pv_now, 0)
+            and "约 4 分钟后" in format_announce_caption(items[0], 1000, pv_now, 0)
+            and "时间有调整" in format_announce_caption(items[0], 1000, pv_now, 1))
+    with open(os.path.join(HERE, "preview_template.html"), encoding="utf-8") as _pf:
+        _pv_txt = _pf.read()
+    t.check("预览模板：__MATCH__ 在、__FONTDIR__ 在、无 file:/// 双前缀",
+            "__MATCH__" in _pv_txt and "__FONTDIR__" in _pv_txt
+            and "file:///__FONTDIR__" not in _pv_txt)
+    if find_chrome(es):
+        ppng = render_preview_card_html(
+            dict(items[0], tour="ESL Pro League Season 24 - Round 3",
+                 shorts=["AAA", "BBB"], logos=["", ""]),
+            1000, pv_now, es)
+        t.check("有 Chromium 时开赛提醒出 1920×1080 Match Preview（PNG 魔数 + 实际尺寸）",
+                isinstance(ppng, (bytes, bytearray))
+                and bytes(ppng[:8]) == b"\x89PNG\r\n\x1a\n"
+                and _png_wh(ppng) == (1920, 1080),
+                _png_wh(ppng) if ppng else type(ppng))
+    _keep_pvp = globals()["PREVIEW_TEMPLATE_FILE"]
+    try:
+        globals()["PREVIEW_TEMPLATE_FILE"] = os.path.join(HERE, "__no-tpl__.html")
+        t.check("预览卡缺模板安静退回 None（退纯文本，不外抛）",
+                render_preview_card_html(items[0], 1000, pv_now, es) is None)
+    finally:
+        globals()["PREVIEW_TEMPLATE_FILE"] = _keep_pvp
 
     # ---- 4. 连续静默与报平安 ----
     print("\n-- 4. 连续静默 → 报平安 --")
@@ -5220,6 +5605,10 @@ def main(argv=None):
                         help="发上一个赛程日的全天整合版战果（不联网，只读清单快照）")
     parser.add_argument("--check-daily", action="store_true",
                         help="同上但只打印/出图，不发消息、不写状态")
+    parser.add_argument("--announce", action="store_true",
+                        help="开赛提醒一轮：est 落进提醒窗的场次发 Match Preview 卡（0 网络请求）")
+    parser.add_argument("--check-announce", action="store_true",
+                        help="同上但只渲染出图到 $TEMP，不发消息、不写状态")
     parser.add_argument("--selftest", action="store_true", help="离线自检，不联网")
     args = parser.parse_args(argv)
 
@@ -5251,6 +5640,13 @@ def main(argv=None):
             log("[error] config.json 没配好，战果会发不出去（见上面的报错）")
             return 2
         return run_results(cfg, args)
+
+    if args.announce or args.check_announce:
+        # --check-announce 只渲染不发，通道都不建；--announce 需要发送通道
+        if not args.check_announce and not watch.validate_cfg(cfg, args.config):
+            log("[error] config.json 没配好，开赛提醒会发不出去（见上面的报错）")
+            return 2
+        return run_announce(cfg, args)
 
     # 与 watch.py 共用同一份 config.json：channels / onebot 段直接沿用。
     # 这里校验一遍，免得配置错了却「什么都没发生」——那正是最难排查的状态。

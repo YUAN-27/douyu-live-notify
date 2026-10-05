@@ -1,0 +1,29 @@
+[Unit]
+Description=斗鱼开播提醒 · CS2 开赛提醒（由 douyu-esports-announce.timer 拉起）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# esports.py 用 __file__ 定位 config.json 和 state 文件，
+# WorkingDirectory 只是为了排错时路径直观。
+WorkingDirectory=/opt/douyu-live-notify
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py --announce
+
+# 开赛提醒是**零网络请求**的（只读 state_results_pending.json + 渲染 + 发送），
+# 最重的活是命中提醒时起一次 Chromium 截图（几秒），120 秒绰绰有余。
+TimeoutStartSec=120
+
+# 单独一个日志文件：开赛提醒每分钟被唤起一次，日志量是三条流水里最大的，
+# 混进别的文件会把排错体验搞砸。
+# tail -f /var/log/douyu-watch/esports-announce.log
+StandardOutput=append:/var/log/douyu-watch/esports-announce.log
+StandardError=append:/var/log/douyu-watch/esports-announce.log
+
+# 最小权限。和 douyu-watch.service / douyu-esports*.service 保持一致。
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true

@@ -48,6 +48,10 @@ REQUIRED = [
     # 所以必须进 REQUIRED —— 免得打出一个「看起来正常、实际上全退旧版」的包。
     "result_template.html",
     "daily_template.html",
+    # 开赛提醒的 Match Preview 模板（--announce 渲染 1920x1080 用）。
+    # 缺了 render_preview_card_html 会 raise → log 后 return None → 纯文本发送，
+    # 功能不炸但大图卡永远出不来，所以必须进 REQUIRED。
+    "preview_template.html",
     "fonts/BebasNeue-Regular.ttf",
     "fonts/IBMPlexMono-Regular.ttf",
     "fonts/IBMPlexMono-SemiBold.ttf",
@@ -69,6 +73,9 @@ REQUIRED = [
     # 全天整合版（次日早上发上一个赛程日的汇总）的两个单元。同上，缺了不报错但发不出来。
     "douyu-esports-daily.service",
     "douyu-esports-daily.timer",
+    # 开赛提醒（比赛快开打时推 Match Preview）的两个单元。同上。
+    "douyu-esports-announce.service",
+    "douyu-esports-announce.timer",
     "preflight-check.sh",
     "setup-docker-mirror.sh",
     "add-swap.sh",
@@ -85,6 +92,7 @@ FROM_ROOT = ["watch.py", "selftest.py"]
 # 这些文件在 deploy/ 里，装到服务器上时要打印指纹
 FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py", "deploy/esports.py",
                "deploy/result_template.html", "deploy/daily_template.html",
+               "deploy/preview_template.html",
                "deploy/fonts/BebasNeue-Regular.ttf",
                "deploy/fonts/IBMPlexMono-Regular.ttf",
                "deploy/fonts/IBMPlexMono-SemiBold.ttf"]
