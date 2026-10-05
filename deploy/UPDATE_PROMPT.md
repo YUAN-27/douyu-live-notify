@@ -64,7 +64,7 @@ wc -c watch.py selftest.py watchdog.py esports.py card_font.otf
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `ffd2fac439c15fe5` | 118381 |
+| `esports.py` | `fb93f9007e7c46bb` | 123686 |
 | `card_font.otf`（卡片字体） | `25640f16a8fad499` | 66612 |
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
@@ -131,9 +131,10 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **173** |
-  | 少了 `make_card_font.py` | 171（少 2 条「两张字符表是否一致」的断言） |
-  | 没装 Pillow | 164（卡片那 9 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
+  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **183** |
+  | 少了 `make_card_font.py` | 181（少 2 条「两张字符表是否一致」的断言） |
+  | 没装 Pillow | 167（卡片的 17 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
+  | 两样都没有 | 165 |
 
   **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow 那行、
   再 `ls card_font.otf make_card_font.py`。

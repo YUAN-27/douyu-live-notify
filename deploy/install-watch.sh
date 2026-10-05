@@ -165,7 +165,7 @@ fi
 #   make_card_font.py      重新生成上面那个字体的脚本。平时用不上（产物已入库），
 #                          但要装 —— 因为 `esports.py --selftest` 里有 2 条断言
 #                          **要 import 它**来核对「两张字符表 / 覆盖区间表是否一致」。
-#                          不装的话那 2 条被跳过，自检项数会从 173 变成 171，
+#                          不装的话那 2 条被跳过，自检项数会从 183 变成 181，
 #                          以后看日志的人会以为少了什么。
 for cf in card_font.otf CARD_FONT_LICENSE.txt make_card_font.py; do
   if [[ -f "$UNIT_DIR/$cf" ]]; then
