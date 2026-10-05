@@ -335,7 +335,8 @@ K / D / A / ± / ADR / KAST / Rating，本机与阿里云服务器（cn-beijing�
 不撞 Cloudflare 地区墙 —— 这是它相对 HLTV / bo3.gg / escorenews 的决定性优势。
 
 **定位方式：「队名 + 日期」，不维护别名表。** csdb 的 `/matches/` 列表页覆盖最近
-~2 天，每条带 `/match/<date>-<uuid>/` 链接和周围文本。`attach_players` 每轮：
+~2 天，每条是一个 `<a class="match-card">`，卡片正文里带双方队名、比分、时间。
+`attach_players` 每轮：
 
 1. 抓**一次**列表页（整轮共享；失败则本轮全部没有选手段）；
 2. `locate_csdb_match` 按日期（当天优先，±1 天兜跨午夜）+ 队名（先两队全名都命中，
@@ -347,10 +348,17 @@ K / D / A / ± / ADR / KAST / Rating，本机与阿里云服务器（cn-beijing�
 
 解析要点（踩过的坑）：
 
-- 表头文本 `+- ADR KAST Rating` 会混进切表后的正文开头，**必须先剥掉**再跑选手行
-  正则，否则第一名选手的名字会变成 `ADR KAST Rating makazze`（自检有断言盯着）。
-- 地图名取自「Map Results」区块的真实顺序（Map1/Map2…），不是详情区的排列顺序 ——
-  实测一场 Bo2 详情区按 Dust2→Nuke 排，真实顺序是 Nuke=图1。
+- **按真实 DOM 结构解析**：每张图 = 一个 `<div class="md-map-card">`（`<h3>` 是地图名）
+  + 一张 `<table class="md-sb-table">`，逐行读 `<tbody><tr><td>`。
+  别再用「昵称 + 队名 + 6 个数」的纯文本正则 —— 它的队名字符类 `[A-Za-z .]+`
+  收不下带数字的队名（G2 / 1WIN / 9INE / M80…），这些人的整行会丢，
+  还会把上一行 Rating 的尾数当成下一行昵称；卡片上就是一整列空白 + 一列错名。
+- **列表页按整个 `<a class="match-card">` 切块**定位，不能用「链接前后固定 ±N 字符」：
+  卡片正文全在 `<a>` 里面，固定窗口会把邻场的队名卷进来 → 命中错的那场 →
+  抓回来的人和本场队名对不上，选手段整列空白。
+- 地图名取表格所在 `md-map-card` 的 `<h3>`。csdb 的 Map Breakdown 是**倒序**渲染的
+  （实测 Map 3 → Map 1），所以卡片里按**地图名**对齐而不是按下标
+  （`_map_key` 把 `Dust II` / `Dust2` 归一成同一个键；对不上才退回下标）。
 - 卡片每图每队只取 **rating 前 `card_players_per_team` 名**（默认 3），
   全画 10 人会让 Bo5 的卡片高过 2400px 上限。
 - 队名分组用双向包含（`_team_same`）：Liquipedia 给全名、csdb 偶尔给缩写，
@@ -895,7 +903,7 @@ cd /opt/douyu-live-notify && python3 esports.py --check
 ## 8. 自检
 
 ```bash
-python3 esports.py --selftest    # 297 项（装了 Pillow）/ 266 项（没装）：解析器 / 四条筛选 /
+python3 esports.py --selftest    # 299 项（装了 Pillow）/ 268 项（没装）：解析器 / 四条筛选 /
                                  # 跨夜窗口 / 正文版式 / 图片卡片 / 战果结算 / 单场战报 /
                                  # csdb 选手数据 / 全天整合版 / 条款节流 / 静默计数 /
                                  # 白名单 / 排名与别名 / 文案
@@ -907,13 +915,13 @@ python3 esports.py --selftest    # 297 项（装了 Pillow）/ 266 项（没装�
 >
 > | 条件 | 项数 |
 > |---|---|
-> | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **297** |
-> | 少了 `make_card_font.py`（自检少了 2 条「两张字符表是否一致」的断言） | 295 |
-> | 没装 Pillow（四张卡片的 31 条渲染断言换成 1 条降级断言） | 266 |
-> | 两样都没有 | 264 |
+> | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **299** |
+> | 少了 `make_card_font.py`（自检少了 2 条「两张字符表是否一致」的断言） | 297 |
+> | 没装 Pillow（四张卡片的 31 条渲染断言换成 1 条降级断言） | 268 |
+> | 两样都没有 | 266 |
 >
 > `install-watch.sh` 会把 Pillow 和 `make_card_font.py` 都装上，
-> 所以**装完再跑就是 297**；它装 Pillow 排在自检之后，所以偶尔会先看到 266。
+> 所以**装完再跑就是 299**；它装 Pillow 排在自检之后，所以偶尔会先看到 268。
 > 这四个数字是本机实测出来的（用假 `PIL` 包骗过 import、再抽掉 `make_card_font.py`），
 > 换了断言之后记得重量一遍，别照着改。
 >

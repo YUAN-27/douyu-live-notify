@@ -2135,18 +2135,22 @@ def fetch_csdb(es, url):
 def parse_csdb_matches(html_text):
     """解析 csdb `/matches/` 列表页，返回 [(日期 str, url, 文本块), …]。
 
-    列表页里一场比赛 = 一个 `/match/...` 链接 + 周围一段文本（队名、比分、日期）。
-    返回按出现顺序排的三元组，供 locate 阶段按「队名 + 日期」匹配。
+    列表页里一场比赛 = 一个 `<a class="match-card" href="/match/...">…</a>`，
+    卡片正文（联赛、双方队名、比分、时间）都在这对标签里面。所以按**整个 `<a>`
+    元素**切块，返回按出现顺序排的三元组，供 locate 阶段按「队名 + 日期」匹配。
+
+    ⚠️ 不能用「链接前后固定 ±N 字符」当文本块：相邻场次的卡片会挤进窗口，
+    队名串味 → locate 命中错的那场 → 抓回来的人和本场队名对不上，选手段整列空白。
     """
     out = []
     if not html_text:
         return out
-    # 每个 /match/ 链接，抓它前后一段文本作为「这场是谁打的」判断依据
-    for m in re.finditer(r'href="(/match/[^"]+)"', html_text):
+    for m in re.finditer(r'<a[^>]+href="(/match/[^"]+)"[^>]*>(.*?)</a>',
+                         html_text, re.S):
         url = m.group(1)
         if "/stats/" in url:
             continue
-        seg = html_text[max(0, m.start() - 800): m.start() + 400]
+        seg = m.group(2)
         # 日期：优先从 URL 里拿（/match/<date>-<uuid>/ 或 /match/...-<date>/）
         dm = re.search(r"(\d{4}-\d{2}-\d{2})", url)
         date = dm.group(1) if dm else ""
@@ -2190,59 +2194,106 @@ def locate_csdb_match(entries, teams, ts):
     return None
 
 
+def _csdb_text(fragment):
+    """把一段 HTML 片段压成纯文本（去标签、解实体、并空白）。"""
+    s = re.sub(r"<[^>]+>", " ", fragment or "")
+    s = html_mod.unescape(s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_csdb_table(fragment):
+    """从一张 `md-sb-table` 里抽出选手行（K/D/A、+/-、ADR、KAST、Rating）。
+
+    按真实 DOM 结构解析（`<tbody><tr><td>…`），**不**用「昵称 + 队名 + 6 个数」的
+    纯文本正则：那个正则的队名字符类 `[A-Za-z .]+` 收不下带数字的队名
+    （G2 / 1WIN / 9INE / 3DMAX…），会把这些人的整行丢掉、还会把上一行 Rating
+    的尾数当成下一行昵称，最后卡片上就是一整列空白 + 一列错名。
+    """
+    body = re.search(r"<tbody[^>]*>(.*?)</tbody>", fragment, re.S)
+    body = body.group(1) if body else (fragment or "")
+    players = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", body, re.S):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
+        if len(cells) < 8:
+            continue
+        # 第一格：选手名（/player/ 链接）+ 队名（md-sb-team）
+        nm = re.search(r'<a[^>]+href="/player/[^"]*"[^>]*>(.*?)</a>', cells[0], re.S)
+        name = _csdb_text(nm.group(1)) if nm else ""
+        tm = re.search(r'<span class="md-sb-team"[^>]*>(.*?)</span>',
+                       cells[0], re.S)
+        team = _csdb_text(tm.group(1)) if tm else ""
+        if not name:
+            parts = _csdb_text(cells[0]).split()
+            name = parts[0] if parts else ""
+            if not team and len(parts) > 1:
+                team = " ".join(parts[1:])
+        if not name:
+            continue
+        vals = [_csdb_text(c) for c in cells[1:8]]
+        try:
+            k, d, a = int(vals[0]), int(vals[1]), int(vals[2])
+            pm_s = vals[3].replace(" ", "")
+            pm = int(pm_s) if pm_s not in ("", "+", "-") else 0
+            adr = float(vals[4])
+            kast = int(re.sub(r"\D", "", vals[5]) or 0)
+            rating = float(vals[6])
+        except (ValueError, IndexError):
+            continue
+        players.append({
+            "name": name, "team": team,
+            "k": k, "d": d, "a": a, "pm": pm,
+            "adr": adr, "kast": kast, "rating": rating,
+        })
+    return players
+
+
 def parse_csdb_players(html_text):
-    """解析 csdb 单场页，返回 [ {map, score:(l,r), players:[{name, team, k, d,
-    a, pm, adr, kast, rating}, …]}, … ]。
+    """解析 csdb 单场页，返回 [ {map, players:[{name, team, k, d, a, pm, adr,
+    kast, rating}, …]}, … ]。
 
-    每张图一张表，表头 `Player K D A +/− ADR KAST Rating`，后跟双方 10 名选手。
-    表头在 HTML 里是 React 序列化字符串（`\"Player\",\"K\"...`），所以把 script 去掉后
-    靠「Player K D A」这个纯文本锚点切块，再用正则抓「昵称 + 队名 + 6 个数」。
+    每张图是一个 `<div class="md-map-card">`：`<h3>地图名</h3>` + 一张
+    `<table class="md-sb-table">`（表头 Player K D A +/− ADR KAST Rating，
+    后跟双方 10 名选手）。按这个结构切块，地图名直接取 `<h3>`。
 
-    地图名与表格的对应关系：详情区按 Dust2→Nuke 排，但「Map Results」区块里
-    给的是真实编号（Nuke=Map1、Dust2=Map2）。所以这里**先按 Map Results 的编号
-    抓地图名列表**，再按顺序配对。拿不到地图名就写 "Map N"。
+    站点改版、没有 md-map-card 时退回「按裸表格顺序抓、地图名取表格前最近的
+    `<h3>`」，拿不到就写 "Map N"。
     """
     if not html_text:
         return []
-    # 去 script/style/svg，转纯文本，保留顺序
-    txt = re.sub(r"<svg.*?</svg>", " ", html_text, flags=re.S)
-    txt = re.sub(r"<script.*?</script>", " ", txt, flags=re.S)
-    txt = re.sub(r"<style.*?</style>", " ", txt, flags=re.S)
-    txt = re.sub(r"<[^>]+>", " ", txt)
-    txt = txt.replace("+/−", "+-").replace("−", "-")
-    txt = re.sub(r"&[a-z]+;", " ", txt)
-    txt = re.sub(r"\s{2,}", " ", txt)
+    # 去掉 script/style/svg：RSC payload 里也带这些类名（转义过的），别混进来
+    doc = re.sub(r"<script.*?</script>", " ", html_text, flags=re.S)
+    doc = re.sub(r"<style.*?</style>", " ", doc, flags=re.S)
+    doc = re.sub(r"<svg.*?</svg>", " ", doc, flags=re.S)
 
-    # 地图名（按 Map Results 的真实顺序）：`<map名> <队A> <分> – <分> <队B>`
-    mapnames = re.findall(
-        r"(Dust2|Dust 2|Nuke|Ancient|Mirage|Inferno|Anubis|Overpass|Vertigo)\s+"
-        r"[A-Za-z .]+\s+\d+\s*[–-]\s*\d+\s+[A-Za-z .]+", txt)
-    mapnames = [m.replace("Dust 2", "Dust2") for m in mapnames]
-
-    player_re = re.compile(
-        r"([A-Za-z0-9_']+)\s+([A-Za-z .]+)\s+"
-        r"(\d+)\s+(\d+)\s+(\d+)\s+([+-])\s?(\d+)\s+([\d.]+)\s+(\d+)%\s+([\d.]+)")
-
-    parts = txt.split("Player K D A")
     maps = []
-    for i, part in enumerate(parts[1:]):
-        # 剥掉表头残留（"+- ADR KAST Rating" 之类），只留选手行
-        body = re.sub(r"^[^A-Za-z0-9_']*[+-]?\s*ADR\s+KAST\s+Rating\s*", "", part)
-        rows = player_re.findall(body)
-        if not rows:
+    cards = [m.start() for m in re.finditer(r'class="md-map-card[^"]*"', doc)]
+    for i, s in enumerate(cards):
+        end = cards[i + 1] if i + 1 < len(cards) else len(doc)
+        block = doc[s:end]
+        tb = re.search(r'<table class="md-sb-table"[^>]*>(.*?)</table>',
+                       block, re.S)
+        if not tb:
             continue
-        players = []
-        for name, team, k, d, a, sign, pm, adr, kast, rating in rows:
-            players.append({
-                "name": name, "team": team.strip(),
-                "k": int(k), "d": int(d), "a": int(a),
-                "pm": (1 if sign == "+" else -1) * int(pm),
-                "adr": float(adr), "kast": int(kast), "rating": float(rating),
-            })
-        maps.append({
-            "map": mapnames[i] if i < len(mapnames) else "Map %d" % (i + 1),
-            "players": players,
-        })
+        players = _parse_csdb_table(tb.group(1))
+        if not players:
+            continue
+        hm = re.search(r"<h3[^>]*>(.*?)</h3>", block, re.S)
+        name = _csdb_text(hm.group(1)) if hm else ""
+        maps.append({"map": name or "Map %d" % (len(maps) + 1),
+                     "players": players})
+    if maps:
+        return maps
+
+    # 兜底：裸表格，按文档顺序配对（地图名取表格前最近的 <h3>）
+    for m in re.finditer(r'<table class="md-sb-table"[^>]*>(.*?)</table>',
+                         doc, re.S):
+        players = _parse_csdb_table(m.group(1))
+        if not players:
+            continue
+        hs = re.findall(r"<h3[^>]*>(.*?)</h3>", doc[:m.start()], re.S)
+        name = _csdb_text(hs[-1]) if hs else ""
+        maps.append({"map": name or "Map %d" % (len(maps) + 1),
+                     "players": players})
     return maps
 
 
@@ -2576,7 +2627,13 @@ def _render_result_card_inner(row, now, es):
     # ---- 动态高度：适配 BO1 / BO3 / BO5 任意图数 ----
     n = len(maps)
     has_players = bool(players) and per_team > 0
-    n_play = min(len(players), n) if has_players else 0
+    # csdb 的「Map Breakdown」按**倒序**渲染（实测 Map 3 → Map 1），不能按下标
+    # 和 Liquipedia 的地图行配对；按地图名对齐（Dust II/Dust2 靠 _map_key 归一）。
+    pm_by_key = {}
+    for pm in players:
+        k = _map_key(pm.get("map"))
+        if k and k not in pm_by_key:
+            pm_by_key[k] = pm
     per_map_h = CARD_MAP_H
     if has_players:
         per_map_h += CARD_PLAYER_HEAD_H + CARD_PLAYER_ROW_H * per_team
@@ -2666,10 +2723,14 @@ def _render_result_card_inner(row, now, es):
         d.text((CARD_PAD, bry + 8), "地图 %d" % (i + 1), font=f_no,
                fill=C_FAINT, anchor="ls")
 
-        # 选手段
-        if has_players and i < len(players):
-            _draw_player_block(d, players[i], teams, winner, per_team,
-                               block_top + CARD_MAP_H, CARD_PAD, CARD_W)
+        # 选手段（按地图名对齐；名字对不上才退回按下标）
+        if has_players:
+            pmap = pm_by_key.get(_map_key(m.get("map")))
+            if pmap is None and i < len(players):
+                pmap = players[i]
+            if pmap:
+                _draw_player_block(d, pmap, teams, winner, per_team,
+                                   block_top + CARD_MAP_H, CARD_PAD, CARD_W)
 
     # ---- 页脚 ----
     fy = y + per_map_h * n
@@ -2686,6 +2747,16 @@ def _render_result_card_inner(row, now, es):
            row.get("score_left") or "", row.get("score_right") or "",
            teams[1], n, "，含选手数据" if has_players else ""))
     return data
+
+
+def _map_key(name):
+    """地图名的归一化键，用来跨数据源对齐同一张图。
+
+    Liquipedia 写 `Dust II`，csdb 写 `Dust2` —— 去掉非字母数字后一个是
+    `dustii`、一个是 `dust2`，所以这里额外把罗马数字/写法差异收成同一个键。
+    """
+    k = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    return {"dustii": "dust2", "dust": "dust2"}.get(k, k)
 
 
 def _team_same(a, b):
@@ -4760,22 +4831,47 @@ def selftest():
             locate_csdb_match(entries, ["Fnatic"], ts_day) is None)
     t.check("csdb 定位：空输入不炸", locate_csdb_match([], [], ts_day) is None)
 
+    def _csdb_row(name, team, k, d, a, pm, adr, kast, rating, mvp=False):
+        """造一行和真实站点一致的 md-sb-table 选手行（含 <!-- --> 注释）。"""
+        cls = ' class="md-sb-mvp"' if mvp else ""
+        sign = "+" if pm >= 0 else "-"
+        return (
+            '<tr%s><td><span class="md-sb-name"><a href="/player/%s/">%s</a>'
+            '<span class="md-sb-team">%s</span></span></td>'
+            "<td>%d</td><td>%d</td><td>%d</td>"
+            '<td class="md-pos">%s<!-- -->%d</td>'
+            "<td>%.1f</td><td>%d%%</td><td><strong>%.2f</strong></td></tr>"
+            % (cls, name.lower(), name, team, k, d, a, sign, abs(pm),
+               adr, kast, rating))
+
+    def _csdb_card(mapname, score, rows):
+        return (
+            '<div class="md-map-card"><div class="md-map-head"><h3>%s</h3>'
+            '<span class="md-map-score">%s</span></div>'
+            '<div class="md-sb-wrap"><table class="md-sb-table"><thead><tr>'
+            "<th>Player</th><th>K</th><th>D</th><th>A</th><th>+/−</th>"
+            "<th>ADR</th><th>KAST</th><th>Rating</th></tr></thead><tbody>%s"
+            "</tbody></table></div></div>" % (mapname, score, "".join(rows)))
+
     csdb_page = (
-        "<p>Nuke NAVI 13 – 9 Aurora</p>"
-        "<table><tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr>"
-        "<tr><td>makazze Natus Vincere 23 15 6 + 8 104.6 78% 1.96</td></tr>"
-        "<tr><td>jottAAA Aurora Gaming 20 18 9 + 2 109.8 74% 1.41</td></tr></table>"
-        "<p>Dust2 Aurora 10 – 13 NAVI</p>"
-        "<table><tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr>"
-        "<tr><td>XANTARES Aurora Gaming 23 16 1 - 4 100.5 68% 1.53</td></tr>"
-        "<tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr></table>"
+        _csdb_card("Nuke", "NAVI <strong>13</strong> – <strong>9</strong> Aurora", [
+            _csdb_row("makazze", "Natus Vincere", 23, 15, 6, 8, 104.6, 78, 1.96,
+                      True),
+            _csdb_row("jottAAA", "Aurora Gaming", 20, 18, 9, 2, 109.8, 74, 1.41),
+        ])
+        + _csdb_card("Dust2", "Aurora <strong>10</strong> – <strong>13</strong> G2", [
+            _csdb_row("XANTARES", "Aurora Gaming", 23, 16, 1, -4, 100.5, 68, 1.53),
+            _csdb_row("m0NESY", "G2", 21, 12, 3, 9, 95.2, 80, 1.72, True),
+        ])
+        # 第三张图没打（没有表格）：应被跳过
+        + _csdb_card("Inferno", "Aurora <strong>0</strong> – <strong>0</strong> G2", [])
     )
     pmaps = parse_csdb_players(csdb_page)
     t.check("csdb 选手：切出 2 张图（空表的那张被跳过）", len(pmaps) == 2,
             "实际 %d" % len(pmaps))
     if len(pmaps) == 2:
         p0 = pmaps[0]["players"]
-        t.check("csdb 选手：地图名取 Map Results 的真实顺序",
+        t.check("csdb 选手：地图名取 <h3> 的真实顺序",
                 pmaps[0]["map"] == "Nuke" and pmaps[1]["map"] == "Dust2",
                 [m["map"] for m in pmaps])
         t.check("csdb 选手：名字不被表头污染（ADR KAST Rating 剥干净）",
@@ -4789,10 +4885,14 @@ def selftest():
                 and p0[0]["kast"] == 78 and p0[0]["rating"] == 1.96)
         t.check("csdb 选手：每图 10 行以内（双方各 5 才画得下）",
                 all(len(m["players"]) <= 10 for m in pmaps))
-    t.check("csdb 选手：没有 Map Results 时兜底 Map N",
+        t.check("csdb 选手：带数字的队名（G2）整行解析，不再整列丢",
+                any(p["name"] == "m0NESY" and p["team"] == "G2"
+                    for p in pmaps[1]["players"]))
+    t.check("csdb 选手：没有 md-map-card 时兜底裸表格 + Map N",
             parse_csdb_players(
-                "<p>Player K D A</p><p>zz Team 1 2 3 + 4 5.6 70% 1.11</p>"
-            )[0]["map"] == "Map 1")
+                '<table class="md-sb-table"><tbody>'
+                + _csdb_row("zz", "Team", 1, 2, 3, 4, 5.6, 70, 1.11)
+                + "</tbody></table>")[0]["map"] == "Map 1")
     t.check("csdb 选手：空输入不炸", parse_csdb_players("") == [])
 
     t.check("队名匹配：子串/青训队名命中，首字母缩写不硬凑，空串不命中",
@@ -4800,6 +4900,10 @@ def selftest():
             and _team_same("natus vincere", "Natus Vincere") is True
             and _team_same("NAVI Junior", "NAVI") is True
             and _team_same("", "NAVI") is False)
+
+    t.check("地图名归一：Dust II / Dust2 / Dust 2 同一个键",
+            _map_key("Dust II") == _map_key("Dust2") == _map_key("Dust 2") == "dust2"
+            and _map_key("Mirage") == "mirage" and _map_key("") == "")
 
     return t.done("selftest")
 
