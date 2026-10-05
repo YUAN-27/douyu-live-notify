@@ -79,16 +79,16 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `a234e2ed65905874` | 261436 |
-| `result_template.html`（V2 战报模板） | `461df01be5d89d33` | 10518 |
-| `daily_template.html`（V2 总预告模板） | `3d5c9fda90c215e6` | 8808 |
+| `esports.py` | `2f721bdfcd084acf` | 263808 |
+| `result_template.html`（V2 战报模板） | `eb38facb61241cb1` | 10494 |
+| `daily_template.html`（V2 总预告模板） | `716330d08df4242e` | 8784 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `f93d2269ef85a165` | 5403 |
 
-`deploy.zip` 整包：`9d1787d5e4aacfb7`（479.7 KB，44 个文件；新增文件是 `fonts/LICENSE-OFL.txt` 字体许可证，且 install-watch.sh 已会自动部署两份模板与 fonts/）。
+`deploy.zip` 整包：`d2749d3ecab45570`（481.0 KB，44 个文件）。本版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、find_chrome 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选（systemd PATH 不含 /snap/bin 也能找到 snap 版 Chromium）、总预告 HTML 上限 30→22 场（杜绝 1080px 底边裁切险）、自检 +5 断言（模板无双前缀/字体三件套存在/chrome_bin isfile 分支/snap 候选/渲染 PNG 实际尺寸）。
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）

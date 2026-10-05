@@ -1702,8 +1702,13 @@ RESULT_TEMPLATE_FILE = os.path.join(HERE, "result_template.html")
 DAILY_TEMPLATE_FILE = os.path.join(HERE, "daily_template.html")
 
 IS_WINDOWS = sys.platform.startswith("win")
+# 惯例名走 PATH；但 systemd 的 PATH 通常不含 /snap/bin，snap 装的 Chromium
+# 必须用绝对路径兜底（which 对含路径分隔符的候选只做可执行性检查，正好够用）。
 _CHROME_CANDIDATES = ("chromium", "chromium-browser", "google-chrome",
-                      "google-chrome-stable", "chrome")
+                      "google-chrome-stable", "chrome",
+                      "/snap/bin/chromium", "/snap/bin/chromium-browser",
+                      "/usr/bin/chromium", "/usr/bin/chromium-browser",
+                      "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable")
 _CHROME_CACHE = []
 
 
@@ -1864,11 +1869,12 @@ def build_result_match(row, es):
 def build_daily_data(picked, now, es):
     """总预告 V2 的数据对象（喂 daily_template.html）。
 
-    场次太多（>30，版式兜不住）或空场次返回 None —— 退回 Pillow 旧卡，绝不硬画。
+    场次太多（>22 —— 双列 11 行/列正好压在第二档密度的舒适区内，再大就贴
+    1080px 底边有裁切险）或空场次返回 None —— 退回 Pillow 旧卡，绝不硬画。
     """
     es = es or {}
     ms = sorted(picked or [], key=lambda m: int(m.get("ts") or 0))
-    if not ms or len(ms) > 30:
+    if not ms or len(ms) > 22:
         return None
     budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
     start = now.date()
@@ -4895,6 +4901,30 @@ def selftest():
             find_chrome(dict(es, chrome_bin="/nonexistent/chrome")) is None)
     t.check("chrome_bin 没配时探测不炸（返回路径或 None 都是合法结果）",
             find_chrome(es) is None or isinstance(find_chrome(es), str))
+    t.check("snap 装的 /snap/bin/chromium 在探测候选里（systemd PATH 无 /snap/bin 也能找到）",
+            "/snap/bin/chromium" in _CHROME_CANDIDATES)
+    _probe = os.path.join(tempfile.gettempdir(), "es_chrome_probe.bin")
+    try:
+        open(_probe, "w").close()
+        t.check("chrome_bin 钉死到存在的文件 → 原样返回（isfile 分支）",
+                find_chrome(dict(es, chrome_bin=_probe)) == _probe)
+    finally:
+        try:
+            os.remove(_probe)
+        except OSError:
+            pass
+    for _tpl_name in ("result_template.html", "daily_template.html"):
+        with open(os.path.join(HERE, _tpl_name), encoding="utf-8") as _tf:
+            _tpl_txt = _tf.read()
+        t.check("模板 %s：__FONTDIR__ 占位符在、且没有 file:/// 双前缀（会静默回退系统字体）"
+                % _tpl_name,
+                "__FONTDIR__" in _tpl_txt
+                and "file:///__FONTDIR__" not in _tpl_txt)
+    t.check("随包字体三件套都在 HTML_FONT_DIR（缺了 @font-face 404 → 系统字体）",
+            all(os.path.isfile(os.path.join(HTML_FONT_DIR, _fn)) for _fn in
+                ("BebasNeue-Regular.ttf", "IBMPlexMono-Regular.ttf",
+                 "IBMPlexMono-SemiBold.ttf")),
+            HTML_FONT_DIR)
     hrow = dict(srow, players=[
         {"map": "Dust II", "players": [
             {"name": "pA", "team": "Legacy", "k": 20, "d": 18, "a": 5, "pm": 2,
@@ -4934,17 +4964,29 @@ def selftest():
             and hm0["players"] == {"teamA": [], "teamB": []}, (hm0["maps"], hm0["mvp"]))
 
     if find_chrome(es):
+        import struct as _struct
+
+        def _png_wh(b):
+            # PNG IHDR：宽高在字节 16~24，大端两个 uint32
+            return _struct.unpack(">II", bytes(b[16:24])) if b and len(b) > 24 else (0, 0)
+
         hpng = render_result_card_html(hrow, es)
-        t.check("有 Chromium 时单场战报出 1920×1080 HTML 大图",
+        t.check("有 Chromium 时单场战报出 1920×1080 HTML 大图（PNG 魔数 + 实际尺寸）",
                 isinstance(hpng, (bytes, bytearray))
-                and bytes(hpng[:8]) == b"\x89PNG\r\n\x1a\n", type(hpng))
+                and bytes(hpng[:8]) == b"\x89PNG\r\n\x1a\n"
+                and _png_wh(hpng) == (1920, 1080),
+                _png_wh(hpng) if hpng else type(hpng))
         dpng = render_card_html(many[:2], base, es)
-        t.check("有 Chromium 时总预告出 1920×1080 HTML 大图",
+        t.check("有 Chromium 时总预告出 1920×1080 HTML 大图（PNG 魔数 + 实际尺寸）",
                 isinstance(dpng, (bytes, bytearray))
-                and bytes(dpng[:8]) == b"\x89PNG\r\n\x1a\n", type(dpng))
+                and bytes(dpng[:8]) == b"\x89PNG\r\n\x1a\n"
+                and _png_wh(dpng) == (1920, 1080),
+                _png_wh(dpng) if dpng else type(dpng))
         hpng0 = render_result_card_html(dict(srow, maps=[], players=[]), es)
         t.check("⚑ 没逐图没选手的 HTML 大图照样出（居中形态，不是失败）",
-                isinstance(hpng0, (bytes, bytearray)), type(hpng0))
+                isinstance(hpng0, (bytes, bytearray))
+                and _png_wh(hpng0) == (1920, 1080),
+                _png_wh(hpng0) if hpng0 else type(hpng0))
     else:
         t.check("没 Chromium 时 HTML 卡安静退回 None（再退 Pillow/纯文本）",
                 render_result_card_html(srow, es) is None)
