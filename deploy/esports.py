@@ -6,11 +6,17 @@ CS2 每日赛程推送（跟斗鱼开播提醒共用一套通知通道）
 做什么
 ------
 每天固定时刻（由 douyu-esports.timer 拉起，默认北京 09:30）抓一次 Liquipedia 的
-CS2 赛程，挑出**今天还没开打**、且满足下面任一条件的比赛，推一条到群里：
+CS2 赛程，挑出**窗口内还没开打**、且满足下面任一条件的比赛，推一条到群里：
 
   · 大赛（赛事名命中 esports.major_keywords 里的关键词）
   · 有中国队参赛（队名精确命中 esports.cn_teams 白名单）
   · 有知名队伍参赛（队名精确命中 esports.notable_teams 白名单）
+
+**窗口 = 「现在 → 下一次预告时刻」，不是「今天这个自然日」。**
+因为每天只发一次，只认自然日会让**次日 00:00~09:30 的比赛永远没人预告**
+（今天的预告够不着、明天的预告还没发），凌晨开打的比赛正好落进这个真空期。
+改成首尾相接的窗口后，既不漏也不重复。窗口末端由 esports.preview_run_time 决定，
+**改了定时器的时刻记得同步改它**。
 
 后两条是**精确匹配**队名，不是子串：`The MongolZ` 这种别国队伍不会被归成中国队，
 `MOUZ NXT` 也不会因为主队 `MOUZ` 在白名单里就跟着混进来。大小写无所谓，
@@ -198,6 +204,9 @@ ESPORT_DEFAULTS = {
     "rank_ttl_hours": 168,
     # 同一个赛事当天出现多少支「已知队伍」就把该赛事的比赛整体放行。0 = 关掉这条。
     "tournament_min_known_teams": 4,
+    # 每天几点跑 —— **必须和 douyu-esports.timer 的 OnCalendar 一致**。
+    # 预告窗口 = 「现在 → 下一次这个时刻」，所以凌晨的比赛由上一期负责预告。
+    "preview_run_time": "09:30",
     # 超过多少场就开始折叠（只列前 N 场）。0 = 不折叠。
     "fold_hint": 15,
     # 连续静默多少天后发一条「报平安」，之后每满这么多天再发一次。0 = 从不发。
@@ -600,16 +609,48 @@ def why_selected(m, es, rank_names=None, tour_known=None, min_known=0):
     return None
 
 
+def parse_run_time(text):
+    """把 `"HH:MM"` 解析成 (时, 分)。写坏了就退回 09:30。
+
+    宁可窗口算得保守一点，也不要因为一个配置笔误让预告直接不发。
+    """
+    m = re.match(r"^\s*(\d{1,2})\s*[:：]\s*(\d{1,2})\s*$", str(text or ""))
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return h, mi
+    return 9, 30
+
+
+def preview_window(now, run_time=None):
+    """预告窗口 = **[现在, 下一次预告时刻)**，返回 (start, end)。
+
+    为什么不是「今天 00:00 ~ 明天 00:00」：每天 09:30 才发一次，如果只认「今天」
+    这个自然日，那么**次日 00:00~09:30 的比赛永远没人预告** —— 今天的预告够不着它
+    （那会儿还没到今天结束），明天的预告又还没发（它已经不是「明天」了），
+    正好落进一个固定 9.5 小时的真空期。凌晨开打的比赛首当其冲。
+
+    改成「现在 → 下一次该发预告的时刻」之后，两期**首尾严格相接**：既不漏，也不重复。
+
+    下一次时刻是**严格晚于 now** 的那个（同一时刻取次日）——
+    所以 09:30 准点跑时窗口正好 24 小时；而手工在 08:00 跑，窗口就只到当天 09:30，
+    因为 09:30 那一期马上会接手，没必要越权。
+    """
+    h, mi = parse_run_time(run_time)
+    end = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+    if end <= now:
+        end += timedelta(days=1)
+    return now, end
+
+
 def select_with_reasons(matches, now, es, rank_names=None):
     """返回 (入选场次, {赛事名: 已知队伍数}, 计数)。
 
     拆出这一层是为了让筛选和统计**用同一份中间结果**，不会出现
     「列表里有这场、但理由统计说没有」这种自相矛盾。
     """
-    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day1 = day0 + timedelta(days=1)
-    t0, t1 = day0.timestamp(), day1.timestamp()
-    nowts = now.timestamp()
+    _start, end = preview_window(now, es.get("preview_run_time"))
+    t0, t1 = now.timestamp(), end.timestamp()
 
     todo = []
     for m in matches:
@@ -617,9 +658,7 @@ def select_with_reasons(matches, now, es, rank_names=None):
             continue
         if len(m.get("teams") or []) < 2:       # 队名没解析全，不敢推
             continue
-        if not (t0 <= m["ts"] < t1):            # 只看今天（北京时间）
-            continue
-        if m["ts"] < nowts:                     # 只预告还没开打的
+        if not (t0 <= m["ts"] < t1):            # 窗口内：现在 → 下一次预告
             continue
         todo.append(m)
 
@@ -627,7 +666,7 @@ def select_with_reasons(matches, now, es, rank_names=None):
     known = known_team_set(es, rank_names)
     tour_known = {}
     if min_known > 0 and known:
-        # 只数「今天还没开打」的场次；同一支队在同一个赛事里打两场只算一支。
+        # 只数「窗口内还没开打」的场次；同一支队在同一个赛事里打两场只算一支。
         for m in todo:
             tour = (m.get("tour") or "").strip()
             if not tour:
@@ -647,11 +686,12 @@ def select_with_reasons(matches, now, es, rank_names=None):
     return picked, tour_known, counts
 
 
-def select_today(matches, now, es, rank_names=None):
-    """挑出「今天还没开打、对阵已定，且满足入选口径」的比赛（只要场次列表）。
+def select_upcoming(matches, now, es, rank_names=None):
+    """挑出「窗口内还没开打、对阵已定，且满足入选口径」的比赛（只要场次列表）。
 
-    口径见 why_selected。为什么只要「还没开打」：这是一条**赛程预告**，
-    09:30 发出去的时候，今天凌晨那几场早就打完了，列出来只会让人以为还有比赛可看。
+    口径见 why_selected、窗口见 preview_window。为什么只要「还没开打」：
+    这是一条**赛程预告**，09:30 发出去的时候，今天凌晨那几场早就打完了，
+    列出来只会让人以为还有比赛可看。
     """
     return select_with_reasons(matches, now, es, rank_names)[0]
 
@@ -683,8 +723,33 @@ NO_TOUR = "（未标注赛事）"
 
 
 def _day_label(d):
-    """`10-05 周一` —— 这是「今天」的预告，年份写出来只占地方。"""
+    """`10-05 周一` —— 年份写出来只占地方。"""
     return "%02d-%02d %s" % (d.month, d.day, WEEKDAYS_CN[d.weekday()])
+
+
+def _window_label(now, es):
+    """`10-05 周一 09:30 → 10-06 周二 09:30`；起止同一天就省掉末尾的日期。
+
+    标题必须把**窗口**写出来：预告不再只覆盖「今天」，而是「现在 → 下一次预告」，
+    不写清楚读者会以为跨夜那几场是今天的（然后发现时间已经过了）。
+    """
+    start, end = preview_window(now, (es or {}).get("preview_run_time"))
+    tail = end.strftime("%H:%M")
+    if end.date() != start.date():
+        tail = "%s %s" % (_day_label(end), tail)
+    return "%s %s → %s" % (_day_label(start), start.strftime("%H:%M"), tail)
+
+
+def _day_prefix(ts, start_date):
+    """跨天的场次在时间前加「次日」。
+
+    加了这个前缀，`次日 02:00` 才不会被误读成「今天凌晨 2 点」（那早就过去了）。
+    窗口最长 24 小时，所以实际上只会出现「次日」。
+    """
+    delta = (datetime.fromtimestamp(ts, CST).date() - start_date).days
+    if delta <= 0:
+        return ""
+    return "次日 " if delta == 1 else "%d 天后 " % delta
 
 
 def _group_by_tour(picked, fold_hint):
@@ -727,9 +792,10 @@ def _marks(m, cn_teams, rank_names, rank_n):
 
 
 def format_daily(picked, now, es, rank_names=None):
-    """拼「今日赛程」正文。末尾必须署名 Liquipedia（CC-BY-SA 3.0 的要求）。
+    """拼「赛程预告」正文。末尾必须署名 Liquipedia（CC-BY-SA 3.0 的要求）。
 
-    版式：赛事名当小标题只出现一次，下面每场一行「时间  对阵」；
+    版式：标题写明**窗口**（现在 → 下一次预告），赛事名当小标题只出现一次，
+    下面每场一行「时间  对阵」；跨天的场次时间前加「次日」；
     同赛事内 Bo 一致就写在小标题上，不一致才逐场标。
     """
     if not picked:
@@ -738,8 +804,9 @@ def format_daily(picked, now, es, rank_names=None):
     shown, grouped = _group_by_tour(picked, es.get("fold_hint"))
     cn_teams = es.get("cn_teams")
     rank_n = es.get("rank_top_n") or 0
+    start_date = now.date()
 
-    lines = ["【CS2 今日赛程】%s" % _day_label(now), ""]
+    lines = ["【CS2 赛程】%s" % _window_label(now, es), ""]
     for name, group in grouped:
         bo = _group_bo(group)
         lines.append(name + (" · " + bo if bo else ""))
@@ -747,7 +814,8 @@ def format_daily(picked, now, es, rank_names=None):
         per_line = bo is None and any((m.get("bo") or "").strip() for m in group)
         for m in group:
             d = datetime.fromtimestamp(m["ts"], CST)
-            seg = "  %s  %s" % (d.strftime("%H:%M"), " vs ".join(m["teams"]))
+            seg = "  %s%s  %s" % (_day_prefix(m["ts"], start_date),
+                                  d.strftime("%H:%M"), " vs ".join(m["teams"]))
             if per_line and (m.get("bo") or "").strip():
                 seg += " · " + m["bo"]
             mk = _marks(m, cn_teams, rank_names, rank_n)
@@ -772,7 +840,7 @@ def format_calm(empty_days):
     return "\n".join([
         "【CS2 赛程】连续 %d 天没有可推送的比赛" % empty_days,
         "",
-        "这不是故障，是近期确实没有大赛、也没有中国队参赛。",
+        "这不是故障，是近期确实没有符合推送条件的比赛（大赛、中国队、世界强队都没排上）。",
         "抓取链路正常（刚成功拿到 Liquipedia 赛程），有符合条件的比赛会自动恢复推送。",
         "",
         "数据来源：Liquipedia",
@@ -937,7 +1005,10 @@ def run_once(cfg, args):
            if rank["ok"] else ("已关闭" if rank["disabled"] else "本轮不可用")))
 
     picked, tour_known, rc = select_with_reasons(matches, now, es, rank["names"])
-    log("[info] 页面共 %d 场，其中今天还没开打且符合条件的有 %d 场"
+    _ws, _we = preview_window(now, es.get("preview_run_time"))
+    log("[info] 预告窗口：%s → %s（含跨夜，避免凌晨的比赛没人预告）"
+        % (_ws.strftime("%m-%d %H:%M"), _we.strftime("%m-%d %H:%M")))
+    log("[info] 页面共 %d 场，其中窗口内还没开打且符合条件的有 %d 场"
         % (len(matches), len(picked)))
     if picked:
         log("[info] 入选依据（每场只记第一条命中的）：%s" % reasons_summary(rc))
@@ -1274,6 +1345,9 @@ def selftest():
     print("\n-- 2. 筛选（中国队 / 世界前N / 大赛且知名 / 时间窗）--")
     base = datetime(2026, 9, 30, 9, 30, tzinfo=CST)
     ts = lambda h, m=0: base.replace(hour=h, minute=m).timestamp()
+    # 次日的某个时刻 —— 用来验「跨夜窗口」，这是本轮修的重点
+    next_day = lambda h, m=0: (base + timedelta(days=1)).replace(
+        hour=h, minute=m).timestamp()
 
     mk = _mk
     TOP = ["Team Spirit", "Team Vitality", "G2 Esports"]   # 假装的世界前 N
@@ -1300,25 +1374,64 @@ def selftest():
         ("TBD 丢掉", mk(ts(14), ["TBD", "TBD"], "BLAST Premier", tbd=True), None, False),
         ("队名不全丢掉", mk(ts(14), ["TYLOO"], "BLAST Premier"), None, False),
         ("已开打的丢掉", mk(ts(8), ["TYLOO", "B"], "BLAST Premier"), None, False),
-        ("明天的丢掉",
-         mk((base + timedelta(days=1)).timestamp(), ["TYLOO", "B"], "IEM"), None, False),
+        ("下一期预告那一刻（窗口右端点，左闭右开）→ 丢掉",
+         mk(next_day(9, 30), ["TYLOO", "B"], "IEM"), None, False),
         ("赛事名为空不算大赛，但中国队仍发", mk(ts(14), ["TYLOO", "B"], ""), None, True),
         ("赛事名为空 + 没中国队 → 丢掉", mk(ts(14), ["A", "B"], ""), None, False),
     ]
     for name, m, top, want in cases:
-        got = select_today([m], base, es, top)
+        got = select_upcoming([m], base, es, top)
         t.check(name, bool(got) == want, "want=%s got=%s" % (want, bool(got)))
 
     t.check("蒙古队不算中国队（直接断言 has_team）",
             not has_team({"teams": ["The MongolZ", "IHC"]}, es["cn_teams"]))
 
     t.check("边界：恰好此刻开打 → 保留",
-            bool(select_today([mk(ts(9, 30), ["TYLOO", "B"], "IEM")], base, es)))
+            bool(select_upcoming([mk(ts(9, 30), ["TYLOO", "B"], "IEM")], base, es)))
     t.check("边界：此刻前 1 秒 → 丢掉",
-            not select_today([mk(ts(9, 30) - 1, ["TYLOO", "B"], "IEM")], base, es))
+            not select_upcoming([mk(ts(9, 30) - 1, ["TYLOO", "B"], "IEM")], base, es))
     t.check("边界：今天 23:59 → 保留",
-            bool(select_today([mk(ts(23, 59), ["TYLOO", "B"], "IEM")], base, es)))
-    t.check("空列表安全", select_today([], base, es) == [])
+            bool(select_upcoming([mk(ts(23, 59), ["TYLOO", "B"], "IEM")], base, es)))
+
+    # ---- 2a. 跨夜窗口：不能漏掉次日凌晨的比赛 ----
+    print("\n-- 2a. 预告窗口（现在 → 下一次预告，跨夜）--")
+    t.check("窗口起点就是 now", preview_window(base, "09:30")[0] == base)
+    t.check("09:30 跑 → 窗口正好到次日 09:30",
+            preview_window(base, "09:30")[1] == base + timedelta(days=1))
+    t.check("窗口正好 24 小时", preview_window(base, "09:30")[1] - base
+            == timedelta(days=1))
+    t.check("同一天的窗口右端点（now 早于 run_time）",
+            preview_window(base.replace(hour=8), "09:30")[1] == base)
+    t.check("手工在 23:00 跑 → 窗口到次日 09:30",
+            preview_window(base.replace(hour=23), "09:30")[1]
+            == base + timedelta(days=1))
+    t.check("run_time 写坏时退回 09:30", parse_run_time("乱七八糟") == (9, 30))
+    t.check("run_time 兼容中文冒号与单数字", parse_run_time("9：5") == (9, 5))
+    t.check("run_time 越界时退回 09:30", parse_run_time("25:00") == (9, 30))
+
+    t.check("次日 00:00 的比赛 → 保留（这就是原来漏掉的那种）",
+            bool(select_upcoming([mk(next_day(0, 0), ["TYLOO", "B"], "IEM")], base, es)))
+    t.check("次日 02:00 → 保留",
+            bool(select_upcoming([mk(next_day(2), ["TYLOO", "B"], "IEM")], base, es)))
+    t.check("次日 09:29 → 保留（下一期开跑前一分钟）",
+            bool(select_upcoming([mk(next_day(9, 29), ["TYLOO", "B"], "IEM")], base, es)))
+    t.check("次日 12:00 → 丢掉（留给下一期，免重复）",
+            not select_upcoming([mk(next_day(12), ["TYLOO", "B"], "IEM")], base, es))
+    t.check("两期首尾相接、既不漏也不重（端点是开区间）",
+            select_upcoming([mk(next_day(9, 30) - 1, ["TYLOO", "B"], "IEM")], base, es)
+            and not select_upcoming(
+                [mk(next_day(9, 30), ["TYLOO", "B"], "IEM")], base, es))
+    t.check("窗口右端点跟着 preview_run_time 走（改成 12:00 → 窗口只到当天 12:00）",
+            bool(select_upcoming([mk(ts(11), ["TYLOO", "B"], "IEM")],
+                                 base, dict(es, preview_run_time="12:00")))
+            and not select_upcoming([mk(ts(13), ["TYLOO", "B"], "IEM")],
+                                    base, dict(es, preview_run_time="12:00")))
+    t.check("名队云集只在窗口内计数（次日 12:00 那场不算进去）",
+            len(select_upcoming(
+                [mk(ts(10), ["FaZe Clan", "M80"], "赛事甲"),
+                 mk(ts(11), ["Team Liquid", "Wildcard"], "赛事甲"),
+                 mk(next_day(12), ["Nobody A", "Nobody B"], "赛事甲")], base, es)) == 2)
+    t.check("空列表安全", select_upcoming([], base, es) == [])
 
     # ---- 2b. 「名队云集的赛事」整体放行 ----
     print("\n-- 2b. 名队云集的赛事（同一赛事当天 >= 4 支已知队伍）--")
@@ -1329,22 +1442,22 @@ def selftest():
         mk(ts(14), ["Nobody A", "Nobody B"], tour),      # 一对无名队
     ]
     t.check("凑够 4 支 → 该赛事当天的比赛都发（含无名队那场）",
-            len(select_today(crowd, base, es)) == 3,
-            "实际 %d 场" % len(select_today(crowd, base, es)))
+            len(select_upcoming(crowd, base, es)) == 3,
+            "实际 %d 场" % len(select_upcoming(crowd, base, es)))
     t.check("同一支队打两场只算一支（3 支 → 不放行）",
-            select_today([mk(ts(10), ["FaZe Clan", "M80"], tour),
+            select_upcoming([mk(ts(10), ["FaZe Clan", "M80"], tour),
                           mk(ts(12), ["FaZe Clan", "Wildcard"], tour),
                           mk(ts(14), ["Nobody A", "Nobody B"], tour)], base, es) == [])
-    t.check("只有 2 支时不放行", select_today(crowd[:1], base, es) == [])
+    t.check("只有 2 支时不放行", select_upcoming(crowd[:1], base, es) == [])
     t.check("tournament_min_known_teams = 0 时这条整条关掉",
-            select_today(crowd, base, dict(es, tournament_min_known_teams=0)) == [])
+            select_upcoming(crowd, base, dict(es, tournament_min_known_teams=0)) == [])
     t.check("世界前 N 的队也计入「已知队伍」",
-            len(select_today([mk(ts(10), ["Team Spirit", "M80"], tour),
+            len(select_upcoming([mk(ts(10), ["Team Spirit", "M80"], tour),
                               mk(ts(12), ["Team Liquid", "Wildcard"], tour),
                               mk(ts(14), ["Nobody A", "Nobody B"], tour)],
                              base, es, TOP)) == 3)
     t.check("不同赛事各算各的（不跨赛事凑数）",
-            select_today([mk(ts(10), ["FaZe Clan", "M80"], "赛事甲"),
+            select_upcoming([mk(ts(10), ["FaZe Clan", "M80"], "赛事甲"),
                           mk(ts(12), ["Team Liquid", "Wildcard"], "赛事乙")],
                          base, es) == [])
 
@@ -1403,9 +1516,25 @@ def selftest():
 
     # 版式：赛事名当小标题只写一次，每场一行「时间  对阵」
     head = body.splitlines()[0]
-    t.check("标题是「月-日 周几」，不写年份",
-            head == "【CS2 今日赛程】%s" % _day_label(base)
+    t.check("标题写明窗口（现在 → 下一次预告），且不写年份",
+            head == "【CS2 赛程】09-30 周三 09:30 → 10-01 周四 09:30"
             and str(base.year) not in head)
+    t.check("起止同一天时标题不重复日期",
+            _window_label(base.replace(hour=8, minute=0), es)
+            == "09-30 周三 08:00 → 09:30")
+    t.check("窗口标签跟着 preview_run_time 走（08:00 早于 now → 顺延到次日）",
+            _window_label(base, dict(es, preview_run_time="08:00"))
+            == "09-30 周三 09:30 → 10-01 周四 08:00")
+    t.check("跨天的场次时间前加「次日」",
+            "次日 02:00" in format_daily(
+                [mk(next_day(2), ["TYLOO", "B"], "IEM")], base, es))
+    t.check("当天场次不加「次日」前缀",
+            _day_prefix(ts(23, 59), base.date()) == "")
+    t.check("次日场次加「次日」前缀",
+            _day_prefix(next_day(0), base.date()) == "次日 ")
+    t.check("有赛事名时分组，时段在「次日」那行也保持缩进",
+            "  次日 02:00  TYLOO vs B" in format_daily(
+                [mk(next_day(2), ["TYLOO", "B"], "IEM")], base, es))
     t.check("同名赛事只出现一次（分组，不再逐场重复）",
             body.count("IEM Cologne 2026") == 1)
     t.check("对阵行不再重复赛事名",

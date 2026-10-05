@@ -318,11 +318,13 @@ cat <<'EOF'
     a) 先离线自检（不联网、不发消息、不写状态）
        cd /opt/douyu-live-notify && python3 esports.py --selftest
 
-    b) 看今天到底会发什么 —— **只抓取 + 打印，不发消息、不写状态**
+    b) 看这一期到底会发什么 —— **只抓取 + 打印，不发消息、不写状态**
        cd /opt/douyu-live-notify && python3 esports.py --check
        入选口径是四条（或）：① 有中国队  ② 有世界前 15 的队伍  ③ 大赛**且**有知名队伍
-       ④ 同一赛事当天凑够 4 支知名/前 15 队伍（该赛事整体放行）。
-       如果没内容，那是「今天这四条一条都没沾上」，正式跑会自动静默。
+       ④ 同一赛事在窗口内凑够 4 支知名/前 15 队伍（该赛事整体放行）。
+       窗口 = 「现在 → 下一次预告时刻」（默认到次日北京 09:30），**不是「今天」这个自然日** ——
+       这样凌晨的比赛不会被漏掉。输出第一行 `[info] 预告窗口：…` 就是覆盖范围。
+       如果没内容，那是「窗口内这四条一条都没沾上」，正式跑会自动静默。
        连续静默满 7 天会发一条报平安 —— 免得「今天没比赛」和「程序挂了」长得一样。
        输出里 `[info] 入选依据…` 逐条列出四条各中了几场，`--check` 还会逐场打印理由。
 
@@ -346,6 +348,9 @@ cat <<'EOF'
        systemctl enable --now douyu-esports.timer
        systemctl list-timers douyu-esports.timer
        tail -f /var/log/douyu-watch/esports.log
+       ⚠️ 如果你改了定时器的时刻，记得把 config.json 的 esports.preview_run_time 改成同一个
+          时刻（不写 config.json 就改 esports.py 里的默认值）。窗口右端点就是它：
+          只改定时器不改它，窗口会算偏 —— 偏早漏比赛、偏晚重复推。
 
 【回滚】
     # 只回滚赛程预告：

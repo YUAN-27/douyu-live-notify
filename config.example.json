@@ -38,10 +38,10 @@
   },
 
   "_esports_comment": "CS2 每日赛程预告（esports.py）。**这一段整个可以不要** —— 删掉就全用程序内置的默认值，功能照常工作。想改口径时才加上其中某几项。推送通道沿用上面的 channels，所以 NapCat 挂了它也发不出去，这跟开播提醒是同一个前提。完整口径与排查见 deploy/ESPORTS.md。",
-  "_esports_scope_comment": "只推「今天还没开打」且满足**四条之一（或）**的场次：① 有中国队（无条件）② 有世界前 15 的队伍（无条件，自动抓 HLTV 排名）③ 大赛**且**对阵里有知名队伍（两条都满足）④ 同一赛事当天凑够 4 支知名/前 15 队伍（整体放行）。不满足就静默；连续静默满 calm_after_empty_days 天会发一条报平安，免得「今天没比赛」和「程序挂了」长得一样。",
+  "_esports_scope_comment": "只推「**窗口内**还没开打」且满足**四条之一（或）**的场次：① 有中国队（无条件）② 有世界前 15 的队伍（无条件，自动抓 HLTV 排名）③ 大赛**且**对阵里有知名队伍（两条都满足）④ 同一赛事在窗口内凑够 4 支知名/前 15 队伍（整体放行）。**窗口 = 「现在 → 下一次预告时刻」，不是「今天」这个自然日** —— 只认自然日会让次日 00:00~09:30 的比赛永远漏掉。窗口右端点由 preview_run_time（默认 09:30）决定，**要跟 douyu-esports.timer 的 OnCalendar 一致**。不满足就静默；连续静默满 calm_after_empty_days 天会发一条报平安，免得「今天没比赛」和「程序挂了」长得一样。",
   "_esports_keywords_comment": "major_keywords：子串匹配赛事名（大小写不敏感）。页面上拿不到赛事分级（S/A/B 按钮是客户端过滤，没写进 HTML），所以「算不算大赛」只能靠赛事名认，这份名单就是全部依据。注意第 3 条是「与」，光命中赛事名不会发。",
   "_esports_teams_comment": "cn_teams / notable_teams：**精确匹配**队名，不是子串。子串匹配会把 The MongolZ 这类蒙古国队伍误判成中国队；精确匹配则不会让 MOUZ 命中学院队 MOUZ NXT。大小写无所谓，但措辞必须和 Liquipedia 页面上完全一致 —— 写错了不报错、只会静默漏发，所以改之前先跑 `python3 deploy/esports.py --teams` 把真实队名打出来照着抄。完整名单（含 notable_teams 的 42 支）见 deploy/config.example.json。",
-  "_esports_rank_comment": "rank_top_n / hltv_aliases / tournament_min_known_teams：世界前 15 和「名队云集的赛事」两条的调参。HLTV 与 Liquipedia 队名写法不一致（Spirit vs Team Spirit），不一致的要在 hltv_aliases 里配映射；用 `python3 deploy/esports.py --rank` 核对。rank_top_n=0 关掉「世界前 N」，tournament_min_known_teams=0 关掉第 4 条。",
+  "_esports_rank_comment": "rank_top_n / hltv_aliases / tournament_min_known_teams / preview_run_time：世界前 15、名队云集、预告窗口三处的调参。HLTV 与 Liquipedia 队名写法不一致（Spirit vs Team Spirit），不一致的要在 hltv_aliases 里配映射；用 `python3 deploy/esports.py --rank` 核对。rank_top_n=0 关掉「世界前 N」，tournament_min_known_teams=0 关掉第 4 条。preview_run_time 必须和定时器 OnCalendar 一致。",
   "esports": {
     "enabled": true,
     "cn_teams": ["TYLOO", "Lynn Vision Gaming"]

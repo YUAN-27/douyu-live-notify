@@ -37,12 +37,13 @@
   },
 
   "_comment_esports": "CS2 每日赛程预告（esports.py，由 douyu-esports.timer 每天北京 09:30 拉起）。**这一段整个可以不要** —— 删掉就全用程序内置的默认值，功能照常工作。想改口径时才加上其中某几项。推送通道沿用上面的 channels，所以 NapCat 挂了它也发不出去，这跟开播提醒是同一个前提。",
-  "_comment_esports_scope": "口径：只发「今天还没开打」且满足**四条之一（或）**的比赛：① 有中国队（无条件）② 有世界前 15 的队伍（无条件，自动抓 HLTV 排名）③ 大赛**且**对阵里有知名队伍（两条都满足才发）④ 同一赛事当天凑够 tournament_min_known_teams 支「知名 / 世界前 15」的不同队伍（该赛事整体放行）。不满足就静默；连续静默满 calm_after_empty_days 天会发一条报平安，免得「今天没比赛」和「程序挂了」长得一样。",
+  "_comment_esports_scope": "口径：只发「窗口内还没开打」且满足**四条之一（或）**的比赛：① 有中国队（无条件）② 有世界前 15 的队伍（无条件，自动抓 HLTV 排名）③ 大赛**且**对阵里有知名队伍（两条都满足才发）④ 同一赛事在窗口内凑够 tournament_min_known_teams 支「知名 / 世界前 15」的不同队伍（该赛事整体放行）。**窗口 = 「现在 → 下一次预告时刻」，不是「今天」这个自然日** —— 只认自然日会让次日 00:00~09:30 的比赛永远没人预告（凌晨的比赛正好落在这个真空期）。窗口右端点由 preview_run_time 决定，是开区间，两期首尾相接。不满足就静默；连续静默满 calm_after_empty_days 天会发一条报平安，免得「今天没比赛」和「程序挂了」长得一样。",
+  "_comment_esports_window": "preview_run_time：**每天几点发预告**，窗口右端点就是它。**必须和 douyu-esports.timer 的 OnCalendar 一致** —— 只改定时器不改它，窗口会算偏：偏早会漏比赛、偏晚会重复推。改了定时器时刻记得同步改这里。写坏了（如 25:00）会退回 09:30 并照常工作。",
   "_comment_esports_keywords": "major_keywords：**子串**匹配赛事名（大小写不敏感）。页面上拿不到赛事分级（S/A/B 是客户端过滤，没写进 HTML），所以「算不算大赛」只能靠赛事名认，这份名单就是全部依据。注意第 3 条是「与」—— 光赛事名命中不会发，还得对阵里有知名/前 15 队伍，所以关键词写宽一点也不容易误发（例如 eXTREMESLAND 的预选赛里没有名队，就不会进预告）。",
   "_comment_esports_cn": "cn_teams：**精确匹配**队名（不是子串）。别用模糊匹配，否则 The MongolZ 这类会被误判进来 —— 蒙古国队伍不是中国队，别加。有它就**无条件发**，不受第 3 条那个「与」的约束。",
   "_comment_esports_notable": "notable_teams：**精确匹配**队名，同样大小写无所谓、但措辞必须和页面上完全一致。它现在**只和第 3 条、第 4 条联动**：要么是大赛且对面有它，要么同一赛事当天凑够了 4 支它。查队名用 `python3 esports.py --teams`，它会把页面上的真实队名连同「已收录 / 未收录」一起打出来，照着抄。学院队是独立队名：MOUZ NXT 不等于 MOUZ，Natus Vincere Junior 不等于 Natus Vincere，精确匹配下不会误收。⚠️ 别写重定向名：FURIA Esports 是重定向页，写成它会**永远匹配不上**，要写 FURIA。",
   "_comment_esports_rank": "rank_top_n / hltv_aliases / rank_ttl_hours：第 2 条「世界前 15」用。rank_top_n=0 可整条关掉（连 HLTV 都不请求）。**HLTV 的队名写法和 Liquipedia 不一致**（Spirit vs Team Spirit、G2 vs G2 Esports…），不一致的必须在 hltv_aliases 里配映射，否则那条筛不出来。核对映射用 `python3 esports.py --rank`。⚠️ 千万别用「查重定向自动补全」：Liquipedia 上 `Spirit` / `Aurora` 是**选手页**，自动映射会把世界第一映射到选手身上、然后静默漏发。",
-  "_comment_esports_tournament": "tournament_min_known_teams：第 4 条的门槛。同一赛事名下、今天还没开打的场次里，出现过多少支**不同的**「知名 ∪ 世界前 15」队伍。同队打两场只算一支，不跨赛事凑数，中国队不计入。设 0 可关掉这条。",
+  "_comment_esports_tournament": "tournament_min_known_teams：第 4 条的门槛。同一赛事名下、**窗口内还没开打**的场次里，出现过多少支**不同的**「知名 ∪ 世界前 15」队伍。同队打两场只算一支，不跨赛事凑数，中国队不计入。设 0 可关掉这条。",
   "esports": {
     "enabled": true,
     "ua_contact": "https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com",
@@ -79,6 +80,7 @@
     },
     "rank_ttl_hours": 168,
     "tournament_min_known_teams": 4,
+    "preview_run_time": "09:30",
     "fold_hint": 15,
     "calm_after_empty_days": 7
   }
