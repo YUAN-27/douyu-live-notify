@@ -184,6 +184,38 @@ for cf in card_font.otf CARD_FONT_LICENSE.txt make_card_font.py; do
   fi
 done
 
+# V2 HTML 大图卡（esports.py 渲染 1920x1080 时用）：两份模板 + fonts/ 字体目录。
+# esports.py 按「脚本同目录」找它们（RESULT_TEMPLATE_FILE / DAILY_TEMPLATE_FILE，
+# HTML_FONT_DIR=HERE/fonts）。缺了不致命 —— 会静默降级回 880px 旧卡，
+# 但那就白部署这一版了，所以缺失时给出显眼警告。
+for vf in result_template.html daily_template.html; do
+  if [[ -f "$UNIT_DIR/$vf" ]]; then
+    if [[ -f "$APP_DIR/$vf" ]] && cmp -s "$UNIT_DIR/$vf" "$APP_DIR/$vf"; then
+      echo "已放入 $APP_DIR/$vf（与原有版本一致）"
+    else
+      cp -a "$UNIT_DIR/$vf" "$APP_DIR/$vf"
+      echo "已放入 $APP_DIR/$vf"
+    fi
+  else
+    echo "⚠️ 没找到 $vf（V2 大图卡画不出来，会退回 880px 旧卡）"
+  fi
+done
+
+if [[ -d "$UNIT_DIR/fonts" ]]; then
+  mkdir -p "$APP_DIR/fonts"
+  for tf in "$UNIT_DIR"/fonts/*; do
+    bn="$(basename "$tf")"
+    if [[ -f "$APP_DIR/fonts/$bn" ]] && cmp -s "$tf" "$APP_DIR/fonts/$bn"; then
+      echo "已放入 $APP_DIR/fonts/$bn（与原有版本一致）"
+    else
+      cp -a "$tf" "$APP_DIR/fonts/$bn"
+      echo "已放入 $APP_DIR/fonts/$bn"
+    fi
+  done
+else
+  echo "⚠️ 没找到 fonts/ 目录（V2 大图卡画不出来，会退回 880px 旧卡）"
+fi
+
 # 画卡片要 Pillow。**装不上完全不影响推送** —— esports.py 会安静地退化成纯文本，
 # 所以这里只是「尽力装一下」，用的是只读查询 + 一次 apt，不阻断安装流程。
 if python3 -c "import PIL" >/dev/null 2>&1; then

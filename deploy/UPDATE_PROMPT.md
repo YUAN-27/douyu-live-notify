@@ -88,7 +88,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `f93d2269ef85a165` | 5403 |
 
-`deploy.zip` 整包：`01a57f00ae04e86a`（479.3 KB，44 个文件；比上一版多的 1 个文件是 `fonts/LICENSE-OFL.txt` 字体许可证）。
+`deploy.zip` 整包：`9d1787d5e4aacfb7`（479.7 KB，44 个文件；新增文件是 `fonts/LICENSE-OFL.txt` 字体许可证，且 install-watch.sh 已会自动部署两份模板与 fonts/）。
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
