@@ -320,11 +320,20 @@ cat <<'EOF'
 
     b) 看今天到底会发什么 —— **只抓取 + 打印，不发消息、不写状态**
        cd /opt/douyu-live-notify && python3 esports.py --check
-       如果没内容，那是「今天没有大赛、也没有中国队 / 知名队伍参赛」，正式跑会自动静默。
+       入选口径是四条（或）：① 有中国队  ② 有世界前 15 的队伍  ③ 大赛**且**有知名队伍
+       ④ 同一赛事当天凑够 4 支知名/前 15 队伍（该赛事整体放行）。
+       如果没内容，那是「今天这四条一条都没沾上」，正式跑会自动静默。
        连续静默满 7 天会发一条报平安 —— 免得「今天没比赛」和「程序挂了」长得一样。
+       输出里 `[info] 入选依据…` 逐条列出四条各中了几场，`--check` 还会逐场打印理由。
 
     b2) 想调白名单先核队名 —— **不发消息、不写状态**，把页面上的队名原样打出来：
        cd /opt/douyu-live-notify && python3 esports.py --teams
+
+    b3) 想核「世界前 15」的队名映射 —— **不发消息、不写状态**（会去请求一次 HLTV）：
+       cd /opt/douyu-live-notify && python3 esports.py --rank
+       哪支队标了「未映射」，就去 config.json 的 esports.hltv_aliases 补一条
+       （HLTV 写法 → Liquipedia 写法）。⚠️ 千万别用「查重定向自动补全」：
+       Liquipedia 上 `Spirit` / `Aurora` 是**选手页**，自动映射会把世界第一映射到选手身上。
 
     c) 想改口径（哪些算大赛 / 哪些算中国队 / 哪些算知名队伍）就编辑 config.json 的 esports 段。
        ⚠️ 整个 esports 段也可以不写，那样全用程序内置的默认值，功能照常。

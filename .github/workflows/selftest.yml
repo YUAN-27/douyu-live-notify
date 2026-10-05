@@ -6,6 +6,23 @@ on:
   pull_request:
 
 jobs:
+  secrets:
+    # 单独一个 job：它和 Python 版本无关，但必须**每次都跑**。
+    # 凭据一旦推进公开仓库就永久留在 git 历史里，事后删文件也删不掉。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 凭据体检（已跟踪文件里不该有任何真实凭据）
+        # CI 上只有全新 clone，所以只会走「形态」那一层；本机跑时还会多走
+        # 一层「和真实 config.json / .env 对账」，那一层是零误报的。
+        run: python check-secrets.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -22,7 +39,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: 编译检查
-        run: python -m py_compile watch.py selftest.py
+        # watchdog.py / esports.py 在 deploy/ 下，注意路径
+        run: python -m py_compile watch.py selftest.py deploy/watchdog.py deploy/esports.py check-secrets.py
 
       - name: 逻辑自检（不联网，24 项断言）
         run: python selftest.py
@@ -30,3 +48,11 @@ jobs:
       - name: 打印自检报告
         if: always()
         run: tail -20 selftest_result.txt || echo "（没有生成结果文件）"
+
+      - name: 看门狗自检（不联网、不碰 docker）
+        # 这两条以前漏在 CI 外面 —— watchdog.py 和 esports.py 一直在改，
+        # 但只有本机跑过。补进来，别等装到服务器上才发现。
+        run: python deploy/watchdog.py --selftest
+
+      - name: 赛程预告自检（不联网、不发消息、不写状态）
+        run: python deploy/esports.py --selftest

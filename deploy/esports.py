@@ -109,31 +109,78 @@ DEFAULT_CN_TEAMS = [
 # 这类小赛事里出场，光靠赛事名关键词会把它们全漏掉。用「有没有名队在打」兜底。
 #
 # ⚠️ 名字必须和 Liquipedia 页面上**完全一致**（大小写无所谓，措辞必须对）。
-#    实测踩到的例子（2026-09-30 从页面上核对）：
+#    实测踩到的例子：
 #      `Ninjas in Pyjamas` —— **不是** `NIP`
 #      `PaiN Gaming`       —— **不是** `PaiN`
 #      `Team Liquid`       —— **不是** `Liquid`
 #      `FaZe Clan`         —— **不是** `FaZe`
 #      `Natus Vincere`     —— **不是** `NAVI`
+#      `FURIA`             —— **不是** `FURIA Esports`（这个曾在名单里待过，等于永远匹配不上）
 #    大小写是忽略的：`HEROIC` / `heroic`、`Fnatic` / `fnatic` 都能匹配。
 #    拿不准就跑 `python3 esports.py --teams`，把页面上的真实队名打出来照着抄
 #    （它会同时标出哪些已收录、哪些还没收录）。
 #
 # 注：**学院队是独立队名**，精确匹配下不会误收。例如 `Natus Vincere Junior`
 #     和 `MOUZ NXT` 与主队 `Natus Vincere`、`MOUZ` 互不影响。
+#     `Falcons Force` 也不是 `Team Falcons`，同理不会被误收。
 DEFAULT_NOTABLE_TEAMS = [
-    # —— 这批的写法是 2026-09-30 从 Liquipedia 实际页面上核对过的 ——
+    # —— 2026-09-30 从 Liquipedia 实际页面上核对过 ————
     "100 Thieves", "3DMAX", "Alliance", "Astralis", "B8", "BIG", "FaZe Clan",
     "FlyQuest", "Fnatic", "GamerLegion", "HEROIC", "Imperial Esports",
     "Luminosity Gaming", "M80", "Nemiga Gaming", "Ninjas in Pyjamas", "NRG",
     "PaiN Gaming", "SAW", "Sangal Esports", "SINNERS Esports", "Team Liquid",
     "Wildcard",
-    # —— 这批按 Liquipedia 惯用写法，还没在本页出现过，用 --teams 核对着补 ——
+    # —— 这批是 2026-10-05 用 Liquipedia 的 category 字段逐个验真过的 ——
+    #    （`prop=categories` 里带「… Teams」才是战队页；否则可能是同名的选手页）
     "9z Team", "Aurora Gaming", "Cloud9", "ENCE", "Eternal Fire",
-    "FURIA Esports", "G2 Esports", "Gaimin Gladiators", "Legacy", "MIBR", "MOUZ",
+    "FURIA", "G2 Esports", "Gaimin Gladiators", "Legacy", "MIBR", "MOUZ",
     "Natus Vincere", "OG", "Passion UA", "Team Falcons", "Team Spirit",
     "Team Vitality", "The MongolZ", "Virtus.pro",
 ]
+
+# HLTV 队名 → Liquipedia 队名。**只有写法不一致的才需要写进来。**
+#
+# 为什么需要这张表：世界排名从 HLTV 抓，但比赛页在 Liquipedia，两边**队名写法不一样**。
+# HLTV 写 `Spirit`，Liquipedia 的战队页叫 `Team Spirit`。照原样拿 HLTV 的名字去匹配
+# Liquipedia 的比赛页，会**全部匹配不上、而且不报错** —— 静默漏发，最难查的那种。
+#
+# ⚠️ **不要用「查重定向自动补全」的办法**。实测过：Liquipedia 上确实存在
+#    标题就叫 `Spirit` 和 `Aurora` 的页面，但它们是**选手个人页**，不是战队。
+#    自动补全会把「HLTV 世界第 1」映射到一个选手身上，然后静默失效。
+#    所以这张表只能**逐个核对后手工维护**（`prop=categories` 里带「… Teams」才是战队页）。
+#
+# 核对日期 2026-10-05（对应 HLTV 2026-09-28 那期排名）：
+#   HLTV 写法         → Liquipedia 战队页
+#   Spirit            → Team Spirit          （`Spirit` 是选手页，别搞错）
+#   Vitality          → Team Vitality
+#   FURIA             → FURIA                （同名，不用写；列出来是为了说明已核对）
+#   MOUZ              → MOUZ                 （同名）
+#   Falcons           → Team Falcons
+#   Legacy            → Legacy               （同名）
+#   FUT               → FUT Esports
+#   G2                → G2 Esports
+#   Aurora            → Aurora Gaming        （`Aurora` 是选手页，别搞错）
+#   Natus Vincere     → Natus Vincere        （同名）
+#   Astralis          → Astralis             （同名）
+#   MIBR              → MIBR                 （同名）
+#   FaZe              → FaZe Clan
+#   B8                → B8                   （同名）
+#   BETBOOM           → BetBoom Team         （Liquipedia 上根本没有 BETBOOM 这个标题）
+#
+# 没写进这张表、又不是同名的队，会在运行时打 `[warn]` 提醒（见 resolve_rank_names），
+# 不会静默漏掉 —— 新队伍进前十时照着上面那行抄一遍加法即可。
+DEFAULT_HLTV_ALIASES = {
+    "Spirit": "Team Spirit",
+    "Vitality": "Team Vitality",
+    "Falcons": "Team Falcons",
+    "FUT": "FUT Esports",
+    "G2": "G2 Esports",
+    "Aurora": "Aurora Gaming",
+    "FaZe": "FaZe Clan",
+    "BETBOOM": "BetBoom Team",
+    # 下面这些两边写法一致，不用映射。列出来是为了下次核对时一眼看到「已核过」。
+    # FURIA / MOUZ / Legacy / Natus Vincere / Astralis / MIBR / B8
+}
 
 ESPORT_DEFAULTS = {
     # 总开关。关掉后本脚本立刻退出，systemd 那边不会当成失败。
@@ -143,6 +190,14 @@ ESPORT_DEFAULTS = {
     "major_keywords": DEFAULT_MAJOR_KEYWORDS,
     "cn_teams": DEFAULT_CN_TEAMS,
     "notable_teams": DEFAULT_NOTABLE_TEAMS,
+    # ---- 世界排名（HLTV）----
+    # 抓 HLTV 世界排名的前几名，用来做「有世界前 N 的队伍参赛」这条。
+    "rank_top_n": 15,
+    "hltv_aliases": DEFAULT_HLTV_ALIASES,
+    # 排名缓存多久（小时）。HLTV 每周一更新一次，所以 7 天足够，别设太小徒增请求。
+    "rank_ttl_hours": 168,
+    # 同一个赛事当天出现多少支「已知队伍」就把该赛事的比赛整体放行。0 = 关掉这条。
+    "tournament_min_known_teams": 4,
     # 超过多少场就开始折叠（只列前 N 场）。0 = 不折叠。
     "fold_hint": 15,
     # 连续静默多少天后发一条「报平安」，之后每满这么多天再发一次。0 = 从不发。
@@ -183,16 +238,16 @@ def build_ua(es):
     return "douyu-live-notify/%s (+%s)" % (VERSION, contact or "contact-not-set")
 
 
-def fetch_once(url, ua, timeout=25):
+def fetch_once(url, ua, timeout=25, accept="application/json"):
     """发一次请求。返回 dict：ok / status / text / error。
 
-    http_request 已经处理了 gzip 解压和自定义头覆盖，这里只要把 Liquipedia
-    要求的两个头传进去（它的默认 Accept-Encoding 是 identity，会被我们覆盖）。
+    http_request 已经处理了 gzip 解压和自定义头覆盖，这里只要把要求的头传进去
+    （它的默认 Accept-Encoding 是 identity，会被我们覆盖）。
     """
     try:
         text = watch.http_request(url, headers={
             "User-Agent": ua,
-            "Accept": "application/json",
+            "Accept": accept,
             "Accept-Encoding": "gzip",
         }, timeout=timeout)
         return {"ok": True, "status": 200, "text": text or "", "error": ""}
@@ -257,6 +312,156 @@ def extract_html(text):
     if not html_text:
         return None, "parse.text 是空的"
     return html_text, ""
+
+
+# ==========================================================================
+# 世界排名（HLTV）
+# ==========================================================================
+
+# HLTV 的排名页。请求 `/ranking/teams/` 会 302 到当前那一期的带日期 URL，
+# urllib 默认跟随重定向，所以直接请求这个短地址即可，不用自己算日期。
+HLTV_RANK_URL = "https://www.hltv.org/ranking/teams/"
+RANK_BLOCK_MARK = '<div class="ranked-team standard-box">'
+RANK_CACHE_FILE = os.path.join(HERE, "rank_cache.json")
+
+
+def parse_hltv_rank(html_text, top_n=15):
+    """从 HLTV 排名页里切出前 top_n 名。返回 [{"pos": 1, "name": "Spirit"}, ...]。
+
+    锚点是 `<div class="ranked-team standard-box">`（实测一页 251 个块）。
+    每块的结构（2026-10 实测）：
+        <span class="position wide-position">#1</span>
+        <span class="name">Spirit</span>
+
+    ⚠️ 取的是 `.name` 里的**显示名**，不是 `img alt` —— 两者实测一致，
+    但 `.name` 更贴近用户看到的写法，万一将来分叉，跟人能对得上的那个更该信。
+    """
+    if not html_text:
+        return []
+    blocks = re.findall(
+        re.escape(RANK_BLOCK_MARK) + r"(.*?)(?=" + re.escape(RANK_BLOCK_MARK) + r"|\Z)",
+        html_text, re.S)
+    out = []
+    for b in blocks:
+        mname = re.search(r'class="name">([^<]+)<', b)
+        if not mname:
+            continue
+        name = clean(mname.group(1))
+        if not name:
+            continue
+        mpos = re.search(r'class="position[^"]*">\s*#(\d+)', b)
+        out.append({"pos": int(mpos.group(1)) if mpos else len(out) + 1, "name": name})
+        if top_n and len(out) >= top_n:
+            break
+    return out
+
+
+def resolve_rank_names(rank, es):
+    """把 HLTV 的队名翻成 Liquipedia 队名。返回 (names, unmapped)。
+
+    翻不出来的**原样保留**，同时记进 unmapped 交给调用方打 `[warn]` ——
+    故意不静默丢弃：静默丢掉就会变成「这条规则看着在跑、实际漏掉一半」，
+    正是这个功能最难查的故障形态。
+    """
+    raw_alias = es.get("hltv_aliases")
+    alias_lc = {}
+    if isinstance(raw_alias, dict):
+        for k, v in raw_alias.items():
+            if k and v:
+                alias_lc[str(k).strip().lower()] = str(v).strip()
+    known_lc = {str(t).strip().lower() for t in (es.get("notable_teams") or []) if t}
+
+    names, unmapped = [], []
+    for it in rank:
+        n = str(it.get("name") or "").strip()
+        if not n:
+            continue
+        mapped = alias_lc.get(n.lower())
+        if mapped:
+            out = mapped
+        else:
+            out = n
+            # 写法已经在知名名单里出现过 → 说明这个写法是对的，不用提醒；
+            # 两边都没见过 → 很可能写法不一致，提醒去核对。
+            if n.lower() not in known_lc:
+                unmapped.append(it)
+        if out not in names:
+            names.append(out)
+    return names, unmapped
+
+
+def load_rank_cache(path=RANK_CACHE_FILE):
+    """读排名缓存。只在抓取失败时当兜底用，正常路径不读它。"""
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            d = json.load(fp)
+        if isinstance(d, dict) and isinstance(d.get("names"), list) and d["names"]:
+            return d
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_rank_cache(rank, names, path=RANK_CACHE_FILE):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump({
+                "fetched_at": datetime.now(CST).isoformat(timespec="seconds"),
+                "rank": rank,
+                "names": names,
+            }, fp, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log("[warn] 排名缓存写不进去（不影响本轮）：%s" % exc)
+
+
+def get_rank(es, write_cache=True):
+    """取世界排名，返回 dict：
+
+        ok / disabled / rank / names / unmapped / source / error
+
+    `source` 是 "hltv" / "cache" / ""，用来解释这批名字是哪来的。
+    抓取失败**不是**致命错误 —— 世界排名只是四条入选依据之一，
+    另外三条（中国队 / 大赛+知名 / 名队云集的赛事）照常工作。所以这里只打 [warn]。
+    """
+    top_n = max(0, int(es.get("rank_top_n") or 0))
+    if top_n <= 0:
+        log("[info] esports.rank_top_n = 0，本轮不做「世界前 N」这条筛选")
+        return {"ok": False, "disabled": True, "rank": [], "names": [],
+                "unmapped": [], "source": "", "error": ""}
+
+    ua = build_ua(es)
+    timeout = max(5, int(es.get("http_timeout") or 25))
+    r = fetch_once(HLTV_RANK_URL, ua, timeout=timeout, accept="text/html")
+    rank = parse_hltv_rank(r["text"], top_n) if r["ok"] else []
+    if not rank:
+        why = r["error"] or "页面结构可能变了，一个排名块都没切出来"
+        cached = load_rank_cache()
+        if cached:
+            names, unmapped = resolve_rank_names(
+                [{"pos": None, "name": x} for x in cached["names"]], es)
+            log("[warn] 世界排名抓取失败（%s），改用 %s 的缓存"
+                % (why, cached.get("fetched_at") or "上次"))
+            return {"ok": True, "disabled": False, "rank": [], "names": names,
+                    "unmapped": unmapped, "source": "cache", "error": why}
+        log("[warn] 世界排名抓取失败（%s），本轮**没有**「世界前 %d」这条依据"
+            % (why, top_n))
+        log("        另外三条（中国队 / 大赛+知名队伍 / 名队云集的赛事）不受影响。")
+        return {"ok": False, "disabled": False, "rank": [], "names": [],
+                "unmapped": [], "source": "", "error": why}
+
+    names, unmapped = resolve_rank_names(rank, es)
+    if unmapped:
+        log("[warn] 世界前 %d 里有 %d 支队伍的写法没核对过，可能匹配不上 Liquipedia："
+            % (top_n, len(unmapped)))
+        for it in unmapped:
+            log("        第 %s 名 %s" % (it.get("pos"), it.get("name")))
+        log("        核对办法：`--teams` 看页面真实队名；确认后写进 esports.hltv_aliases。")
+    if write_cache:
+        save_rank_cache(rank, names)
+    return {"ok": True, "disabled": False, "rank": rank, "names": names,
+            "unmapped": unmapped, "source": "hltv", "error": ""}
 
 
 # ==========================================================================
@@ -351,33 +556,62 @@ def has_team(m, names):
     return any((t or "").strip().lower() in allow for t in (m.get("teams") or []))
 
 
-def why_selected(m, es):
-    """这场比赛凭哪一条被选中：'major' / 'cn' / 'notable' / None。
+def known_team_set(es, rank_names=None):
+    """「已知队伍」的集合（小写）= 知名名单 ∪ 世界前 N。
 
-    单独抽出来，是为了让 --check / --teams 能说清「它是靠什么进来的」——
-    调白名单时不用猜。
+    只用于**赛事维度的计数**（同个赛事凑够几支算「名队云集」）。
+    中国队另有一套「无条件发」的规则，不并进来 —— 两件事分开才好解释。
     """
-    if is_major(m, es.get("major_keywords")):
-        return "major"
+    s = {str(t).strip().lower() for t in (es.get("notable_teams") or []) if t}
+    s |= {str(t).strip().lower() for t in (rank_names or []) if t}
+    return s
+
+
+# 入选原因 → 中文标签。日志和 --check 都用它，免得两处文案走偏。
+REASON_LABELS = {
+    "cn": "中国队",
+    "top15": "世界前 N",
+    "major+notable": "大赛+知名",
+    "tournament": "名队云集的赛事",
+}
+
+
+def why_selected(m, es, rank_names=None, tour_known=None, min_known=0):
+    """这场比赛凭哪一条被选中。四条是**或**关系，按「越具体越优先」只记第一条：
+
+      'cn'            有中国队参赛            → 无条件发
+      'top15'         有世界前 N 的队伍参赛    → 无条件发
+      'major+notable' 大赛 **且** 有知名队伍   → **两条同时满足**才发
+      'tournament'    同一赛事当天凑够 N 支已知队伍 → 该赛事当天的比赛整体放行
+
+    ⚠️ 第三条是「与」不是「或」：只满足大赛、或只满足有知名队伍，都**不算**。
+    这是 2026-10-05 按用户要求收紧的 —— 之前是三条或关系，太吵。
+    """
     if has_team(m, es.get("cn_teams")):
         return "cn"
-    if has_team(m, es.get("notable_teams")):
-        return "notable"
+    if rank_names and has_team(m, rank_names):
+        return "top15"
+    if is_major(m, es.get("major_keywords")) and has_team(m, es.get("notable_teams")):
+        return "major+notable"
+    if min_known > 0 and tour_known:
+        tour = (m.get("tour") or "").strip()
+        if tour and (tour_known.get(tour) or 0) >= min_known:
+            return "tournament"
     return None
 
 
-def select_today(matches, now, es):
-    """挑出「今天还没开打、对阵已定，且 属于大赛 / 有中国队 / 有知名队伍」的比赛。
+def select_with_reasons(matches, now, es, rank_names=None):
+    """返回 (入选场次, {赛事名: 已知队伍数}, 计数)。
 
-    为什么只要「还没开打」：这是一条**赛程预告**，09:30 发出去的时候，
-    今天凌晨那几场早就打完了，列出来只会让人以为还有比赛可看。
+    拆出这一层是为了让筛选和统计**用同一份中间结果**，不会出现
+    「列表里有这场、但理由统计说没有」这种自相矛盾。
     """
     day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day1 = day0 + timedelta(days=1)
     t0, t1 = day0.timestamp(), day1.timestamp()
     nowts = now.timestamp()
 
-    out = []
+    todo = []
     for m in matches:
         if m.get("tbd"):                       # TBD vs TBD：对阵都没定
             continue
@@ -387,20 +621,55 @@ def select_today(matches, now, es):
             continue
         if m["ts"] < nowts:                     # 只预告还没开打的
             continue
-        if not why_selected(m, es):
-            continue
-        out.append(m)
-    return out
+        todo.append(m)
+
+    min_known = int(es.get("tournament_min_known_teams") or 0)
+    known = known_team_set(es, rank_names)
+    tour_known = {}
+    if min_known > 0 and known:
+        # 只数「今天还没开打」的场次；同一支队在同一个赛事里打两场只算一支。
+        for m in todo:
+            tour = (m.get("tour") or "").strip()
+            if not tour:
+                continue
+            slot = tour_known.setdefault(tour, set())
+            for t in m["teams"]:
+                if (t or "").strip().lower() in known:
+                    slot.add(t.strip().lower())
+        tour_known = {k: len(v) for k, v in tour_known.items()}
+
+    picked, counts = [], {"cn": 0, "top15": 0, "major+notable": 0, "tournament": 0}
+    for m in todo:
+        r = why_selected(m, es, rank_names, tour_known, min_known)
+        if r:
+            picked.append(m)
+            counts[r] += 1
+    return picked, tour_known, counts
 
 
-def pick_reasons(picked, es):
+def select_today(matches, now, es, rank_names=None):
+    """挑出「今天还没开打、对阵已定，且满足入选口径」的比赛（只要场次列表）。
+
+    口径见 why_selected。为什么只要「还没开打」：这是一条**赛程预告**，
+    09:30 发出去的时候，今天凌晨那几场早就打完了，列出来只会让人以为还有比赛可看。
+    """
+    return select_with_reasons(matches, now, es, rank_names)[0]
+
+
+def pick_reasons(picked, es, rank_names=None, tour_known=None, min_known=0):
     """统计这些场次各靠什么进来的，供 --check 打印。"""
-    counts = {"major": 0, "cn": 0, "notable": 0}
+    counts = {"cn": 0, "top15": 0, "major+notable": 0, "tournament": 0}
     for m in picked:
-        r = why_selected(m, es)
+        r = why_selected(m, es, rank_names, tour_known, min_known)
         if r:
             counts[r] += 1
     return counts
+
+
+def reasons_summary(counts):
+    """把计数拼成一行，顺序固定（方便对比两次运行的差异）。"""
+    return " / ".join("%s %d 场" % (REASON_LABELS[k], counts.get(k, 0))
+                      for k in ("cn", "top15", "major+notable", "tournament"))
 
 
 # ==========================================================================
@@ -599,13 +868,32 @@ def run_once(cfg, args):
         log("        核对：https://liquipedia.net/counterstrike/Liquipedia:Matches")
         return 1
 
-    picked = select_today(matches, now, es)
+    # ---- 世界排名（HLTV，可选依据）----
+    # --check 不写缓存：它承诺「不发送、不写状态」，那就不该留下任何痕迹。
+    rank = get_rank(es, write_cache=not args.check)
+    log("[info] 世界前 %s：%s"
+        % (es.get("rank_top_n"),
+           ("取到 %d 支（来源：%s）" % (len(rank["names"]), rank["source"]))
+           if rank["ok"] else ("已关闭" if rank["disabled"] else "本轮不可用")))
+
+    picked, tour_known, rc = select_with_reasons(matches, now, es, rank["names"])
     log("[info] 页面共 %d 场，其中今天还没开打且符合条件的有 %d 场"
         % (len(matches), len(picked)))
     if picked:
-        rc = pick_reasons(picked, es)
-        log("[info] 选择依据（每场只记第一条命中的）：大赛 %d 场 / 中国队 %d 场 / 知名队伍 %d 场"
-            % (rc["major"], rc["cn"], rc["notable"]))
+        log("[info] 入选依据（每场只记第一条命中的）：%s" % reasons_summary(rc))
+        # 「名队云集的赛事」是兜底那条，命中它的场次往往已经被更靠前的依据捞进来了，
+        # 所以在计数里会显示 0 场 —— 但它的贡献其实不小。这里单独把它说清楚。
+        min_known = int(es.get("tournament_min_known_teams") or 0)
+        if min_known > 0:
+            crowded = {}
+            for m in picked:
+                tour = (m.get("tour") or "").strip()
+                if tour and (tour_known.get(tour) or 0) >= min_known:
+                    crowded[tour] = crowded.get(tour, 0) + 1
+            if crowded:
+                log("[info] 名队云集（已知队伍 >= %d 支）的赛事：%s"
+                    % (min_known, "；".join("%s（入选 %d 场）" % (k, v)
+                                            for k, v in sorted(crowded.items()))))
 
     # ---- 组装 ----
     state = load_state()
@@ -627,6 +915,16 @@ def run_once(cfg, args):
     if args.check:
         log("")
         log(body)
+        if picked:
+            log("")
+            log("[check] 逐场入选依据（每场只记第一条命中的）：")
+            min_known = int(es.get("tournament_min_known_teams") or 0)
+            for m in picked:
+                r = why_selected(m, es, rank["names"], tour_known, min_known)
+                d = datetime.fromtimestamp(m["ts"], CST)
+                log("        %s  %-10s %s"
+                    % (d.strftime("%H:%M"), REASON_LABELS.get(r, r or "?"),
+                       " vs ".join(m["teams"])))
         log("\n[check] 以上是将会发送的内容（未发送、未写状态）")
         return 0
 
@@ -648,11 +946,15 @@ def run_once(cfg, args):
 # ==========================================================================
 
 def cmd_list_teams(cfg):
-    """把页面上出现的队名全打出来，并标出它命中哪个白名单 —— 维护白名单用。
+    """把页面上出现的队名全打出来，并标出它命中哪个名单 —— 维护白名单用。
 
-    只读：不发消息、不写状态。但**会真的联网抓一次**，所以别放进循环里跑。
+    只读：不发消息、不写状态（连排名缓存都不写）。但**会真的联网抓一次**，
+    所以别放进循环里跑。
     """
     es = resolve_config(cfg)
+    rank = get_rank(es, write_cache=False)
+    rank_names = rank["names"]
+
     r = fetch_matches(es)
     if r is None or not r["ok"]:
         log("[error] 抓取失败：%s" % ((r or {}).get("error") or "未知错误"))
@@ -669,27 +971,87 @@ def cmd_list_teams(cfg):
     seen = {}
     for m in matches:
         for name in m["teams"]:
-            slot = seen.setdefault(name, {"cn": False, "notable": False, "n": 0})
+            slot = seen.setdefault(
+                name, {"cn": False, "notable": False, "top15": False, "n": 0})
             slot["n"] += 1
             if has_team({"teams": [name]}, es.get("cn_teams")):
                 slot["cn"] = True
             if has_team({"teams": [name]}, es.get("notable_teams")):
                 slot["notable"] = True
+            if rank_names and has_team({"teams": [name]}, rank_names):
+                slot["top15"] = True
 
     log("页面共 %d 场，出现 %d 个不同队名。" % (len(matches), len(seen)))
-    log("标记：[中国队] / [知名] / [未收录]。想把某队加进白名单，"
-        "把名字**原样**抄进 config.json 的 esports.cn_teams / notable_teams。")
+    log("标记：[中国队] / [知名] / [世界前%s]。想把某队加进白名单，"
+        "把名字**原样**抄进 config.json 的 esports.cn_teams / notable_teams。"
+        % es.get("rank_top_n"))
     log("")
     for name in sorted(seen, key=lambda x: x.lower()):
         it = seen[name]
-        tags = ("[中国队]" if it["cn"] else "") + ("[知名]" if it["notable"] else "")
-        log("  %-10s %-28s 出场 %d 次" % (tags or "[未收录]", name, it["n"]))
+        tags = (("[中国队]" if it["cn"] else "")
+                + ("[知名]" if it["notable"] else "")
+                + ("[世界前%s]" % es.get("rank_top_n") if it["top15"] else ""))
+        log("  %-12s %-28s 出场 %d 次" % (tags or "[未收录]", name, it["n"]))
 
-    blanks = [n for n in seen if not seen[n]["cn"] and not seen[n]["notable"]]
+    blanks = [n for n in seen
+              if not seen[n]["cn"] and not seen[n]["notable"] and not seen[n]["top15"]]
     log("")
     log("未收录 %d 个 —— 其中觉得算「知名」的，抄进 notable_teams 即可。" % len(blanks))
     log("⚠️ 精确匹配：大小写无所谓，但**措辞必须原样**。"
         "`Team Liquid` 和 `Liquid`、`NIP` 和 `Ninjas in Pyjamas` 不是一回事。")
+    return 0
+
+
+def cmd_show_rank(cfg):
+    """打印 HLTV 世界前 N，以及它翻成 Liquipedia 队名后的结果 —— 核对别名用。
+
+    只读：不发消息、不写状态（不写排名缓存）。这是排查
+    「世界前 15 那条怎么没生效」的第一手段：一眼看出哪个名字没映射上。
+    """
+    es = resolve_config(cfg)
+    rank = get_rank(es, write_cache=False)
+    top_n = es.get("rank_top_n")
+    if rank["disabled"]:
+        log("[info] esports.rank_top_n = 0，「世界前 N」这条已关闭，没什么可看的")
+        return 0
+    if not rank["ok"]:
+        log("[error] 拿不到世界排名：%s" % rank["error"])
+        return 1
+
+    log("HLTV 世界前 %s（来源：%s）" % (top_n, rank["source"]))
+    log("")
+    log("  %-5s %-18s %s" % ("名次", "HLTV 写法", "→ Liquipedia 队名"))
+    log("  " + "-" * 56)
+
+    raw_alias = es.get("hltv_aliases")
+    alias_lc = {}
+    if isinstance(raw_alias, dict):
+        for k, v in raw_alias.items():
+            if k and v:
+                alias_lc[str(k).strip().lower()] = str(v).strip()
+    known_lc = {str(t).strip().lower() for t in (es.get("notable_teams") or []) if t}
+
+    for it in rank["rank"]:
+        n = it["name"]
+        mapped = alias_lc.get(n.lower())
+        if mapped:
+            note = "→ %s   （别名表）" % mapped
+        elif n.lower() in known_lc:
+            note = "→ %s   （同名，已知名单里核对过）" % n
+        else:
+            note = "→ %s   ⚠️ 写法没核对过，可能匹配不上" % n
+        log("  #%-4s %-18s %s" % (it.get("pos"), n, note))
+
+    log("")
+    log("本轮实际用于匹配的队名（%d 个）：%s" % (len(rank["names"]), "、".join(rank["names"])))
+    if rank["unmapped"]:
+        log("")
+        log("⚠️ 有 %d 支的写法没核对过。核对办法：`--teams` 看页面上的真实队名，"
+            "确认后写进 config.json 的 esports.hltv_aliases（HLTV 写法 → Liquipedia 写法）。"
+            % len(rank["unmapped"]))
+    log("")
+    log("⚠️ 别用「查重定向自动补全」的办法：Liquipedia 上 `Spirit`、`Aurora` 是**选手页**，"
+        "自动补全会把世界第一映射到选手身上，然后静默失效。")
     return 0
 
 
@@ -759,6 +1121,45 @@ FIXTURE_HTML = """
 </div>
 """
 
+# HLTV 排名页的骨架。结构照 2026-10-05 实测的样子裁：
+#   外层 <div class="ranked-team standard-box">，里面 .position 是名次、.name 是队名。
+# 故意留了「同一块里出现两次 .name 之外的东西」，用来验证我们取的是 .name 而不是别的。
+FIXTURE_RANK_HTML = """
+<div class="ranked-team standard-box">
+  <div class="bg-holder">
+    <div class="ranking-header">
+      <span class="position wide-position">#1</span>
+      <span class="team-logo"><img alt="Spirit" title="Spirit"></span>
+      <div class="relative">
+        <div class="teamLine sectionTeamPlayers"><span class="name">Spirit</span><span class="points">(1000 HLTV points)</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="ranked-team standard-box">
+  <div class="bg-holder">
+    <div class="ranking-header">
+      <span class="position wide-position">#2</span>
+      <span class="team-logo"><img alt="Vitality" title="Vitality"></span>
+      <div class="relative">
+        <div class="teamLine sectionTeamPlayers"><span class="name">Vitality</span><span class="points">(900 HLTV points)</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="ranked-team standard-box">
+  <div class="bg-holder">
+    <div class="ranking-header">
+      <span class="position wide-position">#3</span>
+      <span class="team-logo"><img alt="FURIA" title="FURIA"></span>
+      <div class="relative">
+        <div class="teamLine sectionTeamPlayers"><span class="name">FURIA</span><span class="points">(870 HLTV points)</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
 
 class _T:
     def __init__(self):
@@ -810,32 +1211,42 @@ def selftest():
     t.check("空输入不炸", parse_matches("") == [])
 
     # ---- 2. 筛选 ----
-    print("\n-- 2. 筛选（大赛 / 中国队 / 时间窗）--")
+    print("\n-- 2. 筛选（中国队 / 世界前N / 大赛且知名 / 时间窗）--")
     base = datetime(2026, 9, 30, 9, 30, tzinfo=CST)
     ts = lambda h, m=0: base.replace(hour=h, minute=m).timestamp()
 
     mk = _mk
+    TOP = ["Team Spirit", "Team Vitality", "G2 Esports"]   # 假装的世界前 N
+
     cases = [
-        ("大赛关键词命中", mk(ts(14), ["A", "B"], "BLAST Premier Fall"), True),
-        ("关键词大小写不敏感", mk(ts(14), ["A", "B"], "blast premier"), True),
-        ("中国队命中", mk(ts(14), ["TYLOO", "The MongolZ"], "Stake Ranked"), True),
-        ("中国队大小写不敏感", mk(ts(14), ["tyloo", "x"], "Stake Ranked"), True),
-        ("知名队伍命中", mk(ts(14), ["FaZe Clan", "X"], "Stake Ranked"), True),
-        ("知名队伍大小写不敏感", mk(ts(14), ["faze clan", "X"], "Stake Ranked"), True),
-        ("三条都不沾 → 丢掉", mk(ts(14), ["A", "B"], "Stake Ranked"), False),
-        ("蒙古队不算中国队（且不在知名名单里）",
-         mk(ts(14), ["IHC", "ATOX"], "Stake Ranked"), False),
+        # 1) 有中国队 —— 无条件发，赛事名和对手都不沾也发
+        ("中国队 → 无条件发", mk(ts(14), ["TYLOO", "X"], "Stake Ranked"), None, True),
+        ("中国队大小写不敏感", mk(ts(14), ["tyloo", "x"], "Stake Ranked"), None, True),
+        # 2) 有世界前 N —— 无条件发
+        ("世界前N → 无条件发", mk(ts(14), ["Team Spirit", "X"], "Stake Ranked"), TOP, True),
+        # 3) 大赛 **且** 有知名队伍 —— 两条同时满足才发
+        ("大赛 + 知名 → 发", mk(ts(14), ["FaZe Clan", "X"], "BLAST Premier Fall"), None, True),
+        ("只有大赛、没知名队伍 → 丢掉", mk(ts(14), ["A", "B"], "BLAST Premier Fall"), None, False),
+        ("只有知名队伍、不是大赛 → 丢掉",
+         mk(ts(14), ["FaZe Clan", "X"], "Stake Ranked"), None, False),
+        ("大小写不敏感（blast premier + faze clan）",
+         mk(ts(14), ["faze clan", "X"], "blast premier"), None, True),
+        # 4) 其它边界
+        ("四条都不沾 → 丢掉", mk(ts(14), ["A", "B"], "Stake Ranked"), None, False),
+        ("蒙古队既不算中国队也不在知名名单里",
+         mk(ts(14), ["IHC", "ATOX"], "Stake Ranked"), None, False),
         ("学院队不算主队（MOUZ NXT）",
-         mk(ts(14), ["MOUZ NXT", "X"], "Stake Ranked"), False),
-        ("TBD 丢掉", mk(ts(14), ["TBD", "TBD"], "BLAST Premier", tbd=True), False),
-        ("队名不全丢掉", mk(ts(14), ["TYLOO"], "BLAST Premier"), False),
-        ("已开打的丢掉", mk(ts(8), ["TYLOO", "B"], "BLAST Premier"), False),
+         mk(ts(14), ["MOUZ NXT", "X"], "BLAST Premier Fall"), None, False),
+        ("TBD 丢掉", mk(ts(14), ["TBD", "TBD"], "BLAST Premier", tbd=True), None, False),
+        ("队名不全丢掉", mk(ts(14), ["TYLOO"], "BLAST Premier"), None, False),
+        ("已开打的丢掉", mk(ts(8), ["TYLOO", "B"], "BLAST Premier"), None, False),
         ("明天的丢掉",
-         mk((base + timedelta(days=1)).timestamp(), ["TYLOO", "B"], "IEM"), False),
-        ("赛事名为空不算大赛", mk(ts(14), ["A", "B"], ""), False),
+         mk((base + timedelta(days=1)).timestamp(), ["TYLOO", "B"], "IEM"), None, False),
+        ("赛事名为空不算大赛，但中国队仍发", mk(ts(14), ["TYLOO", "B"], ""), None, True),
+        ("赛事名为空 + 没中国队 → 丢掉", mk(ts(14), ["A", "B"], ""), None, False),
     ]
-    for name, m, want in cases:
-        got = select_today([m], base, es)
+    for name, m, top, want in cases:
+        got = select_today([m], base, es, top)
         t.check(name, bool(got) == want, "want=%s got=%s" % (want, bool(got)))
 
     t.check("蒙古队不算中国队（直接断言 has_team）",
@@ -848,6 +1259,70 @@ def selftest():
     t.check("边界：今天 23:59 → 保留",
             bool(select_today([mk(ts(23, 59), ["TYLOO", "B"], "IEM")], base, es)))
     t.check("空列表安全", select_today([], base, es) == [])
+
+    # ---- 2b. 「名队云集的赛事」整体放行 ----
+    print("\n-- 2b. 名队云集的赛事（同一赛事当天 >= 4 支已知队伍）--")
+    tour = "Stake Ranked Season 9"
+    crowd = [
+        mk(ts(10), ["FaZe Clan", "M80"], tour),          # 2 支知名
+        mk(ts(12), ["Team Liquid", "Wildcard"], tour),   # 再 2 支 → 共 4 支
+        mk(ts(14), ["Nobody A", "Nobody B"], tour),      # 一对无名队
+    ]
+    t.check("凑够 4 支 → 该赛事当天的比赛都发（含无名队那场）",
+            len(select_today(crowd, base, es)) == 3,
+            "实际 %d 场" % len(select_today(crowd, base, es)))
+    t.check("同一支队打两场只算一支（3 支 → 不放行）",
+            select_today([mk(ts(10), ["FaZe Clan", "M80"], tour),
+                          mk(ts(12), ["FaZe Clan", "Wildcard"], tour),
+                          mk(ts(14), ["Nobody A", "Nobody B"], tour)], base, es) == [])
+    t.check("只有 2 支时不放行", select_today(crowd[:1], base, es) == [])
+    t.check("tournament_min_known_teams = 0 时这条整条关掉",
+            select_today(crowd, base, dict(es, tournament_min_known_teams=0)) == [])
+    t.check("世界前 N 的队也计入「已知队伍」",
+            len(select_today([mk(ts(10), ["Team Spirit", "M80"], tour),
+                              mk(ts(12), ["Team Liquid", "Wildcard"], tour),
+                              mk(ts(14), ["Nobody A", "Nobody B"], tour)],
+                             base, es, TOP)) == 3)
+    t.check("不同赛事各算各的（不跨赛事凑数）",
+            select_today([mk(ts(10), ["FaZe Clan", "M80"], "赛事甲"),
+                          mk(ts(12), ["Team Liquid", "Wildcard"], "赛事乙")],
+                         base, es) == [])
+
+    # ---- 2c. 世界排名：解析 + 别名映射 ----
+    print("\n-- 2c. 世界排名（HLTV）解析与别名映射 --")
+    rk = parse_hltv_rank(FIXTURE_RANK_HTML, 15)
+    t.check("排名块按锚点切出 3 支", len(rk) == 3, rk)
+    if len(rk) == 3:
+        t.check("名次与队名都取对", rk[0] == {"pos": 1, "name": "Spirit"}, rk[0])
+        t.check("名次顺序正确", [x["pos"] for x in rk] == [1, 2, 3])
+    t.check("top_n 截断生效", len(parse_hltv_rank(FIXTURE_RANK_HTML, 2)) == 2)
+    t.check("排名页为空时不炸", parse_hltv_rank("", 15) == [])
+
+    names, unmapped = resolve_rank_names(
+        [{"pos": 1, "name": "Spirit"}, {"pos": 2, "name": "Astralis"},
+         {"pos": 3, "name": "Weird New Team"}], es)
+    t.check("别名表把 Spirit 翻成 Team Spirit", "Team Spirit" in names, names)
+    t.check("两边写法相同的队原样保留", "Astralis" in names, names)
+    t.check("没映射过又没核对过的 → 记进 unmapped",
+            [u["name"] for u in unmapped] == ["Weird New Team"], unmapped)
+    t.check("别名查表不区分大小写",
+            resolve_rank_names([{"pos": 1, "name": "spirit"}], es)[0] == ["Team Spirit"])
+    t.check("写法已在知名名单里出现过的，不算 unmapped",
+            resolve_rank_names([{"pos": 1, "name": "MOUZ"}], es)[1] == [])
+    t.check("别名表把 Spirit 指向战队页而不是同名的选手页",
+            DEFAULT_HLTV_ALIASES["Spirit"] == "Team Spirit")
+    t.check("别名表把 Aurora 指向战队页而不是同名的选手页",
+            DEFAULT_HLTV_ALIASES["Aurora"] == "Aurora Gaming")
+    t.check("别名表收录 HLTV 的 BETBOOM 写法",
+            DEFAULT_HLTV_ALIASES.get("BETBOOM") == "BetBoom Team")
+    t.check("rank_top_n = 0 时这条整体关闭",
+            get_rank(dict(es, rank_top_n=0), write_cache=False)["disabled"] is True)
+    t.check("排名拿不到时不是致命错误（ok=False 但不抛）",
+            get_rank(dict(es, rank_top_n=0), write_cache=False)["ok"] is False)
+    t.check("已知队伍集合 = 知名 ∪ 世界前N",
+            known_team_set(es, TOP) >= {"faze clan", "team spirit", "g2 esports"})
+    t.check("已知队伍集合不含中国队（两件事分开）",
+            known_team_set(dict(es, notable_teams=[]), None) == set())
 
     # ---- 3. 折叠与正文 ----
     print("\n-- 3. 正文与折叠 --")
@@ -932,19 +1407,45 @@ def selftest():
     t.check("精确匹配：大小写不算差异（paiN Gaming 仍命中）",
             has_team({"teams": ["paiN Gaming"]}, ["PaiN Gaming"])
             and has_team({"teams": ["heroic"]}, ["HEROIC"]))
-    t.check("空白名单不误命中", not has_team({"teams": ["FaZe Clan"]}, []))
-    t.check("白名单为 None 不炸", not has_team({"teams": ["FaZe Clan"]}, None))
-    t.check("队伍字段缺失不炸", not has_team({}, ["FaZe Clan"]))
+    t.check("精确匹配：空白名单不误命中", not has_team({"teams": ["FaZe Clan"]}, []))
+    t.check("精确匹配：白名单为 None 不炸", not has_team({"teams": ["FaZe Clan"]}, None))
+    t.check("精确匹配：队伍字段缺失不炸", not has_team({}, ["FaZe Clan"]))
+    t.check("FURIA 用的是一线队页写法，不是会重定向的 FURIA Esports",
+            "FURIA" in merged["notable_teams"]
+            and "FURIA Esports" not in merged["notable_teams"])
+    t.check("知名名单里没有重定向写法（FURIA Esports 这类）",
+            not any("Esports" == n.split()[-1] and n.split()[0] == "FURIA"
+                    for n in merged["notable_teams"]))
 
-    # ---- why_selected：说清每场是靠什么进来的 ----
-    t.check("为什么入选：赛事名命中 -> major",
-            why_selected(_mk(ts(14), ["A", "B"], "BLAST Premier"), es) == "major")
-    t.check("为什么入选：中国队优先于知名队伍",
-            why_selected(_mk(ts(14), ["TYLOO", "FaZe Clan"], "Stake Ranked"), es) == "cn")
-    t.check("为什么入选：只靠知名队伍 -> notable",
-            why_selected(_mk(ts(14), ["FaZe Clan", "M80"], "Stake Ranked"), es) == "notable")
+    # ---- why_selected：说清每场是靠什么进来的，以及优先级 ----
+    t.check("为什么入选：中国队 -> cn",
+            why_selected(_mk(ts(14), ["TYLOO", "X"], "Stake Ranked"), es) == "cn")
+    t.check("为什么入选：世界前N -> top15",
+            why_selected(_mk(ts(14), ["G2 Esports", "X"], "Stake Ranked"), es, TOP) == "top15")
+    t.check("为什么入选：大赛且知名 -> major+notable",
+            why_selected(_mk(ts(14), ["FaZe Clan", "X"], "BLAST Premier Fall"), es)
+            == "major+notable")
+    t.check("为什么入选：只有大赛不给理由（不是 or）",
+            why_selected(_mk(ts(14), ["A", "B"], "BLAST Premier Fall"), es) is None)
+    t.check("为什么入选：只有知名不给理由（不是 or）",
+            why_selected(_mk(ts(14), ["FaZe Clan", "X"], "Stake Ranked"), es) is None)
     t.check("为什么入选：都不沾 -> None",
             why_selected(_mk(ts(14), ["A", "B"], "Stake Ranked"), es) is None)
+    t.check("优先级：中国队 > 世界前N",
+            why_selected(_mk(ts(14), ["TYLOO", "Team Spirit"], "BLAST Premier"),
+                         es, TOP) == "cn")
+    t.check("优先级：世界前N > 大赛+知名",
+            why_selected(_mk(ts(14), ["Team Spirit", "FaZe Clan"], "BLAST Premier"),
+                         es, TOP) == "top15")
+    t.check("为什么入选：名队云集的赛事 -> tournament",
+            why_selected(_mk(ts(14), ["Nobody A", "Nobody B"], "Stake Ranked Season 9"),
+                         es, None, {"Stake Ranked Season 9": 4}, 4) == "tournament")
+    t.check("入选原因的标签都有中文名",
+            all(REASON_LABELS.get(k) for k in
+                ("cn", "top15", "major+notable", "tournament")))
+    t.check("统计行会把四条都列出来",
+            reasons_summary({"cn": 1, "top15": 2, "major+notable": 3, "tournament": 4})
+            == "中国队 1 场 / 世界前 N 2 场 / 大赛+知名 3 场 / 名队云集的赛事 4 场")
 
     t.check("解析空配置不炸", resolve_config({})["fold_hint"] == 15)
 
@@ -968,6 +1469,8 @@ def main(argv=None):
                         help="只抓取并打印将要发送的内容，不发消息、不写状态")
     parser.add_argument("--teams", action="store_true",
                         help="列出页面上的所有队名，并标出命中哪个白名单（只读，维护白名单用）")
+    parser.add_argument("--rank", action="store_true",
+                        help="打印 HLTV 世界前 N 及它翻成 Liquipedia 队名的结果（只读，核对别名用）")
     parser.add_argument("--test-notify", action="store_true",
                         help="往配置的每个通道发一条测试消息（部署后先跑这个）")
     parser.add_argument("--selftest", action="store_true", help="离线自检，不联网")
@@ -978,9 +1481,12 @@ def main(argv=None):
 
     cfg = watch.load_config(args.config)
 
-    # --teams 只用 esports 段，不依赖 room_id / onebot，所以放在 validate_cfg 之前
+    # --teams / --rank 只用 esports 段，不依赖 room_id / onebot，所以放在 validate_cfg 之前
     if args.teams:
         return cmd_list_teams(cfg)
+
+    if args.rank:
+        return cmd_show_rank(cfg)
 
     if args.test_notify:
         return cmd_test_notify(cfg)

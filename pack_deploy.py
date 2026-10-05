@@ -65,7 +65,9 @@ FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py", "deploy/esports.
 TEXT_EXT = {".sh", ".py", ".md", ".json", ".yml", ".yaml", ".service", ".timer",
             ".example", ".txt", ""}
 
-SKIP_NAMES = {"__pycache__", "pack_deploy.py", "deploy.zip", "selftest_result.txt"}
+SKIP_NAMES = {"__pycache__", "pack_deploy.py", "deploy.zip", "selftest_result.txt",
+              # 世界排名的抓取缓存：服务器上会自己生成，别把开发机上的那份打进包
+              "rank_cache.json", "rank_cache.json.tmp"}
 SKIP_SUFFIX = (".pyc", ".pyo", ".bak", ".orig", ".rej")
 
 
