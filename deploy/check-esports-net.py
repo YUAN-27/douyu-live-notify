@@ -311,12 +311,17 @@ def parse_matches(text):
         if not tour:
             tour = re.search(r'match-info-tournament.{0,400}?title="([^"]+)"', seg, re.S)
 
+        # 赛事**页面路径**（如 `ESL/Pro League/Season 24`）—— esports.py 拿它去抓赛事页取逐图比分。
+        # 这里也抽一份，是为了让「两个解析器结构一致」这条约定继续成立（见文件头的说明）。
+        tp = re.search(r'match-info-tournament.{0,400}?title="([^"]+)"', seg, re.S)
+
         teams = teams[:2]
         out.append({
             "ts": int(ts.group(1)),
             "teams": teams,
             "bo": bo.group(1) if bo else "",
             "tour": tidy(re.sub(r"#.*$", "", tour.group(1))) if tour else "",
+            "tour_page": tidy(re.sub(r"#.*$", "", tp.group(1))) if tp else "",
             "tbd": len(teams) >= 2 and all(t.upper() == "TBD" for t in teams),
         })
 
@@ -356,6 +361,12 @@ def sec4_data(text):
     ok("解析出 %d 场比赛（锚点 %d 个）" % (len(matches), anchors))
     info("队名没凑齐 : %d 场" % len([m for m in matches if len(m["teams"]) < 2]))
     info("赛事名为空 : %d 场" % len([m for m in matches if not m["tour"]]))
+    # 赛事页面路径是「逐图比分」功能的命脉（esports.py 拿它去抓赛事页）。
+    # 空的比例高不代表出错 —— 有些赛事的链接指向系列页，那种本来就取不到逐图。
+    # 但要**当场看得见**，免得以后以为是别的地方坏了。
+    tp_ok = len([m for m in matches if m.get("tour_page")])
+    info("赛事页路径 : %d/%d 场有（拿逐图比分用；空的不影响发战果，只是少几行地图）"
+         % (tp_ok, len(matches)))
 
     now = datetime.now(CST)
     today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)

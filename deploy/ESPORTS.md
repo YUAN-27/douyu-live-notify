@@ -238,11 +238,30 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 （不写 `config.json` 就改 `esports.py` 里的默认值 `09:30`）。
 预告窗口的右端点就是它 —— 只改定时器不改它，窗口会算偏：**偏早漏比赛、偏晚重复推**。
 
+### 三个 timer 的分工
+
+| timer | 时刻 | 联网？ | 干什么 |
+|---|---|---|---|
+| `douyu-esports.timer` | 每天 09:30 | 1 次 parse | 发赛程预告；顺手登记待结算清单 |
+| `douyu-esports-results.timer` | 每 10 分钟（**:5,:15,…**） | 有到点场次才抓 | **单场战报**，一场一条 |
+| `douyu-esports-daily.timer` | 每天 **09:40** | **完全不联网** | **全天整合版**，读清单快照 |
+
+三者的时刻是**互相约束**的，不是各自随便挑的：
+
+- `results` 的分钟数**避开 `:30`**：不然会和 09:30 那次预告同一秒各发一次 parse。
+- `daily` 定 **09:40**（晚于 09:30）：早于它的话整合版的窗口右端点会退到昨天，
+  汇总的就变成**前天**（见 §3.1 通道二第 3 点）。晚 10 分钟也正好让赛程日过完、
+  该结算的都结算了。
+- 三者现在**共用同一道 `parse_gate()` 闸门**（跨进程的 1 次/30 秒），
+  所以就算偶发重叠也不会贴条款。
+
 ---
 
 ## 3.1 战果公布（比赛打完后把比分发出来）
 
-> 2026-10-05 加的功能。预告说「19:30 X vs Y」，等它打完了再补一条比分。
+> 2026-10-05 加的功能，当天晚上又按用户要求改成**两条通道**：
+> 预告说「19:30 X vs Y」，这一场打完就发**这一场**的单场战报（带逐图比分）；
+> 第二天早上再把上一个赛程日的全部战果**汇总成一条**。
 
 ### 数据源：**零新增**，还是 `Liquipedia:Matches` 这一页
 
@@ -260,6 +279,67 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 > 实测 103 支队里 **79 支**的写法与 Liquipedia 不同（`BETBOOM`↔`BetBoom Team`、
 > `NAVI`↔`Natus Vincere`、`G2`↔`G2 Esports`…）。要接它就得手工维护一张近乎全量的别名表，
 > 而**别名写错 = 静默漏发**（不报错、只是不发）。相比之下 Liquipedia 是「零别名、零新请求」。
+>
+> **2026-10-05 晚补测：HLTV 的比赛页/结果页抓不到。** `/results` 与
+> `/matches/<id>/<slug>` 在**本机和服务器上都返回 403**，响应体是 HLTV 自己的
+> Cloudflare worker 页，里面带 `data-client-country-iso="CN"` —— 也就是**按来源地区挡**
+> （换裸 UA / 带 Referer / 完整浏览器头都一样）；bo3.gg / escorenews / strafe 同为 403。
+> ⚠️ **但排名页例外**：`/ranking/teams/` 实测 302 → 200、1.1 MB 正常，
+> 所以「世界前 N」那条不受影响。别把这两件事混成「HLTV 全站不可用」。
+>
+> 因此**选手 rating 和全场 MVP 无法自动获取**（Liquipedia 也没有：整页 `Rating` 只命中 4 次，
+> 全是赛事规则文本）。见 §9。
+
+### 🔍 逐图比分（单场战报用）：从**赛事页**拿，不用上 HLTV
+
+`parse_matches` 顺手把赛事的**页面路径**抽出来存进 `tour_page` —— 这个是 Liquipedia 自己在链接里给的：
+
+```html
+<a href="/counterstrike/ESL/Pro_League/Season_24#Round_3"
+   title="ESL/Pro League/Season 24#Round 3"><span>ESL Pro League Season 24 - Round 3</span></a>
+```
+
+取 `title`（不是 `href`，那个带 `/counterstrike/` 前缀和 URL 转义），剥掉 `#Round_N` 锚点
+→ `ESL/Pro League/Season 24`。**这一步不需要任何手工别名表**，这是它相对 HLTV 方案最大的优势。
+
+有了路径就让 `fetch_event_page` 去抓那一页（同一个 `api.php`，只是 `page` 参数不同），
+`parse_event_maps` 解析 bracket 弹窗里的逐图数据：
+
+| 字段 | 出处 | 实测 ESL S24 |
+|---|---|---|
+| 逐图回合比分 | `detailed-scores-main-score` | 16/16 已结束场次都有 |
+| 地图名 | 行内 `href="/counterstrike/..."` 的内层文本 | `Dust II` / `Inferno` / `Ancient` |
+| 配对键 | `data-timestamp`（和赛程页同一个） | 用来和 ticker 条目精确对上 |
+| HLTV 比赛页链接 | 弹窗里的外链 | 拿得到但**点不开**（403），不展示 |
+
+三条硬约束：
+
+1. **逐图只用于展示**。判断「打没打完」永远只认上面那三个信号 ——
+   赛事页的数据再全也不参与判定，否则就可能把进行中的比分当战果发出去。
+2. **拿不到就是拿不到，静默降级**。赛事页不存在 / 页面里没有这一场 / 结构变了
+   → 那一行 `maps` 就是空的 → 卡片少画几行，**照样发**。任何异常都在
+   `fetch_event_page` 里被消化掉，绝不冒泡成「战果发不出去」。
+3. 有些赛事给的路径是**系列页**（如 `BLAST/Premier`）而不是子页，那种页面里当然找不到
+   这一场，结果同上。实测 `Stake/Ranked` 这类系列页**能**查到当前一期的弹窗，所以不必预设失败。
+
+两个解析坑（第一版都踩过）：队名要优先取 `<div class="team-name">` 的内层文本，
+直接抓 `title="…"` 会把同一支队拼三遍（实测拼出过 `AimclubAimclubAimclub`）；
+逐图要按**字面量** `<div class="brkts-popup-body-grid-row">` 切段，否则地图数量会算成 0。
+
+### 🔒 条款节流现在是**跨进程**的
+
+条款：`action=parse` ≤ 1 次 / 30 秒。而改造后一轮战果可能要发**两次** parse
+（赛程页找战果 + 赛事页取逐图），再加上一共**三个** timer。
+光靠「把 OnCalendar 错开」已经挡不住偶发重叠了，所以加了 `parse_gate()`：
+
+```python
+# 把「上一次 action=parse 的时刻」落到 state_esports_parse.json，
+# 谁先到谁先写；下一次请求前按剩余时间补睡。跨进程生效。
+parse_gate_delay(last_ts, now_ts, gap)   # 纯函数，自检里钉的就是它
+```
+
+「时钟回拨」这类情况只等一个完整间隔，不跟着算出一个天文数字的 sleep
+（那会把这一轮卡到 systemd 的 `TimeoutStartSec`）。
 
 ### 怎么判断「这场打完了」：三个信号**同时**成立
 
@@ -289,7 +369,9 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 清单里没有「已进入结算窗口」的场次  →  一个网络请求都不发，直接退出
 ```
 
-所以**一天的实际请求数 ≈ 10~13 次**，而不是 144 次（每 10 分钟一次）。
+所以**一天的实际请求数 ≈ 10~13 次**（赛程页），而不是 144 次（每 10 分钟一次）。
+再加上逐图比分要抓的赛事页：**每个「本轮要发的比赛所属的不同赛事」各 1 次**，
+典型一天 +4~8 次。合计约 20 次/天，距条款上限（2880 次/天）余量极大。
 
 「结算窗口」= 开打时刻 + 宽限 ~ 开打时刻 + 超时，按赛制分档：
 
@@ -323,46 +405,98 @@ Persistent=false                            # 和上面的预告定时器正好�
 - 已发出的场次状态改成 `reported`，**不会二次发送**。
   登记用的 `note_pending` 是**只增不改**的：已登记过的对阵不刷新开赛时间，
   已 `reported` 的不会被重新打开（否则改期 / 二次预告会让战果重发一遍）。
-- `results_max_age_hours`（默认 24）= 超过这么久还没结算的条目直接丢掉，
+- 单场战报是**一场一条、逐场标记**：某一场发送失败只让那一场保持 `pending` 等下一轮重发，
+  已经发出去的几场不会被牵连重发。
+- `results_max_age_hours`（默认 **36**）= 超过这么久还没结算的条目直接丢掉，
   免得服务器停机几天后开机**一次性补发一堆旧战果**。
+  （不是 24，理由见上面「全天整合版」第 1 点。）
+- **整合版有独立的幂等标记**（`state_esports_daily.json` 的 `last_day`）：
+  同一天再跑一次 `--daily` 会直接 `[silent]` 退出，不会重发。
 - 同一对队伍在 `recent` 里可能出现两次（不同时间各打一场），所以「已结束索引」的
   每个键对应的是**一个列表**，配对时取「开赛时间差最小」的那一场，
   且要求差值 ≤ `RESULTS_TS_TOLERANCE`（6 小时）。差太多就认为「还没打完」，**不发**。
 
-### 战果消息长什么样
+### 通道一：单场战报（`--results`，**一场一条**）
 
-同样先一行文字，再一张卡片。文字版（图出不来时发它）：
-
-```
-【CS2 战果】10-03 周六 · 共 8 场
-
-10-03 17:00  FlyQuest 2:0 Ground Zero Gaming
-10-03 17:00  SINNERS Esports 1:2 Ninjas in Pyjamas
-10-03 17:00  Sangal Esports 0:2 Eternal Fire
-...
-
-共 8 场 · 数据来源：Liquipedia
-```
-
-卡片版式和赛程卡片**同一套**，只把中间那列从 `Bo3` 换成比分：
+一场打完就发这一场的消息，**不再把同一轮的多场合并**。文字版（图出不来时发它）：
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│ CS2 战果                                                    │
-│ 10-03 周六　共 8 场                                          │
-├────────────────────────────────────────────────────────────┤
-│ 10-03 17:00   FlyQuest ▣   2:0   ▣ Ground Zero Gaming      │
-│ 10-03 17:00  SINNERS ▣     1:2   ▣ Ninjas in Pyjamas       │
-├────────────────────────────────────────────────────────────┤
-│ 5 个赛事                              数据来源：Liquipedia    │
-└────────────────────────────────────────────────────────────┘
+【CS2 战报】10-04 周日 20:00
+Luminosity Gaming  1:2  Astralis
+· 地图 1  Mirage  13:11
+· 地图 2  Cache  7:13
+· 地图 3  Nuke  11:13
+Stake Ranked Episode 4 · Bo3
+数据来源：Liquipedia
 ```
 
-- **胜方**：深墨色 + 假粗体；**负方**：压暗成灰。一深一浅，扫一眼就知道谁赢。
-- 时间列**带日期**（`10-03 17:00`）—— 战果横跨午夜，只写 `17:00` 会看不懂是哪天。
-- 比分用**系列比分**（`2:1`）；Bo1 给的是**地图比分**（`13:4`）。
-  ⚠️ 页面上**没有逐图比分**，所以卡片里也不会出现单张地图的结果。
-- 和赛程卡片一样：图出不来就**自动退回纯文本**，消息一定发得出去。
+卡片（880×370 / 414 / 458，随地图数变高）：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ CS2 战报                                                  │
+│ Stake Ranked Episode 4 · Bo3                              │
+├──────────────────────────────────────────────────────────┤
+│ ◎ Luminosity Gaming      1:2        Astralis ◎            │
+│ 地图 1            13   Mirage   11                        │
+│ 地图 2             7   Cache    13                        │
+│ 地图 3            11   Nuke     13                        │
+├──────────────────────────────────────────────────────────┤
+│ Stake Ranked Episode 4 · 数据来源：Liquipedia               │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **胜方队名绿色、负方队名红色**（用户 2026-10-05 明确要求）。胜方**另外**再加一档
+  假粗体 —— 红绿对色盲不友好，留一个不依赖颜色的信号，灰度打印也还分得开。
+- 逐图行里的比分按**这一图**的胜负上色，所以会出现「左队名是红的、它的比分数却是绿的」——
+  这是刻意的：一眼看出**哪张图谁赢**（系列胜负看名字，单图胜负看数字）。
+- 时间用**比赛时间**、不用「现在」（跨午夜结算时后者会和战报上的日期对不上）。
+- 图出不来就**自动退回纯文本**，而且纯文本里**也带逐图**，信息量不比图少。
+
+### 通道二：全天整合版（`--daily`，次日早上一条）
+
+上一个赛程日全部战果的汇总，**一场一行、不带逐图**（带的版本太臃肿，用户否掉了）：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ CS2 战果                                                  │
+│ 10-04 周日　共 7 场                                        │
+├──────────────────────────────────────────────────────────┤
+│ 10-04 10:30   Team Falcons ◎   2:0   ◎ TYLOO             │
+│ 10-04 11:30   Legacy ◎         1:2   ◎ PARIVISION        │
+│ 10-04 12:30   Team Vitality ◎  2:0   ◎ 1w Team           │
+├──────────────────────────────────────────────────────────┤
+│ 3 个赛事                              数据来源：Liquipedia  │
+└──────────────────────────────────────────────────────────┘
+```
+
+三个设计点：
+
+1. **这一轮一次网络请求都不发**。它是次日早上才发的，那时赛程页的 `recent` 窗口早翻篇了，
+   队名/短名/队标/赛事名全都不在手上 —— 所以单场战报**发出去的时候顺手把这些存进
+   `state_results_pending.json`**，整合版只是把这份快照重新排一次版。
+   这也是 `results_max_age_hours` 从 24 放宽到 **36** 的原因：窗口最早那场（前一天 09:30）
+   到发汇总时已经 23 小时 50 分，用 24 会被清掉一半 → 汇总缺场次。
+2. **窗口 = 「上一个已经过完的赛程日」**，由 `last_schedule_day()` 算，和 `preview_window`
+   是**两个不同的函数**（后者给的是「即将开始的 24 小时」，在 09:40 会正好跳过要汇总的那天）。
+   卡片和标题都用窗口开始时刻当标签，所以写出来就是 `10-04 周日`，
+   和当天早上那条预告的命名完全一致。
+3. **`daily_run_time` 必须晚于 `preview_run_time`**。反过来的话右端点会退到昨天、
+   汇总的就变成**前天**那一场。`run_daily()` 里有一条显式校验挡这件事（打印 `[warn]` 后拒绝发送），
+   自检里也钉了这个边界。
+
+### 为什么不合并成一条、也不等「全天打完再发」
+
+用户 2026-10-05 的原话是「我要每两队打完就发这两队的结果」，同时又要求「全天的最后一场打完
+再发一遍合起来的」。所以两条通道并存：
+
+- **每场一条**满足「及时」；
+- **次日早上汇总**满足「一眼看完全天」，而且比「等当天清单清空再发」稳 ——
+  遇到延期/取消的场次不会把汇总永远卡住。
+
+⚠️ **已知的尾巴**：汇总窗口右端点（09:30）前约 50 分钟内开打的比赛，结算时刻会落在
+09:40 之后，赶不上那一次汇总。代价是「那条比赛没进汇总」，但它自己的单场战报早就发过了，
+不会丢信息。要彻底消除得再加一层「补发」机制，收益不抵复杂度，所以留着。
 
 ### ⚠️ 唯一没实测到的一点
 
@@ -386,19 +520,29 @@ curl -s -A "$UA" 'https://liquipedia.net/counterstrike/api.php?action=parse&page
 ### 想启用
 
 ```bash
-cd /opt/douyu-live-notify && python3 esports.py --check-results   # 只抓 + 打印，不发消息
-systemctl enable --now douyu-esports-results.timer
-systemctl list-timers douyu-esports-results.timer
+cd /opt/douyu-live-notify && python3 esports.py --check-results   # 单场战报：只抓 + 打印，不发消息
+cd /opt/douyu-live-notify && python3 esports.py --check-daily     # 整合版：只读清单，不发消息
+systemctl enable --now douyu-esports-results.timer douyu-esports-daily.timer
+systemctl list-timers 'douyu-esports*'
 tail -f /var/log/douyu-watch/esports-results.log
+tail -f /var/log/douyu-watch/esports-daily.log
 ```
 
 > `--check-results` **清单空着也会演练**：它改拿页面上最近打完的 8 场走一遍完整流程，
-> 出图到 `/tmp/esports_results_check.png`。所以**刚部署、还没跑过预告**时也能用它验收版式。
+> 出图到 `/tmp/esports_result_check_01.png` … `_08.png`（**一场一张**）。
+> 所以**刚部署、还没跑过预告**时也能用它验收版式。
+> 它会真的去抓赛事页，所以会过条款闸门、整轮可能要等 30 秒 × 赛事数。
 
 ⚠️ **前提是 `douyu-esports.timer` 已经在跑** —— 待结算清单是预告那一轮写的。
-预告没启用 = 清单永远是空的 = 战果永远静默。
-⚠️ 想整体关掉：`config.json` 里 `esports.results_enabled=false`（连请求都不发）；
-只想关掉卡片图：`esports.card_results_enabled=false`。
+预告没启用 = 清单永远是空的 = 两条通道都永远静默。
+⚠️ 只想关掉其中一块：
+
+| 想关掉 | 配置 |
+|---|---|
+| 战果整体（连请求都不发） | `esports.results_enabled=false` |
+| 只关单场战报的卡片图 | `esports.card_results_enabled=false` |
+| 只关逐图比分（少抓赛事页） | `esports.card_results_maps_enabled=false` |
+| 只关全天整合版 | `esports.daily_enabled=false`（或只停 `douyu-esports-daily.timer`） |
 
 ---
 
@@ -427,10 +571,19 @@ tail -f /var/log/douyu-watch/esports-results.log
 | `logo_timeout` | `15` | 单张队标下载超时（秒） |
 | `calm_after_empty_days` | `7` | 连续静默多少天后发报平安（0 = 从不发） |
 | `fetch_retry_max` | `3` | 抓取重试次数（含首次） |
-| `parse_min_interval_seconds` | `30` | 重试间隔，**这是条款要求，别往下调** |
+| `parse_min_interval_seconds` | `30` | 两次 `action=parse` 的最小间隔。**这是条款要求，别往下调** —— 它同时是重试间隔**和** `parse_gate()` 的跨进程闸门取值 |
 | `notify_retry_max` | `3` | 发送失败补发次数 |
 | `notify_retry_backoff_seconds` | `15` | 补发间隔 |
 | `http_timeout` | `25` | 单次请求超时（秒） |
+| `results_enabled` | `true` | **战果公布总开关**。`false` = 完全回到「只发预告」 |
+| `card_results_enabled` | `true` | 战果卡片开关（单场 + 整合版共用）。`false` = 只发文字 |
+| `card_results_maps_enabled` | `true` | 单场战报要不要带**逐图比分**。带上就多抓赛事页（见 §3.1）；`false` = 少抓请求、只发系列比分 |
+| `results_grace_minutes` | `{Bo1:50, Bo3:100, Bo5:170}` | 开赛多久之后才开始查结果（**最重要的安全阀**，也是节流阀） |
+| `results_timeout_minutes` | `{Bo1:90, Bo3:180, Bo5:270}` | 到多久还没结果就放弃（标 `abandoned`） |
+| `results_max_age_hours` | `36` | 清单条目最多留多久。**不是 24** —— 整合版次日早上才发，24 会把窗口最早那场清掉 |
+| `daily_enabled` | `true` | **全天整合版总开关**。`false` = 只留每场一条 |
+| `daily_run_time` | `"09:40"` | 每天几点发上一个赛程日的整合版。**必须和 `douyu-esports-daily.timer` 一致，且必须晚于 `preview_run_time`**，否则会汇总错日子（`run_daily` 会拒绝发送并打 `[warn]`） |
+| `daily_max_rows` | `24` | 整合版最多列几场 |
 
 ### ⚠️ 关于 `cn_teams`
 
@@ -698,8 +851,9 @@ cd /opt/douyu-live-notify && python3 esports.py --check
 ## 8. 自检
 
 ```bash
-python3 esports.py --selftest    # 235 项（装了 Pillow）/ 212 项（没装）：解析器 / 四条筛选 /
-                                 # 跨夜窗口 / 正文版式 / 图片卡片 / 战果结算 / 静默计数 / 白名单 / 排名与别名 / 文案
+python3 esports.py --selftest    # 278 项（装了 Pillow）/ 247 项（没装）：解析器 / 四条筛选 /
+                                 # 跨夜窗口 / 正文版式 / 图片卡片 / 战果结算 / 单场战报 /
+                                 # 全天整合版 / 条款节流 / 静默计数 / 白名单 / 排名与别名 / 文案
 ```
 
 离线、不联网、不发消息、不写状态。
@@ -708,15 +862,19 @@ python3 esports.py --selftest    # 235 项（装了 Pillow）/ 212 项（没装�
 >
 > | 条件 | 项数 |
 > |---|---|
-> | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **235** |
-> | 少了 `make_card_font.py`（自检少了 2 条「两张字符表是否一致」的断言） | 233 |
-> | 没装 Pillow（卡片 + 战果卡片的 24 条渲染断言换成 1 条降级断言） | 212 |
-> | 两样都没有 | 210 |
+> | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **278** |
+> | 少了 `make_card_font.py`（自检少了 2 条「两张字符表是否一致」的断言） | 276 |
+> | 没装 Pillow（三张卡片的 32 条渲染断言换成 1 条降级断言） | 247 |
+> | 两样都没有 | 245 |
 >
 > `install-watch.sh` 会把 Pillow 和 `make_card_font.py` 都装上，
-> 所以**装完再跑就是 235**；它装 Pillow 排在自检之后，所以偶尔会先看到 212。
-> 这四个数字是本机实测出来的（用假 `PIL.py` 骗过 import、再抽掉 `make_card_font.py`），
+> 所以**装完再跑就是 278**；它装 Pillow 排在自检之后，所以偶尔会先看到 247。
+> 这四个数字是本机实测出来的（用假 `PIL` 包骗过 import、再抽掉 `make_card_font.py`），
 > 换了断言之后记得重量一遍，别照着改。
+>
+> ⚠️ 量这四个数时**临时目录里必须也放一份 `watch.py`** —— 它在**仓库根**而不是
+> `deploy/`，忘了它只会看到 `ModuleNotFoundError: No module named 'watch'`，
+> 报错长得像是「测量脚本自己写错了」。
 
 覆盖了几个容易写错的边界：
 
@@ -779,3 +937,26 @@ python3 esports.py --selftest    # 235 项（装了 Pillow）/ 212 项（没装�
 
 排名抓取的失败**不影响**正常推送：拿不到就用缓存，缓存也没有就只跳过「世界前 N」
 这一条，日志打 `[warn]`，另外三条照常。
+
+### ⚠️ HLTV 的比赛页/结果页对中国大陆 IP 是 403（2026-10-05 实测）
+
+做「逐图比分」侦察时踩到的，记下来免得以后有人重复试：
+
+| 路径 | 本机（CN） | 服务器（阿里云 cn-beijing） |
+|---|---|---|
+| `/ranking/teams/` | **302 → 200**（1.1 MB） | 未测（结论同上，路径不同） |
+| `/results` | **403** | **403** |
+| `/matches/<id>/<slug>` | **403** | **403** |
+| `/`（站点根） | — | **403** |
+
+403 的响应体是 HLTV 自己的 Cloudflare worker 页面，带 `data-client-country-iso="CN"`，
+**说明是按来源地区挡的**，不是 UA 或 cookie 问题（裸 UA / 带 Referer / 完整浏览器头都试过）。
+同一批测试里 bo3.gg / escorenews.com / strafe.com 也全是 Cloudflare 403。
+
+**结论**：
+
+1. 「世界前 N」不受影响（排名页正常，见上一节）。
+2. **选手 rating 与全场 MVP 拿不到** —— 这两个字段三个源都没有，
+   而唯一有的 HLTV 在这里打不开。想拿只能换非大陆出口的机器，收益不抵复杂度。
+3. 逐图比分**改从 Liquipedia 赛事页取**（见 §3.1），本来也不需要 HLTV。
+4. 赛事页弹窗里其实**带**每场的 HLTV 比赛页链接，但既然点不开，就不展示了。

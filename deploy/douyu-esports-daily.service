@@ -1,0 +1,28 @@
+[Unit]
+Description=斗鱼开播提醒 · CS2 全天整合版战果（由 douyu-esports-daily.timer 拉起）
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# 和 --results 一样，esports.py 用 __file__ 定位 config.json 和 state_results_pending.json。
+WorkingDirectory=/opt/douyu-live-notify
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py --daily
+
+# ⚠️ 这一轮**一次网络请求都不发**（不抓页面、不下队标 —— 队标在单场战报时就缓存好了）。
+#    它只是把 state_results_pending.json 里的快照重新排一次版。
+#    给 180 秒是因为要画一张 24 行的大图（Pillow 渲染 + PNG 编码），实测不到 3 秒。
+TimeoutStartSec=180
+
+# 单独一个日志文件：预告 / 单场战报 / 整合版是三条流水，混一起排错很费劲。
+# tail -f /var/log/douyu-watch/esports-daily.log
+StandardOutput=append:/var/log/douyu-watch/esports-daily.log
+StandardError=append:/var/log/douyu-watch/esports-daily.log
+
+# 最小权限。和 douyu-watch.service / douyu-esports.service 保持一致。
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true

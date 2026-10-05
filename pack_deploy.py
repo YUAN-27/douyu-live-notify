@@ -46,7 +46,7 @@ REQUIRED = [
     # 图片卡片的三件套：字体（二进制）+ 它的许可证 + 生成字体的脚本。
     # 少了字体不会报错，但卡片会**静默降级成纯文本**；少了 make_card_font.py
     # 则 `esports.py --selftest` 里 2 条「两张字符表是否一致」的断言会被跳过
-    # （项数从 235 掉到 233，容易被误判成「少了什么」）。所以缺了就不让打包。
+    # （项数从 278 掉到 276，容易被误判成「少了什么」）。所以缺了就不让打包。
     "card_font.otf",
     "CARD_FONT_LICENSE.txt",
     "make_card_font.py",
@@ -57,6 +57,9 @@ REQUIRED = [
     # install-watch.sh 里那段 install 分支却找不到源文件而静默跳过。
     "douyu-esports-results.service",
     "douyu-esports-results.timer",
+    # 全天整合版（次日早上发上一个赛程日的汇总）的两个单元。同上，缺了不报错但发不出来。
+    "douyu-esports-daily.service",
+    "douyu-esports-daily.timer",
     "preflight-check.sh",
     "setup-docker-mirror.sh",
     "add-swap.sh",
@@ -86,6 +89,20 @@ SKIP_NAMES = {"__pycache__", "pack_deploy.py", "deploy.zip", "selftest_result.tx
               # （.gitignore 里也钉着，两条都要有：一个管仓库，一个管部署包。）
               "NotoSansSC-Regular.otf"}
 SKIP_SUFFIX = (".pyc", ".pyo", ".bak", ".orig", ".rej")
+
+
+def is_runtime_state(name):
+    """运行期状态文件（`state_*.json`）——**绝不能进部署包**。
+
+    服务器上那些文件是「当前进度」；开发机上如果也有，那是本地跑 `--check` /
+    `--check-results` 留下的残渣（新加的 `state_esports_parse.json` 只要跑一次
+    `--check` 就会生成）。把它打进包之后，`install-watch.sh` 会**覆盖服务器上的
+    `state_results_pending.json`** —— 后果是「该发的战果不发」或者「已发过的重发」，
+    属于最难查的一类故障（本地怎么试都正常）。
+    """
+    base = os.path.basename(name)
+    return base.startswith("state_") and (base.endswith(".json")
+                                          or base.endswith(".json.tmp"))
 
 # 单个文件超过这个大小就认为「打包名单出问题了」，直接失败。
 # 现状：最大的文件是 card_font.otf（66 KB）。加这条是为了让「不小心把 8 MB 源字体
@@ -129,13 +146,20 @@ def main():
     # ---- 收集 deploy/ 里的文件 ----
     entries = {}
     for name in sorted(os.listdir(DEPLOY_DIR)):
-        if name in SKIP_NAMES or name.endswith(SKIP_SUFFIX):
+        if name in SKIP_NAMES or name.endswith(SKIP_SUFFIX) or is_runtime_state(name):
             continue
         full = os.path.join(DEPLOY_DIR, name)
         if os.path.isfile(full):
             entries[name] = read_normalized(full)
     for name in FROM_ROOT:
         entries[name] = read_normalized(os.path.join(HERE, name))
+
+    # 兜一道：上面那条规则要是哪天被改坏了，这里会当场报错而不是悄悄把状态打进包。
+    leaked = [n for n in entries if is_runtime_state(n)]
+    if leaked:
+        print("运行期状态文件不该进部署包：%s" % "、".join(leaked), file=sys.stderr)
+        print("检查 pack_deploy.py 的 is_runtime_state()。", file=sys.stderr)
+        return 1
 
     # ---- 校验必备文件 ----
     lack = [f for f in REQUIRED if f not in entries]

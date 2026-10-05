@@ -124,9 +124,11 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
 | `python deploy/esports.py --teams` | **列出页面上的真实队名**并标出哪些已收录（含 `[知名]` / `[世界前15]` 标记），改白名单前用它抄名字（不发消息、不写状态） |
 | `python deploy/esports.py --rank` | **核世界前 15 的队名映射**：打印 HLTV 写法 → Liquipedia 队名，标出没映射上的（会请求一次 HLTV，不发消息、不写状态） |
-| `python deploy/esports.py --selftest` | 赛程预告离线自检（正常 235 项；少 `make_card_font.py` 是 233、没装 Pillow 是 212、都没有是 210，**只看有没有 0 失败**），不联网、不发消息 |
-| `python deploy/esports.py --check-results` | **看今天会推什么战果**：只结算「已经打完、还没发过」的场次，出图到 `/tmp/esports_results_check.png`，不发消息、不写状态。**清单空着也会演练**（拿页面上最近打完的 8 场演示），所以刚装好就能验收 |
-| `python deploy/esports.py --results` | 结算到期场次并发战果（定时器调的就是它；没到窗口会**一个请求都不发**就退出） |
+| `python deploy/esports.py --selftest` | 赛程预告离线自检（正常 278 项；少 `make_card_font.py` 是 276、没装 Pillow 是 247、都没有是 245，**只看有没有 0 失败**），不联网、不发消息 |
+| `python deploy/esports.py --check-results` | **看单场战报会发什么**：结算「已经打完、还没发过」的场次并逐场出图（`/tmp/esports_result_check_01.png` …，**一场一张**），不发消息、不写状态。**清单空着也会演练**（拿页面上最近打完的 8 场演示），所以刚装好就能验收。会真的去抓赛事页拿逐图比分，所以整轮可能要等 30 秒 × 赛事数 |
+| `python deploy/esports.py --results` | 结算到期场次并发**单场战报**（定时器调的就是它；没到窗口会**一个请求都不发**就退出）。**每两队打完就发这一条**（一场一条，不再合并） |
+| `python deploy/esports.py --check-daily` | **看全天整合版长什么样**：出图到 `/tmp/esports_daily_check.png`，不发消息、不写状态。**完全不联网**，只读清单快照 |
+| `python deploy/esports.py --daily` | 发上一个赛程日的**全天整合版**（一场一行、只有系列比分），由 `douyu-esports-daily.timer` 每天 09:40 拉起。有幂等标记，同一天重复跑不会重发 |
 | `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
 | `python deploy/esports.py --check`（同上） | 顺带把要发的那张卡片渲染到 `/tmp/esports_card_check.png`，可以下载下来看排版 |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py` / **`card_font.otf`** / `install-watch.sh`，并归一为 LF） |
@@ -244,6 +246,8 @@ deploy/
 ├── douyu-watch.{service,timer}  systemd 每分钟拉起 watch.py --tick
 ├── douyu-watchdog.{service,timer}  每 2 分钟体检一次，异常时告警 / 自愈
 ├── douyu-esports.{service,timer}   每天北京 09:30 推一次 CS2 赛程预告（覆盖到次日 09:30）
+├── douyu-esports-results.{service,timer}  每 10 分钟看一次「有没有比赛刚打完」→ **每场一条单场战报**（带逐图比分）
+├── douyu-esports-daily.{service,timer}    每天 09:40 发**上一个赛程日的全天整合版**（一场一行，不联网）
 ├── watchdog.env.example   告警通道与阈值模板（装到 /etc/default/douyu-watchdog）
 └── douyu-watch.tmpfiles   日志与状态目录兜底（装到 /etc/tmpfiles.d/）
 ```

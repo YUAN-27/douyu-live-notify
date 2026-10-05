@@ -38,7 +38,9 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
   1. User-Agent 必须写明项目名 + 联系方式。Python-urllib 这类通用 UA 会被拒（实测 406）。
   2. 必须支持 gzip（Accept-Encoding: gzip）。
   3. 条款：action=parse 类请求 <= 1 次 / 30 秒，且禁止抓渲染好的 HTML 页面，
-     只能走 api.php。→ 所以本功能**每天只请求 1 次**，重试也要隔开 30 秒。
+     只能走 api.php。→ 所有 action=parse 都必须过 parse_gate() 这道**跨进程**闸门
+     （把「上一次请求时刻」落盘），因为现在一轮战果可能要发两次 parse，
+     而 timer 有三个（预告 / 结算 / 整合版），光靠错开 OnCalendar 挡不住偶发重叠。
   4. 内容 CC-BY-SA 3.0 → 推送正文必须署名「数据来源：Liquipedia」。
 
 用法
@@ -49,6 +51,8 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
     python3 esports.py --check-results # 同上但只打印/出图，**不发消息、不写状态**
                                        # 清单空着也会演练（拿页面上最近打完的 8 场），
                                        # 所以刚部署、还没跑过一次预告时也能用它验收
+    python3 esports.py --daily         # 发上一个赛程日的**全天整合版**（不联网，只读清单）
+    python3 esports.py --check-daily   # 同上但只打印/出图，**不发消息、不写状态**
     python3 esports.py --teams         # 列出页面上的真实队名 + 是否已收录，用来校白名单
     python3 esports.py --test-notify   # 往配置的通道发一条测试消息（验证链路用）
     python3 esports.py --selftest      # 离线自检，不联网、不发消息
@@ -70,18 +74,52 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
 **为什么不监控 HLTV**：HLTV 的队名是显示名，实测 103 个队名里 **79 个**与 Liquipedia
 不同（`BETBOOM` ↔ `BetBoom Team`、`NAVI` ↔ `Natus Vincere`、`G2` ↔ `G2 Esports`…）。
 要手工维护一张近乎全量的别名表，而**写错就是静默漏发** —— 和 hltv_aliases 同一类坑。
-HLTV 唯一不可替代的是逐图比分，QQ 群推送用不上。
+更关键的是它**根本抓不到**：2026-10-05 实测，`/results` 和 `/matches/<id>/<slug>` 在本机和
+服务器上**都**返回 403，响应体是 HLTV 自己的 Cloudflare worker 页（带
+`data-client-country-iso="CN"`）—— 也就是**按来源地区挡**，换 UA / 加 Referer 都没用。
+（⚠️ 但**排名页例外**：`/ranking/teams/` 实测 302 → 200、1.1 MB，所以「世界前 N」那条
+照常工作。别把这两件事混成「HLTV 全站不可用」。）
+**所以「逐图比分」也不用去 HLTV** —— 见下面「单场战报」。
 
 **调度怎么省请求**：`douyu-esports-results.timer` 每 10 分钟唤起，但 run_results()
 **先读本地清单、没有「已到结算窗口」的场次就直接退出（0 次网络请求）**。
-有到点的场次时也**只抓 1 次**，一次结算全部。实测一天约 10~13 次请求，
-只落在各场比赛的结算窗口内，其余时段一次都不发。
-（条款上限是 action=parse ≤ 1 次 / 30 秒，余量很大。）
+有到点的场次时才抓：赛程页 1 次 + 每个**不同赛事**的赛事页各 1 次（只为拿逐图比分）。
+其余时段一次都不发。（条款上限是 action=parse ≤ 1 次 / 30 秒，余量很大。）
 
 `--check-results` 是**只读演练**（不发消息、不写状态），而且**清单空着也会演示** ——
 它改用 drill_items() 拿页面上最近打完的 8 场走一遍完整流程。这是刻意的：
 刚到手的服务器清单必然为空，如果演练命令这时候只会回一句「清单里没有到结算时刻的场次」，
 那就等于没法验收。
+
+关于「单场战报」与「全天整合版」
+--------------------------------
+两条通道，用户 2026-10-05 晚定的：
+
+  · **单场战报**（`--results`，一场一条）：每两队一打完就发这一场。
+    卡片是版式 A —— 队标 + **胜方绿名 / 负方红名** + 大比分，下面逐图一行
+    （左比分 / 地图名 / 右比分，比分按**这一图**的胜负上色）。
+  · **全天整合版**（`--daily`，次日早上一条）：上一个赛程日全部战果的汇总。
+    卡片是版式 C —— 一场一行、只有系列比分，**不带逐图**（带的版本太臃肿）。
+
+**逐图比分从哪来**：不是 HLTV，是 **Liquipedia 的赛事页**。
+`parse_matches` 顺手把赛事的**页面路径**（`tour_page`，如 `ESL/Pro League/Season 24`）
+从链接的 title 里抽出来了 —— 这是 Liquipedia 自己给的，**不需要维护任何别名表**。
+有了路径就让 `fetch_event_page` 去抓那一页，`parse_event_maps` 解析 bracket 弹窗里的
+`brkts-popup-body-grid-row`（实测 ESL S24：16/16 已结束场次都带逐图比分）。
+
+三条硬约束，写在这里免得以后有人踩：
+  1. **逐图只用于展示**。判断「打没打完」永远只认赛程页那三个信号，
+     赛事页的数据再全也不能参与判定，否则就可能把进行中的比分当战果发出去。
+  2. **拿不到就是拿不到，静默降级**。赛事页不存在 / 页面里没有这一场 /
+     结构变了 → 那一行 `maps` 就是空的 → 卡片少画几行，**照样发**。
+     任何异常都在 fetch_event_page 里消化掉，绝不让它冒泡成「战果发不出去」。
+  3. 有些赛事给的页面路径是**系列页**而不是子页（例如 `BLAST/Premier`），
+     那种页面里自然找不到这一场，结果同上：退化成只有系列比分。
+
+**整合版为什么不联网**：它是次日早上才发的，那时赛程页的 `recent` 窗口早翻篇了，
+队名/短名/队标/赛事名全都不在手上。所以单场战报**发出去的时候顺手把这些存进
+state_results_pending.json**（`_prune_pending` 的保留期因此从 24h 放宽到 36h），
+整合版只是把这份快照重新排版一次 —— 0 请求，也不可能「汇总出错」。
 
 关于解析器
 ----------
@@ -130,6 +168,14 @@ STATE_FILE = os.path.join(HERE, "state_esports.json")
 # 单独一个文件（不和 state_esports.json 混）—— 两者由不同的 timer 读写，
 # 混在一起会让「预告」和「结算」互相覆盖对方的字段。
 RESULTS_STATE_FILE = os.path.join(HERE, "state_results_pending.json")
+# 「上一次 action=parse 是什么时候」。条款规定 action=parse ≤ 1 次 / 30 秒，
+# 而现在一轮战果可能要抓两次（① 赛程页找已结束场次 ② 赛事页取逐图比分），
+# 两个 timer 还可能撞在一起。所以把「上一次请求时刻」落盘，让节流**跨进程**生效 ——
+# 见 parse_gate。单靠进程内 sleep 挡不住「两个 job 同时跑」。
+PARSE_STAMP_FILE = os.path.join(HERE, "state_esports_parse.json")
+# 全天整合版的幂等标记：记「哪个赛程日的整合版已经发过了」。
+# 存在理由：这个 job 是「次日早上固定时刻」触发的，重跑（手动 + timer）不能重发。
+DAILY_STATE_FILE = os.path.join(HERE, "state_esports_daily.json")
 
 # 状态文件落在这个目录；systemd 单元里用 ProtectSystem=full，只读 /usr /etc，
 # /opt 可写，所以和 watch.py 一样直接写在脚本旁边。
@@ -167,7 +213,10 @@ LOGO_DIR = os.path.join(HERE, "logo_cache")
 #
 # 「战果」「周一二三四五六日」是 2026-10-05 加「战果公布」时补的
 # （战果卡片的标题，以及页头上那个 `10-05 周一`）。
-CARD_UI_CHARS = "赛程今天明共场次日数据来源：个事图里只列前·→　战果周一二三四五六日"
+#
+# 「地」「报」是 2026-10-05 晚加「单场战报」时补的：
+#   「CS2 战报」的**报**、逐图行前缀「地图 1」的**地**。
+CARD_UI_CHARS = "赛程今天明共场次日数据来源：个事图里只列前·→　战果周一二三四五六日地报"
 
 # card_font.otf 覆盖的 Unicode 区间，同样要和 make_card_font.py 对齐。
 # 出图前逐个字符核对：只要有一个字不在里面就**退回纯文本**，
@@ -197,6 +246,13 @@ CARD_TIME_W = 136
 CARD_VS_W = 66
 CARD_LOGO = 52
 
+# 「单场战报」卡片（版式 A）专用的两段高度。刻意**不**复用 CARD_ROW_H：
+# 单场只有一场，行高给大一点才撑得起版面（大比分需要更多垂直留白）。
+#   页头 CARD_HDR_H → 对阵行 CARD_FIX_H → 逐图 0~5 行 CARD_MAP_H → 页脚 CARD_FTR_H
+# 取值就是用户 2026-10-05 看过并拍板的那张预览图的取值（880×414，3 张地图）。
+CARD_FIX_H = 100
+CARD_MAP_H = 44
+
 C_BG = (255, 255, 255)
 C_INK = (26, 26, 26)
 C_MUTED = (107, 106, 100)
@@ -205,9 +261,13 @@ C_LINE = (230, 227, 221)
 C_ROWLINE = (241, 239, 234)
 C_PLACE = (235, 233, 228)
 C_DAY = (192, 57, 43)       # 「次日」
-# 战果卡片专用：胜方用 C_INK + stroke_width=1（假粗体），负方压暗成这个灰，
-# 一深一浅就能看出谁赢了 —— 纯文本里没有颜色，只能靠比分大小。
-C_LOSE = (163, 161, 155)
+# 胜负配色（用户 2026-10-05 明确要求）：**胜方绿名、负方红名**。
+# 之前是「胜方墨色、负方压灰」的一深一浅方案，颜色更好认但分不出「谁赢了」
+# 和「谁只是没输」；改成红绿之后一眼能定胜负。
+# ⚠️ 红绿对色盲不友好，所以胜方**另外**再加一倍 stroke_width 的假粗体，
+#    不靠颜色单打独斗（灰度打印时也还分得开）。
+C_WIN = (21, 128, 61)       # 胜方队名
+C_LOSE = (185, 28, 28)      # 负方队名
 
 # 大赛关键词（子串匹配赛事名，大小写不敏感）。
 # ⚠️ 页面上**拿不到**赛事分级（S/A/B）：所有 data-* 属性已普查，没有
@@ -351,6 +411,22 @@ ESPORT_DEFAULTS = {
     "results_enabled": True,
     # 战果卡片（复用队标/字体/Pillow 那一整套）。出不了图自动退回纯文本。
     "card_results_enabled": True,
+    # 单场战报里要不要带**逐图比分**。
+    # 带上它就要多抓一次「赛事页」（parse_event_maps），代价见 ESPORTS.md §3.2；
+    # 关掉 / 抓不到 → 卡片自动只画对阵行，不会因此不发。
+    "card_results_maps_enabled": True,
+    # ---- 全天整合版 ----
+    # 「每场一条」发完之后，再在次日早上补一条**当天全部战果**的汇总。
+    # 关掉它 = 只留每场一条。
+    "daily_enabled": True,
+    # 每天几点发「上一个赛程日」的整合版。
+    # **必须和 douyu-esports-daily.timer 的 OnCalendar 一致**，而且**必须晚于**
+    # preview_run_time（09:30）—— 早于它的话 last_schedule_day() 的右端点会退到昨天，
+    # 汇总的就变成前天那一场（run_daily 里有一条显式校验挡这件事）。
+    # 定 09:40 还有个好处：此时赛程日已经过完 10 分钟，该结算的都结算了。
+    "daily_run_time": "09:40",
+    # 一个赛程日最多在整合版里列几场（多了图太长，手机上反而看不清）。
+    "daily_max_rows": 24,
     # 「开赛多久之后才开始找结果」—— 这是最重要的一个安全阀：
     # 它是**时间下限**，没有它就可能把「进行中」的比分当成战果发出去。
     # 同时它也是节流阀：不到这个点，结算任务连网络请求都不发。
@@ -359,7 +435,9 @@ ESPORT_DEFAULTS = {
     # 「到多久还没结果就放弃」—— 延期/取消的比赛不能让它永远占着清单。
     "results_timeout_minutes": {"Bo1": 90, "Bo3": 180, "Bo5": 270},
     # 清单里超过这么多小时还没结算的条目直接清掉（兜底，免得文件无限长大）。
-    "results_max_age_hours": 24,
+    # 取 36 而不是 24：整合版是**次日早上**才发的，窗口最早那场（前一天 09:30）
+    # 到发的时候已经 23 小时 50 分，用 24 会被清掉一半 → 汇总缺场次。
+    "results_max_age_hours": 36,
     # 抓取最多试几次（含首次）。条款限制 1 次/30 秒，所以重试要隔开。
     "fetch_retry_max": 3,
     "parse_min_interval_seconds": 30,
@@ -423,6 +501,64 @@ def fetch_once(url, ua, timeout=25, accept="application/json"):
                 "error": "%s: %s" % (type(exc).__name__, exc)}
 
 
+def parse_gate_delay(last_ts, now_ts, gap):
+    """纯函数：距离「允许再发一次 action=parse」还差几秒。
+
+    抽成纯函数是为了能在离线自检里钉住它 —— 这个数字是**条款合规**的唯一依据，
+    不能只靠肉眼看 sleep 调用。
+    """
+    gap = max(0, int(gap))
+    if not last_ts or gap <= 0:
+        return 0.0
+    delta = float(now_ts) - float(last_ts)
+    # 上限就是 gap：时钟回拨、或别的机器写了未来时间时，只等一个完整间隔，
+    # 不跟着算出一个荒唐的大数（否则这一轮会被卡到 systemd 的 TimeoutStartSec）。
+    return min(float(gap), max(0.0, float(gap) - delta))
+
+
+def _load_parse_stamp(path=PARSE_STAMP_FILE):
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            return float(json.load(fp).get("last") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def _save_parse_stamp(now_ts, path=PARSE_STAMP_FILE):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump({"last": float(now_ts)}, fp)
+        os.replace(tmp, path)
+    except OSError as exc:
+        # 写不进去只是「节流退化成进程内」，不该让整轮失败。
+        log("[warn] 节流时间戳写不进去（%s）：%s" % (path, exc))
+
+
+def parse_gate(es, path=PARSE_STAMP_FILE):
+    """发 `action=parse` 前的等待闸门。返回实际等了几秒（浮点，0 = 没等）。
+
+    **为什么需要它**：条款规定 `action=parse` ≤ 1 次 / 30 秒，而
+      ① 一轮战果现在可能要发两次 parse（赛程页找战果 + 赛事页取逐图比分）；
+      ② `douyu-esports.timer` / `-results.timer` / `-daily.timer` 是三个独立进程，
+         单靠「把 OnCalendar 错开」挡不住偶发重叠。
+    所以把「上一次请求时刻」落盘，让节流**跨进程**生效：谁先到谁先写。
+
+    ⚠️ 两个进程同时读旧值时都会决定等待、然后各自写 —— 极端情况下仍有极小的重叠窗口。
+       这个量级的风险可以接受（本来留的就是 30 秒整，而实际用法离这个频率很远）。
+
+    为什么不放进 `fetch_once`：队标走的是 commons 图片，不在 parse 的限制里，
+    不该跟着一起等 30 秒。
+    """
+    gap = max(0, int((es or {}).get("parse_min_interval_seconds") or 30))
+    delay = parse_gate_delay(_load_parse_stamp(path), time.time(), gap)
+    if delay > 0:
+        log("[info] 条款节流：距上一次请求不足 %d 秒，先等 %.1f 秒再抓" % (gap, delay))
+        time.sleep(delay)
+    _save_parse_stamp(time.time(), path)
+    return delay
+
+
 def fetch_matches(es):
     """按条款要求节流地抓取，返回最后一次的结果。
 
@@ -437,6 +573,9 @@ def fetch_matches(es):
 
     last = None
     for i in range(1, attempts + 1):
+        # 每次尝试前都过闸门 —— 连「第一次」也要过：可能上一轮（或另一个 timer）
+        # 刚刚抓过。这也是原来的 time.sleep(gap) 做不到的地方（它只跨得了本轮）。
+        parse_gate(es)
         r = fetch_once(url, ua, timeout=timeout)
         if r["ok"]:
             if i > 1:
@@ -453,7 +592,6 @@ def fetch_matches(es):
             break
         log("[warn] 第 %d/%d 次抓取失败（%s），%d 秒后重试"
             % (i, attempts, r["error"], gap))
-        time.sleep(gap)
     return last
 
 
@@ -470,6 +608,157 @@ def extract_html(text):
     if not html_text:
         return None, "parse.text 是空的"
     return html_text, ""
+
+
+def build_event_url(page):
+    """赛事页和赛程页**同一个 API**，只是 page 参数不同。
+
+    不去抓渲染好的 HTML 页面（`/counterstrike/...`）—— 条款要求只走 api.php，
+    而且渲染页会把整个皮肤/导航都下回来（实测 600 KB vs API 的 250 KB）。
+    """
+    q = urllib.parse.urlencode({
+        "action": "parse",
+        "page": page,
+        "prop": "text",
+        "format": "json",
+    })
+    return LIQUIPEDIA_API + "?" + q
+
+
+def fetch_event_page(es, page, cache=None):
+    """抓一页赛事页，返回渲染 HTML；失败返回 None。**永不抛错。**
+
+    `cache`：调用方传一个 dict，同一轮里两场同赛事的比赛就只抓一次。
+    抓不到（页面不存在、被限流、结构变了）一律返回 None —— 逐图比分是**锦上添花**，
+    没有它照样要把战果发出去（卡片会自动少画几行）。
+    """
+    page = (page or "").strip()
+    if not page:
+        return None
+    cache = cache if cache is not None else {}
+    if page in cache:
+        return cache[page]
+
+    html_text = None
+    try:
+        parse_gate(es)                      # 和抓赛程页共用同一道条款闸门
+        r = fetch_once(build_event_url(page), build_ua(es),
+                       timeout=max(5, int(es.get("http_timeout") or 25)))
+        if r["ok"]:
+            html_text, err = extract_html(r["text"])
+            if html_text is None:
+                log("[warn] 赛事页 %s 的响应看不懂：%s" % (page, err))
+        else:
+            log("[warn] 赛事页 %s 抓取失败：%s（本轮不带逐图比分）" % (page, r["error"]))
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] 赛事页 %s 抓取出错：%s: %s（本轮不带逐图比分）"
+            % (page, type(exc).__name__, exc))
+    cache[page] = html_text
+    return html_text
+
+
+# 赛事页里一场对阵就是一个 bracket 弹窗。类名三个词连在一起，实测整页唯一。
+POPUP_MARK = "brkts-popup brkts-popup-container brkts-match-info-popup"
+
+
+def parse_event_maps(html_text):
+    """从赛事页里抽出「每场对阵的逐图比分」。返回 list[dict]。
+
+    ⚠️ 这份数据**只用于展示**，判断「打没打完」仍然只认赛程页那三个信号。
+       所以这里即使解析得不够全，最坏也只是少几行地图，不会误报战果。
+
+    实测（ESL Pro League Season 24）的弹窗结构：
+        <div class="brkts-popup …brkts-match-info-popup">
+          …计时器 data-timestamp / data-finished…
+          <div class="match-info-header">            ← 对阵双方 + 系列比分
+          <div class="brkts-popup-body-grid">        ← 逐图正文
+            <div class="brkts-popup-body-grid-row">  ← 一张地图一段
+                <a href="/counterstrike/Dust_II">Dust II</a>
+                <div class="…detailed-scores-main-score">13</div> …>5</div>
+
+    两个踩过的坑：
+      1. 队名要优先取 `<div class="team-name">` 的内层文本。直接抓 `title="…"`
+         会把同一支队的名字拼三遍（实测拼出过 `AimclubAimclubAimclub`）。
+      2. 按**字面量** `<div class="brkts-popup-body-grid-row">` 切段，
+         每段到下一条行标签为止。不这么切的话地图数量会算成 0。
+    """
+    html_text = html_text or ""
+    pos = [m.start() for m in re.finditer(re.escape(POPUP_MARK), html_text)]
+    pos.append(len(html_text))
+    out = []
+    for i, start in enumerate(pos[:-1]):
+        seg = html_text[start:pos[i + 1]]
+
+        ts = re.search(r'data-timestamp="(\d{9,})"', seg)
+        if not ts:
+            continue
+        fin = re.search(r'data-finished="([^"]*)"', seg)
+        body_at = seg.find("brkts-popup-body-grid")
+        head = seg[:body_at] if body_at > 0 else seg
+
+        # 对阵双方 + 系列比分：只看弹窗正文之前的那段（head），
+        # 免得把逐图行里的数字也当成系列比分。
+        sides = []
+        for m in re.finditer(
+                r'<div class="match-info-header-opponent([^"]*)">(.*?)'
+                r'(?=<div class="match-info-header-(?:opponent|scoreholder)|$)', head, re.S):
+            nm = re.search(r'<div class="team-name">(.*?)</div>', m.group(2), re.S)
+            if nm:
+                sides.append(tidy(nm.group(1)))
+                continue
+            nm = re.search(r'<a[^>]*title="([^"]*)"', m.group(2))
+            sides.append(tidy(nm.group(1)) if nm else "")
+        if len(sides) < 2 or not all(sides[:2]):
+            continue
+
+        series = [tidy(x) for x in re.findall(
+            r'match-info-header-scoreholder-score[^"]*">\s*([^<]*?)\s*</span>', head)]
+
+        # 逐图：按 grid-row 切段，每段一张地图
+        maps = []
+        body = seg[body_at:] if body_at > 0 else ""
+        rows = [m.start() for m in
+                re.finditer(r'<div class="brkts-popup-body-grid-row">', body)]
+        rows.append(len(body))
+        for j, s in enumerate(rows[:-1]):
+            row = body[s:rows[j + 1]]
+            mp = re.search(r'href="/counterstrike/[^"]+"[^>]*>([^<]+)</a>', row)
+            if not mp:
+                continue
+            rounds = [tidy(x) for x in re.findall(
+                r'detailed-scores-main-score">([^<]*)</div>', row)]
+            # 没打的地图（比分栏是空的）直接丢掉 —— 留着会画出一行「13  Nuke」
+            if len(rounds) < 2 or not all(x.isdigit() for x in rounds[:2]):
+                continue
+            maps.append({"map": tidy(mp.group(1)),
+                         "rounds": [rounds[0], rounds[1]]})
+
+        hltv = re.search(r'hltv\.org/matches/(\d+)/', seg)
+        out.append({
+            "ts": int(ts.group(1)),
+            "teams": sides[:2],
+            "finished": bool(fin and fin.group(1) == "finished"),
+            "series": series[:2],
+            "maps": maps[:5],
+            "hltv_id": hltv.group(1) if hltv else "",
+        })
+    return out
+
+
+def event_maps_index(events):
+    """把 parse_event_maps 的结果做成 {(时间戳, 队名键): 逐图列表}。
+
+    键里带时间戳是必须的：同一对队伍在同一个赛事里可能打好几轮
+    （实测 `Legacy vs PARIVISION` 这类对阵会在赛程里出现多次），
+    只按队名配对会把另一轮的比分贴到这一轮上。
+    """
+    out = {}
+    for e in events or []:
+        if not e.get("maps"):
+            continue
+        key = (int(e.get("ts") or 0), _teams_key(e.get("teams")))
+        out[key] = e["maps"]
+    return out
 
 
 # ==========================================================================
@@ -774,6 +1063,20 @@ def parse_matches(text):
         if not tour:
             tour = re.search(r'match-info-tournament.{0,400}?title="([^"]+)"', seg, re.S)
 
+        # 赛事**页面路径** —— 拿逐图比分要用它去抓「赛事页」（见 fetch_event_page）。
+        # 好消息：这个路径是 Liquipedia 自己在链接里给的，**不用我维护任何别名表**：
+        #   <a href="/counterstrike/ESL/Pro_League/Season_24#Round_3"
+        #      title="ESL/Pro League/Season 24#Round 3">
+        # 取 title 而不是 href：href 带 /counterstrike/ 前缀和 URL 转义，title 是裸页面名。
+        # 剥掉 `#Round_N` 锚点 —— 我们要的是整页，不是某个小节。
+        #
+        # ⚠️ 不是所有赛事都会给「子页面」：没有独立子页面的赛事
+        #    （实测 fixture 那种 `title="BLAST/Premier"`）给的是**系列页**。
+        #    那种情况赛事页里当然找不到这一场对阵 → 逐图数据拿不到 →
+        #    卡片自动少画几行（见 render_result_card）。**不会报错、更不会不发。**
+        tp = re.search(r'match-info-tournament.{0,400}?title="([^"]+)"', seg, re.S)
+        tour_page = tidy(re.sub(r"#.*$", "", tp.group(1))) if tp else ""
+
         teams = teams[:2]
         # 短名必须和 teams **一一对齐**，否则占位块会写成对手的缩写（比不写更坏）。
         # 少了补空串、多了截掉，长度对齐这一件事只在这一行做。
@@ -786,6 +1089,9 @@ def parse_matches(text):
             "logos": logos if len(logos) == len(teams) else ["", ""],
             "bo": bo.group(1) if bo else "",
             "tour": tidy(re.sub(r"#.*$", "", tour.group(1))) if tour else "",
+            # 赛事页路径（`ESL/Pro League/Season 24`）。拿逐图比分用；
+            # 空串 = 这条链接没给页面路径，那就只能发系列比分。
+            "tour_page": tour_page,
             "tbd": len(teams) >= 2 and all(t.upper() == "TBD" for t in teams),
             # 已结束；sides 与 teams **同序**（左、右）；score 形如 "2:0"。
             # ⚠️ Bo3/Bo5 给的是**系列比分**，Bo1 给的是**地图比分**（13:4）——
@@ -973,6 +1279,27 @@ def preview_window(now, run_time=None):
     if end <= now:
         end += timedelta(days=1)
     return now, end
+
+
+def last_schedule_day(now, run_time=None):
+    """**上一个已经过完的赛程日**，返回 (start, end)。
+
+    和 `preview_window` 的区别就一句话：那个给的是「即将开始的 24 小时」，
+    这个给的是「刚刚过完的 24 小时」。所以取「**已经不晚于 now 的**那个 run_time
+    时刻」当右端点 —— 09:40 跑（预告 09:30）拿到的是「昨天 09:30 → 今天 09:30」。
+
+    两个概念必须分开，不能拿 preview_window 凑：那个函数在 09:40 会返回
+    「今天 09:30 → 明天 09:30」，正好把要汇总的那一天整个跳过去。
+
+    ⚠️ 隐含前提：`daily_run_time` 必须**晚于** `preview_run_time`。
+       反之（例如 09:20 跑）右端点会落到昨天 09:30，汇总的就变成**前天**那一场。
+       `run_daily` 里有一条显式校验挡这件事，自检也钉了。
+    """
+    h, mi = parse_run_time(run_time)
+    end = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+    if end > now:
+        end -= timedelta(days=1)
+    return end - timedelta(days=1), end
 
 
 def select_with_reasons(matches, now, es, rank_names=None):
@@ -1687,15 +2014,104 @@ def result_rows(due, fin, es):
             "logos": list(m.get("logos") or []),
             "score": m.get("score") or "",
             "score_left": nums[0], "score_right": nums[1],
+            "score_source": ("map" if (m.get("bo") or "") == "Bo1" else "series"),
             "winner": winner, "bo": m.get("bo") or it.get("bo") or "",
             "tour": m.get("tour") or "",
+            # 赛事页路径：拿逐图比分要用（见 attach_maps）。空串 = 拿不到。
+            "tour_page": m.get("tour_page") or "",
+            # 逐图比分，由 attach_maps 填。默认空 = **只用系列比分出图**，
+            # 这是「抓不到逐图」时的正常状态，不是异常。
+            "maps": [],
         })
     rows.sort(key=lambda x: x["ts"])
     return rows, waiting
 
 
+def attach_maps(rows, es):
+    """给战果行补上逐图比分。返回 (抓了几个赛事页, 补上了几行)。
+
+    设计要点：
+      · **按赛事页去重**：同一轮里同赛事的多场只抓一次（cache 字典传进 fetch_event_page）。
+      · **只给「这一轮真的要发」的行去抓** —— 不是给清单里所有场次抓。
+      · 任何一个环节失败都只是少几行地图，**绝不**影响发送（所有异常都在
+        fetch_event_page 里消化掉了，这里不做任何判断）。
+      · 需要额外请求，所以由 `card_results_maps_enabled` 控制开关。
+    """
+    es = es or {}
+    if not rows or not es.get("card_results_maps_enabled", True):
+        return 0, 0
+
+    pages = []
+    for r in rows:
+        p = (r.get("tour_page") or "").strip()
+        if p and p not in pages:
+            pages.append(p)
+    if not pages:
+        return 0, 0
+
+    cache, idx = {}, {}
+    fetched = 0
+    for p in pages:
+        html_text = fetch_event_page(es, p, cache)
+        if html_text is None:
+            continue
+        fetched += 1
+        idx.update(event_maps_index(parse_event_maps(html_text)))
+
+    hit = 0
+    for r in rows:
+        maps = idx.get((int(r["ts"]), _teams_key(r.get("teams")))) or []
+        if maps:
+            r["maps"] = maps
+            hit += 1
+    return fetched, hit
+
+
+def format_result_caption(row, now):
+    """单场战报上面那一行（有图也要有字，通知栏才不是「[图片]」）。
+
+    刻意用**比赛时间**而不是 `now`：跨午夜结算时「现在」已经是次日凌晨，
+    用 now 会和战报上的日期对不上（战果按时段批量发时就是这么写的，
+    现在一场一条了，就该以这一场为准）。
+    """
+    d = datetime.fromtimestamp(int(row.get("ts") or 0), CST)
+    t = list(row.get("teams") or [])
+    while len(t) < 2:
+        t.append("")
+    return "【CS2 战报】%s %s %s  %s:%s  %s" % (
+        _day_label(d), d.strftime("%H:%M"), t[0],
+        row.get("score_left") or "?", row.get("score_right") or "?", t[1])
+
+
+def format_result(row, now):
+    """单场战报的**纯文本兜底**（出不了图时发这个，信息不比图少）。
+
+    逐图那几行带上，是因为这正是「单场」相对「全天整合版」的价值所在：
+    整合版只给系列比分，单场给到每张图。
+    """
+    d = datetime.fromtimestamp(int(row.get("ts") or 0), CST)
+    t = list(row.get("teams") or [])
+    while len(t) < 2:
+        t.append("")
+    lines = ["【CS2 战报】%s %s" % (_day_label(d), d.strftime("%H:%M")),
+             "%s  %s:%s  %s" % (t[0], row.get("score_left") or "?",
+                                row.get("score_right") or "?", t[1])]
+    for i, m in enumerate(list(row.get("maps") or [])[:5]):
+        rounds = list(m.get("rounds") or [])
+        while len(rounds) < 2:
+            rounds.append("?")
+        lines.append("· 地图 %d  %s  %s:%s" % (i + 1, m.get("map") or "?",
+                                              rounds[0], rounds[1]))
+    bo = (row.get("bo") or "").strip()
+    tour = (row.get("tour") or "").strip()
+    if tour or bo:
+        lines.append(("%s · %s" % (tour, bo)) if (tour and bo) else (tour or bo))
+    lines.append("数据来源：Liquipedia")
+    return "\n".join(lines)
+
+
 def format_results_caption(rows, now):
-    """战果卡片上面那一行（和预告一样：有图也要有字，通知栏才不是「[图片]」）。"""
+    """全天整合版上面那一行（和预告一样：有图也要有字）。"""
     return "【CS2 战果】%s · 共 %d 场" % (_day_label(now), len(rows))
 
 
@@ -1813,15 +2229,16 @@ def _render_results_card_inner(rows, now, es):
         st, sf = _card_fit(d, r["score"], (26, 24, 22, 20), CARD_VS_W - 6)
         d.text((score_cx, base), st, font=sf, fill=C_INK, anchor="ms")
 
-        # 两侧队伍：胜方 ink + 假粗体，负方压暗 —— 一深一浅就能看出谁赢
+        # 两侧队伍：**胜方绿、负方红**（用户 2026-10-05 明确要求）。
+        # 胜方额外加 stroke_width=1 —— 红绿对色盲不友好，留一个不依赖颜色的信号。
         shorts = list(r.get("shorts") or [])
         for side, name in enumerate((r.get("teams") or [])[:2]):
             won = (name == r.get("winner"))
             room = side_w - CARD_LOGO - 14
             nm, f = _card_fit(d, name, (27, 25, 23, 21, 20), max(60, room))
             code = shorts[side] if side < len(shorts) and shorts[side] else name
-            col = C_INK if won else C_LOSE
-            kw = {"stroke_width": 1, "stroke_fill": C_INK} if won else {}
+            col = C_WIN if won else C_LOSE
+            kw = {"stroke_width": 1, "stroke_fill": col} if won else {}
             if side == 0:
                 _card_logo(img, d, logos[i][0], left_x1 - CARD_LOGO, cy, code)
                 x = left_x1 - CARD_LOGO - 14
@@ -1856,6 +2273,175 @@ def _render_results_card_inner(rows, now, es):
     data = buf.getvalue()
     log("[info] 战果卡片：%d×%d，PNG %.1f KB，%d 场"
         % (CARD_W, height, len(data) / 1024.0, n))
+    return data
+
+
+# --------------------------------------------------------------------------
+# 单场战报（版式 A）
+# --------------------------------------------------------------------------
+# 用户 2026-10-05 晚选的版式：**每两队打完就发这一场**，一条消息配这一张图。
+# 和「全天整合版」（上面那个，每场一行）是两个不同的东西：
+#   · 单场战报：地图逐行列出（左比分 / 地图名 / 右比分），信息足；
+#   · 全天整合版：只列系列比分，一行一场，一眼扫完全天。
+#
+#   ┌────────────────────────────────────────┐
+#   │ CS2 战报                                │
+#   │ ESL Pro League Season 24 - Round 1 · Bo3│
+#   ├────────────────────────────────────────┤
+#   │ [标] Legacy           1:2      PARIVISION [标] │
+#   │ 地图 1          13   Dust II    5        │
+#   │ 地图 2           2   Inferno   13        │
+#   │ 地图 3          12   Ancient   16        │
+#   ├────────────────────────────────────────┤
+#   │ ESL Pro League Season 24 · 数据来源：Liquipedia│
+#   └────────────────────────────────────────┘
+#
+# 逐图那几行是**可选**的：抓不到赛事页（或那个赛事页里没有这一场）就整段不画，
+# 卡片变矮但照样发 —— 这是设计好的降级路径，不是异常。
+
+
+def _round_win(rounds, side):
+    """这一张地图是不是 `side`（0=左，1=右）那边赢的。
+
+    拿不到数字一律返回 False：宁可两边都画成红，也不要在画图路径上抛异常
+    （那会让整张卡片退化成纯文本，比颜色不对严重得多）。
+    """
+    try:
+        a, b = int(rounds[0]), int(rounds[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return (a > b) if side == 0 else (b > a)
+
+
+def render_result_card(row, now, es):
+    """**单场战报**卡片。前置条件不满足一律返回 None，由上层退回纯文本。"""
+    if Image is None:
+        log("[info] 没装 Pillow，跳过单场战报卡片（本次发纯文本）")
+        return None
+    if not os.path.isfile(CARD_FONT_FILE):
+        log("[warn] 找不到字体 %s，跳过单场战报卡片（本次发纯文本）" % CARD_FONT_FILE)
+        return None
+    if not row:
+        return None
+    try:
+        return _render_result_card_inner(row, now, es)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] 画单场战报卡片出错（%s: %s），本次改发纯文本"
+            % (type(exc).__name__, exc))
+        return None
+
+
+def _render_result_card_inner(row, now, es):
+    es = es or {}
+    maps = list(row.get("maps") or [])[:5]
+    tour = (row.get("tour") or "").strip()
+    bo = (row.get("bo") or "").strip()
+    sub = ("%s · %s" % (tour, bo)) if (tour and bo) else (tour or bo)
+    foot = ("%s · 数据来源：Liquipedia" % tour) if tour else "数据来源：Liquipedia"
+
+    texts = ["CS2 战报", sub, foot, row.get("score") or "", "…", "?"]
+    texts += list(row.get("teams") or [])
+    texts += list(row.get("shorts") or [])
+    for i, m in enumerate(maps):
+        texts.append("地图 %d" % (i + 1))
+        texts.append(m.get("map") or "")
+        texts += list(m.get("rounds") or [])
+    miss = card_missing_chars(texts)
+    if miss:
+        log("[warn] 字体子集里没有这些字：%s，本次改发纯文本" % "".join(sorted(miss))[:60])
+        log("       要出图就往 deploy/make_card_font.py 的 UI_CHARS 补字并重跑它。")
+        return None
+
+    n = len(maps)
+    height = CARD_HDR_H + CARD_FIX_H + CARD_MAP_H * n + CARD_FTR_H
+    if height > 2400:
+        log("[warn] 单场战报卡片高达 %d px，改用纯文本" % height)
+        return None
+
+    img = Image.new("RGB", (CARD_W, height), C_BG)
+    d = ImageDraw.Draw(img)
+    f_title = load_card_font(34)
+
+    # ---- 页头 ----
+    d.text((CARD_PAD, 24), "CS2 战报", font=f_title, fill=C_INK,
+           stroke_width=1, stroke_fill=C_INK)
+    st, sf = _card_fit(d, sub, (22, 21, 20, 19, 18), CARD_W - 2 * CARD_PAD)
+    if st:
+        d.text((CARD_PAD, 70), st, font=sf, fill=C_MUTED)
+    d.line([(CARD_PAD, CARD_HDR_H - 1), (CARD_W - CARD_PAD, CARD_HDR_H - 1)],
+           fill=C_LINE, width=1)
+
+    # ---- 对阵行：两个队标贴最外侧、队名朝内、大比分居中 ----
+    cy = CARD_HDR_H + CARD_FIX_H // 2
+    base = cy + 11
+    half_w = CARD_W // 2 - 110
+    teams = list(row.get("teams") or [])[:2]
+    while len(teams) < 2:
+        teams.append("")
+    shorts = list(row.get("shorts") or [])
+    urls = list(row.get("logos") or [])
+    while len(urls) < 2:
+        urls.append("")
+    budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
+    logos = [ensure_logo(u, es, budget) for u in urls[:2]]
+
+    sc, scf = _card_fit(d, row.get("score") or "", (46, 40, 34, 28), 190)
+    d.text((CARD_W // 2, base), sc, font=scf, fill=C_INK, anchor="ms")
+    for side, nm in enumerate(teams):
+        won = (nm == row.get("winner") and nm != "")
+        t, f = _card_fit(d, nm, (30, 27, 24, 22, 20),
+                         max(60, half_w - CARD_LOGO - 20))
+        code = shorts[side] if side < len(shorts) and shorts[side] else nm
+        col = C_WIN if won else C_LOSE
+        kw = {"stroke_width": 1, "stroke_fill": col} if won else {}
+        if side == 0:
+            _card_logo(img, d, logos[0], CARD_PAD, cy, code)
+            d.text((CARD_PAD + CARD_LOGO + 18, base), t, font=f, fill=col,
+                   anchor="ls", **kw)
+        else:
+            _card_logo(img, d, logos[1], CARD_W - CARD_PAD - CARD_LOGO, cy, code)
+            d.text((CARD_W - CARD_PAD - CARD_LOGO - 18, base), t, font=f, fill=col,
+                   anchor="rs", **kw)
+    d.line([(CARD_PAD, CARD_HDR_H + CARD_FIX_H),
+            (CARD_W - CARD_PAD, CARD_HDR_H + CARD_FIX_H)], fill=C_ROWLINE, width=1)
+
+    # ---- 逐图行（没有就整段不画）----
+    y = CARD_HDR_H + CARD_FIX_H
+    f_map = load_card_font(26)
+    f_no = load_card_font(20)
+    for i, m in enumerate(maps):
+        ry = y + CARD_MAP_H * i + CARD_MAP_H // 2
+        if i:
+            d.line([(CARD_PAD + 40, y + CARD_MAP_H * i),
+                    (CARD_W - CARD_PAD - 40, y + CARD_MAP_H * i)],
+                   fill=C_ROWLINE, width=1)
+        rounds = list(m.get("rounds") or [])
+        while len(rounds) < 2:
+            rounds.append("")
+        # 比分按**这一图**的胜负上色：左绿则右必红，一眼看出哪张图谁赢。
+        d.text((CARD_W // 2 - 92, ry + 9), rounds[0], font=f_map,
+               fill=C_WIN if _round_win(rounds, 0) else C_LOSE, anchor="rs")
+        mt, mf = _card_fit(d, m.get("map") or "", (24, 22, 20), 300)
+        d.text((CARD_W // 2, ry + 8), mt, font=mf, fill=C_MUTED, anchor="ms")
+        d.text((CARD_W // 2 + 92, ry + 9), rounds[1], font=f_map,
+               fill=C_WIN if _round_win(rounds, 1) else C_LOSE, anchor="ls")
+        d.text((CARD_PAD, ry + 8), "地图 %d" % (i + 1), font=f_no,
+               fill=C_FAINT, anchor="ls")
+
+    # ---- 页脚（署名必须留着，Liquipedia 是 CC-BY-SA）----
+    fy = y + CARD_MAP_H * n
+    d.line([(CARD_PAD, fy), (CARD_W - CARD_PAD, fy)], fill=C_LINE, width=1)
+    ft, ff = _card_fit(d, foot, (19, 18, 17, 16), CARD_W - 2 * CARD_PAD)
+    if ft:
+        d.text((CARD_PAD, fy + 46), ft, font=ff, fill=C_FAINT, anchor="ls")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    data = buf.getvalue()
+    log("[info] 单场战报：%d×%d，PNG %.1f KB，%s %s:%s %s，%d 张地图"
+        % (CARD_W, height, len(data) / 1024.0, teams[0],
+           row.get("score_left") or "", row.get("score_right") or "",
+           teams[1], n))
     return data
 
 
@@ -2239,54 +2825,250 @@ def run_results(cfg, args):
             % len(due))
         return 0
 
-    log("[info] 本轮结算 %d 场（还有 %d 场在打）" % (len(rows), len(waiting)))
-    for row in rows:
-        log("        %s  %s  %s:%s  %s"
-            % (datetime.fromtimestamp(row["ts"], CST).strftime("%m-%d %H:%M"),
-               row["teams"][0], row["score_left"], row["score_right"], row["teams"][1]))
+    # ---- 逐图比分：可选步骤，抓不到只是卡片少几行，绝不影响发送 ----
+    if es.get("card_results_maps_enabled", True):
+        got_pages, got_rows = attach_maps(rows, es)
+        log("[info] 逐图比分：抓了 %d 个赛事页，%d/%d 场补上了逐图"
+            % (got_pages, got_rows, len(rows)))
+    else:
+        log("[info] 逐图比分已关闭（card_results_maps_enabled=false），只发系列比分")
 
+    log("[info] 本轮结算 %d 场（还有 %d 场在打），**一场一条消息**"
+        % (len(rows), len(waiting)))
+    for row in rows:
+        log("        %s  %s  %s:%s  %s  %s"
+            % (datetime.fromtimestamp(row["ts"], CST).strftime("%m-%d %H:%M"),
+               row["teams"][0], row["score_left"], row["score_right"],
+               row["teams"][1],
+               ("%d 张地图" % len(row["maps"])) if row.get("maps") else "无逐图"))
+
+    # ---- 出图：**每场一张**。某一场出不了图只让那一场退回纯文本 ----
+    want_card = bool(es.get("card_enabled", True)
+                     and es.get("card_results_enabled", True))
+    cards = [render_result_card(row, now, es) if want_card else None for row in rows]
+
+    if check:
+        for i, row in enumerate(rows):
+            log("")
+            log(format_result_caption(row, now) if cards[i] else format_result(row, now))
+            if cards[i]:
+                path = os.path.join(tempfile.gettempdir(),
+                                    "esports_result_check_%02d.png" % (i + 1))
+                try:
+                    with open(path, "wb") as fp:
+                        fp.write(cards[i])
+                    log("[check] 这一场的图已存到：%s" % path)
+                except OSError as exc:
+                    log("[warn] 战报预览图写不出来：%s" % exc)
+        log("\n[check] 以上是将会发送的内容（未发送、未写状态）")
+        return 0
+
+    # ---- 发送：每场各发一条。**一场失败不影响别场** ----
+    notifiers = watch.build_notifiers(cfg)
+    sent, not_sent = [], []
+    for i, row in enumerate(rows):
+        pair = " vs ".join(list(row.get("teams") or [])[:2])
+        card = cards[i]
+        body = format_result_caption(row, now) if card else format_result(row, now)
+        delivered, failed = send_with_retry(with_card_image(notifiers, card), body, es)
+        if not delivered or failed:
+            log("[error] %s 的战报发送失败：%s（这一场不写状态，下一轮重发）"
+                % (pair, "、".join(failed) or "未知"))
+            not_sent.append(row)
+            continue
+        log("[sent] %s 的战报已送达（%d 个通道）" % (pair, len(notifiers)))
+        sent.append(row)
+
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    for row in sent:
+        it = row["item"]            # 是 data["items"] 里的引用，改它就是改清单
+        it["status"] = "reported"
+        it["reported_at"] = stamp
+        it["score"] = row["score"]
+        it["winner"] = row["winner"]
+        # ⚠️ 下面这几个是**给全天整合版存的快照**，不是冗余。
+        #    整合版要到次日早上才发，那时赛程页早翻篇了（recent 只有约 2 天窗口），
+        #    队名/短名/队标/赛事名全都不在手上 —— 只能在这里存下来。
+        it["teams"] = list(row["teams"])
+        it["shorts"] = list(row["shorts"])
+        it["logos"] = list(row["logos"])
+        it["tour"] = row["tour"]
+        it["bo"] = row["bo"]
+    for it in expired:
+        it["status"] = "abandoned"
+        it["reported_at"] = stamp
+    save_results_pending(_prune_pending(data, now, es))
+
+    if not_sent:
+        log("[error] 本轮 %d 场：发出 %d 场、%d 场没发出去（没发的下一轮重试）"
+            % (len(rows), len(sent), len(not_sent)))
+        return 1
+    return 0
+
+
+# ==========================================================================
+# 全天整合版（版式 C）
+# ==========================================================================
+#
+# 用户 2026-10-05 晚的要求：「全天的最后一场打完再发一遍合起来的战果」，
+# 实现方案选了「**次日早上固定时刻**发前一个赛程日」——
+# 比「等当天清单清空再发」稳：遇到延期/取消的场次不会把汇总永远卡住。
+#
+# 这一版**不发任何网络请求**，纯粹读 state_results_pending.json 里的快照
+# （单场战报发出去的时候顺手存下来的队名/短名/队标/赛事名/比分）。
+
+def load_daily_state(path=DAILY_STATE_FILE):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {}
+
+
+def save_daily_state(st, path=DAILY_STATE_FILE):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(st, fp, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def daily_rows(items, start, end, es):
+    """挑出「上一个赛程日」里**已经发过单场战报**的场次，做成整合版要用的行。
+
+    只认 `status == "reported"`，这是刻意的：
+      · `pending`（还没出结果）和 `abandoned`（延期/取消）放进汇总，
+        会让人以为「怎么少了一场」或者「这场怎么没比分」；
+      · 比分不是「两个数字」的也丢掉 —— 宁可少一行，也不要画一行假的。
+    """
+    lo, hi = start.timestamp(), end.timestamp()
+    rows = []
+    for it in items or []:
+        if it.get("status") != "reported":
+            continue
+        ts = int(it.get("ts") or 0)
+        if not (lo <= ts < hi):
+            continue
+        teams = [t for t in (it.get("teams") or [])[:2]]
+        if len(teams) < 2 or not all(teams):
+            continue
+        score = (it.get("score") or "").strip()
+        nums = score.split(":")
+        if len(nums) != 2 or not all(x.isdigit() for x in nums):
+            continue
+        winner = it.get("winner") or ""
+        if winner not in teams:
+            continue
+        rows.append({
+            "ts": ts, "teams": teams,
+            "shorts": list(it.get("shorts") or []),
+            "logos": list(it.get("logos") or []),
+            "score": score,
+            "score_left": nums[0], "score_right": nums[1],
+            "winner": winner,
+            "bo": it.get("bo") or "",
+            "tour": it.get("tour") or "",
+            # 用户选的版式 C **不画逐图**，所以这里永远空着。
+            # 留着这个键是为了让 render_results_card 的入参形状和单场一致。
+            "maps": [],
+        })
+    rows.sort(key=lambda x: x["ts"])
+    return rows
+
+
+def run_daily(cfg, args):
+    """发「上一个赛程日」的整合版战果。**一次网络请求都不发。**
+
+    幂等是第一要求：这个 job 每天由 timer 触发，但完全可能被手动再跑一次，
+    所以发成功之后在 state_esports_daily.json 里记下「哪个赛程日已经发过了」。
+    """
+    es = resolve_config(cfg)
+    now = datetime.now(CST)
+    check = bool(getattr(args, "check_daily", False))
+
+    if not es.get("daily_enabled", True):
+        log("[silent] 全天整合版已关闭（daily_enabled=false）")
+        return 0
+
+    # 显式挡住「daily_run_time 早于 preview_run_time」这个配置错误。
+    # 不挡的话拿到的是前天那一场，汇总会**静默地**少一天，很难查。
+    ph, pm = parse_run_time(es.get("preview_run_time"))
+    dh, dm = parse_run_time(es.get("daily_run_time"))
+    if (dh, dm) <= (ph, pm):
+        log("[warn] daily_run_time(%02d:%02d) 不晚于 preview_run_time(%02d:%02d)，"
+            "整合版会汇总到错误的赛程日，本轮不发" % (dh, dm, ph, pm))
+        return 0
+
+    start, end = last_schedule_day(now, es.get("preview_run_time"))
+    day_key = start.strftime("%Y-%m-%d")
+    span = "%s → %s" % (start.strftime("%m-%d %H:%M"), end.strftime("%m-%d %H:%M"))
+
+    if not check:
+        st = load_daily_state()
+        if st.get("last_day") == day_key:
+            log("[silent] 赛程日 %s 的整合版已经发过了（%s），本轮不发"
+                % (day_key, st.get("last_at") or "?"))
+            return 0
+
+    data = load_results_pending()
+    rows = daily_rows(data["items"], start, end, es)
+    n_all = len([it for it in data["items"]
+                 if start.timestamp() <= int(it.get("ts") or 0) < end.timestamp()])
+    log("[info] 上一个赛程日 %s：清单里 %d 场，其中 %d 场已结算入册"
+        % (span, n_all, len(rows)))
+
+    if not rows:
+        log("[silent] 这个赛程日没有已结算的比赛，不发整合版")
+        return 0
+
+    max_rows = max(1, int(es.get("daily_max_rows") or 24))
+    shown = rows[:max_rows]
+    if len(shown) < len(rows):
+        log("[info] 整合版只列前 %d 场（共 %d 场）" % (max_rows, len(rows)))
+
+    # 卡片和标题都用**赛程日的开始时刻**当标签 —— 这样写出来就是
+    # 「10-05 周一」，和当天早上那条预告的命名完全一致（预告也叫它「10-05」）。
+    label_dt = start
     card = None
     if es.get("card_enabled", True) and es.get("card_results_enabled", True):
-        card = render_results_card(rows, now, es)
-    if card:
-        body = format_results_caption(rows, now)
-        log("[info] 本轮发「一行文字 + 一张战果图」")
-    else:
-        body = format_results(rows, now)
-        log("[info] 本轮发纯文本战果（没有出图）")
+        card = render_results_card(shown, label_dt, es)
+    body = format_results_caption(rows, label_dt) if card else format_results(rows, label_dt)
+    log("[info] 整合版：%d 场，%s"
+        % (len(rows), "一行文字 + 一张整合图" if card else "纯文本"))
 
     if check:
         log("")
         log(body)
         if card:
-            path = os.path.join(tempfile.gettempdir(), "esports_results_check.png")
+            path = os.path.join(tempfile.gettempdir(), "esports_daily_check.png")
             try:
                 with open(path, "wb") as fp:
                     fp.write(card)
-                log("[check] 这次会发的战果图已存到：%s" % path)
+                log("[check] 整合版预览图已存到：%s" % path)
             except OSError as exc:
-                log("[warn] 战果预览图写不出来：%s" % exc)
+                log("[warn] 整合版预览图写不出来：%s" % exc)
         log("\n[check] 以上是将会发送的内容（未发送、未写状态）")
         return 0
 
     notifiers = watch.build_notifiers(cfg)
     delivered, failed = send_with_retry(with_card_image(notifiers, card), body, es)
     if not delivered or failed:
-        log("[error] 战果发送失败：%s（不写状态，下一轮会重试）" % ("、".join(failed) or "未知"))
+        log("[error] 整合版发送失败：%s（不写状态，下一轮会重发）"
+            % ("、".join(failed) or "未知"))
         return 1
 
-    log("[sent] 战果已送达（%d 条）" % len(notifiers))
-    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
-    for row in rows:
-        # 用同一个对象：rows 里存的是 data["items"] 里的引用，改它就是改清单
-        row["item"]["status"] = "reported"
-        row["item"]["reported_at"] = stamp
-        row["item"]["score"] = row["score"]
-        row["item"]["winner"] = row["winner"]
-    for it in expired:
-        it["status"] = "abandoned"
-        it["reported_at"] = stamp
-    save_results_pending(_prune_pending(data, now, es))
+    log("[sent] 整合版已送达（%d 个通道，%d 场）" % (len(notifiers), len(rows)))
+    try:
+        save_daily_state({"last_day": day_key,
+                          "last_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                          "rows": len(rows)})
+    except OSError as exc:
+        # 标记写不进去 = 明天这一刻还有个机会重发今天这条。要显式说出来，
+        # 否则「同一条整合版发了两遍」会变成一桩无头案。
+        log("[warn] 整合版幂等标记写不进去（%s）：同一天再跑一次会重发" % exc)
     return 0
 
 
@@ -2593,7 +3375,7 @@ RESULT_FIXTURE_HTML = """
   <div class="match-info-tournament">
     <span class="match-info-tournament-wrapper">
       <span class="match-info-tournament-name">
-        <a href="/counterstrike/ESL/Pro_League" title="ESL/Pro League"><span>ESL Pro League Season 24 - Round 3</span></a></span></span>
+        <a href="/counterstrike/ESL/Pro_League/Season_24#Round_3" title="ESL/Pro League/Season 24#Round 3"><span>ESL Pro League Season 24 - Round 3</span></a></span></span>
   </div>
 </div>
 <div class="match-info">
@@ -2653,16 +3435,78 @@ RESULT_FIXTURE_HTML = """
   <div class="match-info-tournament">
     <span class="match-info-tournament-wrapper">
       <span class="match-info-tournament-name">
-        <a href="/counterstrike/ESL/Pro_League" title="ESL/Pro League"><span>ESL Pro League Season 24 - Round 3</span></a></span></span>
+        <a href="/counterstrike/ESL/Pro_League/Season_24#Round_3" title="ESL/Pro League/Season 24#Round 3"><span>ESL Pro League Season 24 - Round 3</span></a></span></span>
+  </div>
+</div>
+"""
+
+
+# 赛事页的 bracket 弹窗 fixture（拿逐图比分用）。
+# 结构照 2026-10-05 实测的 ESL Pro League Season 24 赛事页裁：
+#   · 第 1 个弹窗 = 正常一场打完的 Bo3，4 条 grid-row（**最后一条没打**，必须被丢掉）
+#   · 第 2 个弹窗 = 只有一边队名（页面上的 TBD/未定对阵），必须被跳过
+EVENT_FIXTURE_HTML = """
+<div class="brkts-popup brkts-popup-container brkts-match-info-popup">
+  <div class="brkts-popup-header">
+    <span class="timer-object" data-timestamp="1791018000" data-finished="finished">x</span>
+  </div>
+  <div class="match-info-header">
+    <div class="match-info-header-opponent match-info-header-opponent-left match-info-header-loser">
+      <div class="block-team"><div class="team-name">Legacy</div></div></div>
+    <div class="match-info-header-scoreholder">
+      <span class="match-info-header-scoreholder-scorewrapper">
+        <span class="match-info-header-scoreholder-upper">
+          <span class="match-info-header-scoreholder-score">1</span> : <span class="match-info-header-scoreholder-score match-info-header-winner">2</span></span>
+        <span class="match-info-header-scoreholder-lower">(Bo3)</span></span></div>
+    <div class="match-info-header-opponent match-info-header-winner">
+      <div class="block-team"><div class="team-name">PARIVISION</div></div></div>
+  </div>
+  <div class="brkts-popup-body-grid">
+    <div class="brkts-popup-body-grid-row">
+      <div class="brkts-popup-body-grid-cell"><a href="/counterstrike/Dust_II">Dust II</a></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score">13</div></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score">5</div></div>
+    </div>
+    <div class="brkts-popup-body-grid-row">
+      <div class="brkts-popup-body-grid-cell"><a href="/counterstrike/Inferno">Inferno</a></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score">2</div></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score">13</div></div>
+    </div>
+    <div class="brkts-popup-body-grid-row">
+      <div class="brkts-popup-body-grid-cell"><a href="/counterstrike/Ancient">Ancient</a></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score">12</div></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score">16</div></div>
+    </div>
+    <div class="brkts-popup-body-grid-row">
+      <div class="brkts-popup-body-grid-cell"><a href="/counterstrike/Nuke">Nuke</a></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score"></div></div>
+      <div class="brkts-popup-body-grid-cell"><div class="detailed-scores-main-score"></div></div>
+    </div>
+  </div>
+  <div class="brkts-popup-footer">
+    <a href="https://www.hltv.org/matches/2398718/match">Match page</a></div>
+</div>
+<div class="brkts-popup brkts-popup-container brkts-match-info-popup">
+  <div class="brkts-popup-header">
+    <span class="timer-object" data-timestamp="1791099000">x</span>
+  </div>
+  <div class="match-info-header">
+    <div class="match-info-header-opponent match-info-header-opponent-left">
+      <div class="block-team"><div class="team-name">TBD</div></div></div>
+    <div class="match-info-header-scoreholder">
+      <span class="match-info-header-scoreholder-scorewrapper">
+        <span class="match-info-header-scoreholder-upper">vs</span></span></div>
   </div>
 </div>
 """
 
 
 def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None, shorts=None,
-        finished=False, sides=None, score=""):
+        finished=False, sides=None, score="", tour_page=""):
     n = len(list(teams))
-    return {"ts": ts, "teams": list(teams), "bo": bo, "tour": tour, "tbd": tbd,
+    return {"ts": ts, "teams": list(teams), "bo": bo, "tour": tour,
+            # 赛事页路径：拿逐图比分用的。不传就空着 —— 空着只是「没有逐图」。
+            "tour_page": tour_page, "tbd": tbd,
             # 页面自带的短名，只给「队标拿不到时的灰色占位块」用。
             # 不传就空着 —— 占位块会退回长名（自动缩字号）。
             "shorts": (list(shorts) if shorts else [""] * n)[:n],
@@ -2694,6 +3538,11 @@ def selftest():
                 ms[1]["teams"][0] == "Alpha", ms[1]["teams"])
         t.check("赛事名取可见文本而不是 href 路径",
                 ms[0]["tour"] == "BLAST Premier Fall 2026 - Group A", ms[0]["tour"])
+        # 逐图比分要用「赛事页面路径」，它是 Liquipedia 链接里给的，不用维护别名表。
+        t.check("tour_page 取链接 title（不是可见文案）",
+                ms[0]["tour_page"] == "BLAST/Premier", ms[0]["tour_page"])
+        t.check("每场都带 tour_page 字段（拿不到就是空串）",
+                all(isinstance(m.get("tour_page"), str) for m in ms))
         t.check("Bo 号解析", ms[0]["bo"] == "Bo3" and ms[1]["bo"] == "Bo1",
                 "%s/%s" % (ms[0]["bo"], ms[1]["bo"]))
         t.check("TBD vs TBD 被标成 tbd", ms[2]["tbd"] is True)
@@ -3294,6 +4143,156 @@ def selftest():
         t.check("战果相关的字都在字体子集里（缺字会静默退回纯文本）",
                 card_missing_chars(["CS2 战果", "10-05 周一", "共 2 场", "MOUZ 2:1 9z"]) == set())
 
+    # ---- 3d. 条款节流闸门（跨进程的「1 次 / 30 秒」）----
+    print("\n-- 3d. 条款节流（action=parse ≤ 1 次 / 30 秒）--")
+    t.check("刚抓过 → 要等满一个间隔", parse_gate_delay(1000.0, 1000.0, 30) == 30.0)
+    t.check("过了 12 秒 → 再等 18 秒", parse_gate_delay(1000.0, 1012.0, 30) == 18.0)
+    t.check("早就超过间隔 → 不等", parse_gate_delay(1000.0, 1999.0, 30) == 0.0)
+    t.check("从没抓过（时间戳为 0）→ 不等", parse_gate_delay(0, 12345.0, 30) == 0.0)
+    t.check("间隔配成 0 → 等于关掉节流", parse_gate_delay(1000.0, 1000.0, 0) == 0.0)
+    # ⚑ 时钟回拨 / 别的机器写了未来时间：只等一个完整间隔，
+    #   否则会算出一个天文数字的 sleep，把这一轮卡到 systemd 的 TimeoutStartSec。
+    t.check("⚑ 时间戳在未来（时钟回拨）也只等一个间隔",
+            parse_gate_delay(2000.0, 1000.0, 30) == 30.0)
+    t.check("节流时间戳文件不存在时不炸",
+            _load_parse_stamp(os.path.join(HERE, "__no-such-stamp__.json")) == 0.0)
+
+    # ---- 3e. 全天整合版的赛程日窗口 ----
+    print("\n-- 3e. 全天整合版（窗口 / 取行）--")
+    at_0940 = datetime(2026, 10, 6, 9, 40, tzinfo=CST)
+    ds, de = last_schedule_day(at_0940, "09:30")
+    t.check("⚑ 09:40 跑 → 汇总「昨天 09:30 → 今天 09:30」",
+            (ds.strftime("%m-%d %H:%M"), de.strftime("%m-%d %H:%M"))
+            == ("10-05 09:30", "10-06 09:30"), (ds, de))
+    # 两者务必不能混：preview_window 给的是「即将开始的 24 小时」，正好跳过要汇总的那天。
+    t.check("⚑ 和预告窗口是两回事（preview_window 给的是 10-07 09:30）",
+            preview_window(at_0940, "09:30")[1].strftime("%m-%d %H:%M") == "10-07 09:30")
+    # 记下这个坑：整合版若在预告时刻**之前**跑，右端点会退到昨天，汇总的就不是「刚过完」那天。
+    t.check("⚑ 若在 09:30 之前跑，窗口会退成「前天 → 昨天」（所以要显式挡）",
+            last_schedule_day(datetime(2026, 10, 6, 9, 20, tzinfo=CST),
+                              "09:30")[1].strftime("%m-%d %H:%M") == "10-05 09:30")
+
+    lo, hi = int(ds.timestamp()), int(de.timestamp())
+    _dit = [
+        {"teams": ["Legacy", "PARIVISION"], "ts": lo + 3600, "status": "reported",
+         "score": "1:2", "winner": "PARIVISION", "shorts": ["Legacy", "PARIVISION"],
+         "logos": ["", ""], "tour": "ESL Pro League Season 24 - Round 1", "bo": "Bo3"},
+        {"teams": ["FURIA", "MOUZ"], "ts": hi - 3600, "status": "reported",
+         "score": "2:0", "winner": "FURIA", "shorts": ["FURIA", "MOUZ"],
+         "logos": ["", ""], "tour": "T", "bo": "Bo3"},
+        {"teams": ["A", "B"], "ts": lo - 3600, "status": "reported",
+         "score": "2:0", "winner": "A"},                       # 窗口之前 → 不算
+        {"teams": ["C", "D"], "ts": lo + 7200, "status": "pending",
+         "score": "", "winner": ""},                           # 还没出结果 → 不算
+        {"teams": ["E", "F"], "ts": lo + 10800, "status": "abandoned",
+         "score": "", "winner": ""},                           # 延期/取消 → 不算
+        {"teams": ["G", "H"], "ts": lo + 14400, "status": "reported",
+         "score": "2:?", "winner": "G"},                       # 比分不是数字 → 不算
+        {"teams": ["I", "J"], "ts": lo + 18000, "status": "reported",
+         "score": "2:0", "winner": "ZZZ"},                     # 胜方不在两队里 → 不算
+    ]
+    drows = daily_rows(_dit, ds, de, es)
+    t.check("⚑ 整合版只收「窗口内 + 已 reported + 比分成形」的场次",
+            len(drows) == 2 and [r["teams"][0] for r in drows] == ["Legacy", "FURIA"],
+            [r["teams"] for r in drows])
+    t.check("整合版按时间升序", [r["ts"] for r in drows] == sorted(r["ts"] for r in drows))
+    t.check("整合版不带逐图（用户选的版式 C 就是不带）",
+            all(r["maps"] == [] for r in drows))
+    t.check("整合版在没有可入册场次时返回空（→ 不发空消息）",
+            daily_rows([], ds, de, es) == [])
+    t.check("空清单也能算窗口（不炸）",
+            last_schedule_day(at_0940, None)[1].strftime("%H:%M") == "09:30")
+
+    # ---- 3f. 单场战报（逐图比分 + 版式 A）----
+    print("\n-- 3f. 单场战报（逐图比分解析 / 版式 A）--")
+    evs = parse_event_maps(EVENT_FIXTURE_HTML)
+    t.check("赛事页切出 1 个弹窗（只有一边队名的那个被跳过）", len(evs) == 1, len(evs))
+    if len(evs) == 1:
+        e0 = evs[0]
+        t.check("弹窗队名取 team-name（不是 title，否则会拼三遍）",
+                e0["teams"] == ["Legacy", "PARIVISION"], e0["teams"])
+        t.check("弹窗系列比分", e0["series"] == ["1", "2"], e0["series"])
+        t.check("弹窗时间戳", e0["ts"] == 1791018000, e0["ts"])
+        t.check("弹窗 finished 标记", e0["finished"] is True)
+        t.check("⚑ 没打的地图（比分栏是空的）被丢掉，只留 3 张",
+                [m["map"] for m in e0["maps"]] == ["Dust II", "Inferno", "Ancient"],
+                [m["map"] for m in e0["maps"]])
+        t.check("逐图回合比分", [m["rounds"] for m in e0["maps"]]
+                == [["13", "5"], ["2", "13"], ["12", "16"]],
+                [m["rounds"] for m in e0["maps"]])
+        t.check("弹窗里的 HLTV 比赛页 id",
+                e0["hltv_id"] == "2398718", e0["hltv_id"])
+        idx = event_maps_index(evs)
+        t.check("逐图索引按 (时间戳, 队名键) 配对",
+                (1791018000, _teams_key(["PARIVISION", "Legacy"])) in idx)
+        t.check("⚑ 索引必须带时间戳（同两队可能打好几轮，只按队名配会张冠李戴）",
+                (1791018001, _teams_key(["Legacy", "PARIVISION"])) not in idx)
+        t.check("没有逐图的场次不进索引",
+                event_maps_index([{"ts": 1, "teams": ["A", "B"], "maps": []}]) == {})
+
+    t.check("逐图按每图胜负上色：左队赢的那图 → 左侧是胜色",
+            _round_win(["13", "5"], 0) is True and _round_win(["13", "5"], 1) is False)
+    t.check("逐图按每图胜负上色：右队赢的那图 → 右侧是胜色",
+            _round_win(["2", "13"], 0) is False and _round_win(["2", "13"], 1) is True)
+    t.check("⚑ 比分拿不到时两边都不算赢（不抛异常、不把卡片整张搞没）",
+            _round_win(["", ""], 0) is False and _round_win([], 1) is False)
+
+    srow = {
+        "item": item_old, "ts": 1791104400, "teams": ["Legacy", "PARIVISION"],
+        "shorts": ["Legacy", "PARIVISION"], "logos": ["", ""],
+        "score": "1:2", "score_left": "1", "score_right": "2",
+        "score_source": "series", "winner": "PARIVISION", "bo": "Bo3",
+        "tour": "ESL Pro League Season 24 - Round 1",
+        "tour_page": "ESL/Pro League/Season 24",
+        "maps": [{"map": "Dust II", "rounds": ["13", "5"]},
+                 {"map": "Inferno", "rounds": ["2", "13"]},
+                 {"map": "Ancient", "rounds": ["12", "16"]}],
+    }
+    scap = format_result_caption(srow, base_now)
+    t.check("单场战报 caption 是一行、带对阵与比分",
+            scap.startswith("【CS2 战报】") and "Legacy" in scap and "1:2" in scap
+            and "PARIVISION" in scap, scap)
+    stxt = format_result(srow, base_now)
+    t.check("纯文本兜底里带逐图（这正是单场相对整合版的价值）",
+            "Dust II" in stxt and "地图 1" in stxt and "13:5" in stxt, stxt)
+    t.check("单场正文末行署名 Liquipedia",
+            stxt.rstrip().splitlines()[-1] == "数据来源：Liquipedia",
+            stxt.rstrip().splitlines()[-1])
+    t.check("单场 caption 用**比赛时间**而不是当前时间（跨午夜结算才不会串日期）",
+            datetime.fromtimestamp(1791104400, CST).strftime("%m-%d") in scap, scap)
+
+    if Image is not None:
+        spng = render_result_card(srow, base_now, es)
+        t.check("单场战报卡片能出 PNG",
+                isinstance(spng, (bytes, bytearray))
+                and bytes(spng[:8]) == b"\x89PNG\r\n\x1a\n", type(spng))
+        if spng:
+            im = Image.open(io.BytesIO(spng))
+            t.check("单场战报高度 = 页头 + 对阵行 + 逐图 × 3 + 页脚",
+                    im.size == (CARD_W, CARD_HDR_H + CARD_FIX_H + CARD_MAP_H * 3
+                                + CARD_FTR_H), im.size)
+        # ⚑ 抓不到逐图时的降级路径：卡片照样出，只是矮了 3 行 —— 绝不能因此不发。
+        nomap = render_result_card(dict(srow, maps=[]), base_now, es)
+        t.check("⚑ 没有逐图数据照样出图（只是矮一截，不是失败）",
+                isinstance(nomap, (bytes, bytearray)))
+        if nomap:
+            im2 = Image.open(io.BytesIO(nomap))
+            t.check("没有逐图时高度 = 页头 + 对阵行 + 页脚",
+                    im2.size == (CARD_W, CARD_HDR_H + CARD_FIX_H + CARD_FTR_H), im2.size)
+        t.check("单场战报缺字时整张不出（退回纯文本，不画豆腐块）",
+                render_result_card(dict(srow, teams=["測試隊", "PARIVISION"],
+                                        shorts=["測試隊", "PARIVISION"]),
+                                   base_now, es) is None)
+        t.check("单场战报在「两边队标都没有」时照样出图（画占位块）",
+                render_result_card(srow, base_now,
+                                   dict(es, logo_max_new_per_run=0)) is not None)
+        # 这一条是 2026-10-05 预览时真踩到的：忘了补「报」「地」，整张卡片静默消失。
+        t.check("⚑ 单场战报要画的中文全在字体子集里（报 / 地 最容易漏）",
+                card_missing_chars(["CS2 战报", "地图 1", "地图 3", "Dust II",
+                                    "PARIVISION"]) == set())
+        t.check("「报」「地」在固定字符表里",
+                "报" in CARD_UI_CHARS and "地" in CARD_UI_CHARS)
+
     # ---- 4. 连续静默与报平安 ----
     print("\n-- 4. 连续静默 → 报平安 --")
     st = load_state(os.path.join(HERE, "__not-exist__.json"))
@@ -3430,6 +4429,10 @@ def main(argv=None):
                         help="结算一轮战果：只抓「已到结算窗口」的场次，没到点不发请求")
     parser.add_argument("--check-results", action="store_true",
                         help="同上但只打印/出图，不发消息、不写状态")
+    parser.add_argument("--daily", action="store_true",
+                        help="发上一个赛程日的全天整合版战果（不联网，只读清单快照）")
+    parser.add_argument("--check-daily", action="store_true",
+                        help="同上但只打印/出图，不发消息、不写状态")
     parser.add_argument("--selftest", action="store_true", help="离线自检，不联网")
     args = parser.parse_args(argv)
 
@@ -3447,6 +4450,13 @@ def main(argv=None):
 
     if args.test_notify:
         return cmd_test_notify(cfg)
+
+    if args.daily or args.check_daily:
+        # 和 --check-results 一样：只读演练连通道都不建，所以不校验推送配置
+        if not args.check_daily and not watch.validate_cfg(cfg, args.config):
+            log("[error] config.json 没配好，整合版会发不出去（见上面的报错）")
+            return 2
+        return run_daily(cfg, args)
 
     if args.results or args.check_results:
         # --check-results 是纯只读演练，连通道都不建，所以不校验推送配置
