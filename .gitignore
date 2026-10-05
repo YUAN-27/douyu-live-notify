@@ -16,6 +16,10 @@ rank_cache.json.tmp
 # 队标缓存：文件名是 sha256(url) 前 16 位，随时可从赛程页重建，没必要进仓库
 #（打包时会自动跳过：pack_deploy.py 只收 deploy/ 下的**文件**，目录不进包）
 deploy/logo_cache/
+# 生成 card_font.otf 用的**源字体**（Noto Sans SC，8 MB）。产物已入库，源文件不要 ——
+# 重跑 deploy/make_card_font.py 会自动重新下载。pack_deploy.py 的 SKIP_NAMES 里也钉着，
+# 因为它对 deploy/ 是「全收」，只靠一条守卫不够。
+deploy/NotoSansSC-Regular.otf
 # 登录二维码：本质是一次性登录凭据，生成一次就作废。绝不能进仓库。
 qr.png
 qr.svg

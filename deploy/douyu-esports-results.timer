@@ -1,0 +1,25 @@
+[Unit]
+Description=每 10 分钟看一次「有没有比赛刚打完，该发战果了」
+
+[Timer]
+# ⚠️ 分钟数**故意错开 :30**（用 5,15,25,35,45,55 而不是 0/10）。
+#    douyu-esports.timer 固定在每天 09:30 抓一次页面；如果这里也落在 :30，
+#    两个 job 会在同一秒各发一次 action=parse 请求，白白贴着条款的
+#    「1 次 / 30 秒」上限。错开之后，两边永远不在同一分钟发请求。
+#
+# 这个 timer 每 10 分钟唤起一次，但**绝大多数唤起不产生任何网络请求**：
+# esports.py --results 先读 state_results_pending.json，清单里没有
+# 「已进入结算窗口」的场次就直接退出。一天实际请求数 ≈ 10~13 次。
+OnCalendar=*-*-* *:5,15,25,35,45,55:00
+
+# ⚠️ 故意**不设** Persistent。
+#    漏一拍完全没有影响：清单里的场次还在，下一拍（10 分钟后）照样能看到它。
+#    而 Persistent=true 会在开机时**立刻补跑一次** —— 那时清单里堆着一批
+#    早就过了结算窗口的旧条目，反而容易一次发出一堆迟到的战果。
+#    这里的「漏」是安全的，「补」不是。
+Persistent=false
+
+Unit=douyu-esports-results.service
+
+[Install]
+WantedBy=timers.target

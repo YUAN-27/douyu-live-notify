@@ -45,6 +45,7 @@
   "_comment_esports_rank": "rank_top_n / hltv_aliases / rank_ttl_hours：第 2 条「世界前 15」用。rank_top_n=0 可整条关掉（连 HLTV 都不请求）。**HLTV 的队名写法和 Liquipedia 不一致**（Spirit vs Team Spirit、G2 vs G2 Esports…），不一致的必须在 hltv_aliases 里配映射，否则那条筛不出来。核对映射用 `python3 esports.py --rank`。⚠️ 千万别用「查重定向自动补全」：Liquipedia 上 `Spirit` / `Aurora` 是**选手页**，自动映射会把世界第一映射到选手身上、然后静默漏发。",
   "_comment_esports_tournament": "tournament_min_known_teams：第 4 条的门槛。同一赛事名下、**窗口内还没开打**的场次里，出现过多少支**不同的**「知名 ∪ 世界前 15」队伍。同队打两场只算一支，不跨赛事凑数，中国队不计入。设 0 可关掉这条。",
   "_comment_esports_card": "card_enabled / card_max_rows / logo_*：图片卡片。**默认发「一行文字 + 一张 880px 宽的 PNG 卡片」**（手机 QQ 对长文本换行处理很差，长文字版 8 场根本扫不动）。card_enabled=false 就退回纯文本；card_max_rows 是图上最多画几行（超出的场次只在页脚写「图里只列前 N 场」，文字那行不受影响）。队标是**赛程页自带的**（零额外请求），缓存在 deploy/logo_cache/，logo_ttl_hours 是保鲜期、logo_max_new_per_run 是每轮最多新下几张、logo_timeout 是单张下载超时。⚠️ 图片出不来时**自动退回纯文本，消息一定发得出去**；队标下不动只是画个灰底占位块，不会导致退化成纯文本。字体随包发布（deploy/card_font.otf），改卡片文案要同步两张字符表，见 deploy/ESPORTS.md。",
+  "_comment_esports_results": "results_enabled / card_results_enabled / results_grace_minutes / results_timeout_minutes / results_max_age_hours：战果公布（esports.py --results，由 douyu-esports-results.timer 每 10 分钟拉起）。机制：发预告时把当次要推的场次写进 state_results_pending.json；之后定时器每 10 分钟先读清单，**没有到结算窗口的场次就一个请求都不发**直接退出（一天实际请求约 10~13 次）。所谓「结算窗口」= 开打时刻 + grace ~ 开打时刻 + timeout，按赛制分档（见下面的默认值）：到点后抓**同一个赛程页**（零新增数据源），比对「已结束」的三个信号（计时器上的 data-finished、对手块上的 winner/loser、比分框里的数字，三个同时成立）才算打完。results_enabled=false 可整条关掉；card_results_enabled=false 让战果只发文字不发图；results_max_age_hours 是「超过多久还没结算就放弃」—— 防止服务器停机几天后开机一次性补发一堆旧战果。⚠️ 这几个键**不写就用下面这些内置默认值**，一般不用动。",
   "esports": {
     "enabled": true,
     "ua_contact": "https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com",
@@ -89,6 +90,20 @@
     "card_max_rows": 12,
     "logo_ttl_hours": 720,
     "logo_max_new_per_run": 24,
-    "logo_timeout": 15
+    "logo_timeout": 15,
+
+    "results_enabled": true,
+    "card_results_enabled": true,
+    "results_grace_minutes": {
+      "Bo1": 50,
+      "Bo3": 100,
+      "Bo5": 170
+    },
+    "results_timeout_minutes": {
+      "Bo1": 90,
+      "Bo3": 180,
+      "Bo5": 270
+    },
+    "results_max_age_hours": 24
   }
 }

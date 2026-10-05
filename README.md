@@ -124,7 +124,9 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --check` | **看今天会推什么赛程**：只抓取 + 打印，不发消息、不写状态（上线前先跑这个） |
 | `python deploy/esports.py --teams` | **列出页面上的真实队名**并标出哪些已收录（含 `[知名]` / `[世界前15]` 标记），改白名单前用它抄名字（不发消息、不写状态） |
 | `python deploy/esports.py --rank` | **核世界前 15 的队名映射**：打印 HLTV 写法 → Liquipedia 队名，标出没映射上的（会请求一次 HLTV，不发消息、不写状态） |
-| `python deploy/esports.py --selftest` | 赛程预告离线自检（正常 183 项；少 `make_card_font.py` 是 181、没装 Pillow 是 167、都没有是 165，**只看有没有 0 失败**），不联网、不发消息 |
+| `python deploy/esports.py --selftest` | 赛程预告离线自检（正常 235 项；少 `make_card_font.py` 是 233、没装 Pillow 是 212、都没有是 210，**只看有没有 0 失败**），不联网、不发消息 |
+| `python deploy/esports.py --check-results` | **看今天会推什么战果**：只结算「已经打完、还没发过」的场次，出图到 `/tmp/esports_results_check.png`，不发消息、不写状态。**清单空着也会演练**（拿页面上最近打完的 8 场演示），所以刚装好就能验收 |
+| `python deploy/esports.py --results` | 结算到期场次并发战果（定时器调的就是它；没到窗口会**一个请求都不发**就退出） |
 | `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
 | `python deploy/esports.py --check`（同上） | 顺带把要发的那张卡片渲染到 `/tmp/esports_card_check.png`，可以下载下来看排版 |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py` / **`card_font.otf`** / `install-watch.sh`，并归一为 LF） |

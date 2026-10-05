@@ -1,0 +1,30 @@
+[Unit]
+Description=斗鱼开播提醒 · CS2 战果结算（由 douyu-esports-results.timer 拉起）
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# esports.py 用 __file__ 定位 config.json 和 state_results_pending.json，
+# 所以 WorkingDirectory 不影响读写；留着是为了排错时路径直观。
+WorkingDirectory=/opt/douyu-live-notify
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py --results
+
+# 绝大多数时候这个服务**一秒内就退出、一次网络请求都不发** ——
+# esports.py --results 先读本地清单，没有「已进入结算窗口」的场次就直接返回。
+# 只有真有到点的场次时才抓一次页面 + 发一条消息。
+# 抓取失败会按 Liquipedia 条款退避重试（最多 3 次 × 30 秒），所以给 300 秒余量。
+TimeoutStartSec=300
+
+# 单独一个日志文件：战果和预告是两条流水，混在一起排错很费劲。
+# tail -f /var/log/douyu-watch/esports-results.log
+StandardOutput=append:/var/log/douyu-watch/esports-results.log
+StandardError=append:/var/log/douyu-watch/esports-results.log
+
+# 最小权限。和 douyu-watch.service / douyu-esports.service 保持一致。
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true

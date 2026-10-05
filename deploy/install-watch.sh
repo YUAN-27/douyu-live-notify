@@ -165,7 +165,7 @@ fi
 #   make_card_font.py      重新生成上面那个字体的脚本。平时用不上（产物已入库），
 #                          但要装 —— 因为 `esports.py --selftest` 里有 2 条断言
 #                          **要 import 它**来核对「两张字符表 / 覆盖区间表是否一致」。
-#                          不装的话那 2 条被跳过，自检项数会从 183 变成 181，
+#                          不装的话那 2 条被跳过，自检项数会从 235 变成 233，
 #                          以后看日志的人会以为少了什么。
 for cf in card_font.otf CARD_FONT_LICENSE.txt make_card_font.py; do
   if [[ -f "$UNIT_DIR/$cf" ]]; then
@@ -272,6 +272,18 @@ if [[ -f "$UNIT_DIR/douyu-esports.service" && -f "$UNIT_DIR/douyu-esports.timer"
   install -m 644 "$UNIT_DIR/douyu-esports.service" /etc/systemd/system/douyu-esports.service
   install -m 644 "$UNIT_DIR/douyu-esports.timer"   /etc/systemd/system/douyu-esports.timer
   echo "已安装 douyu-esports.service / douyu-esports.timer（尚未启用）"
+fi
+
+# CS2 战果结算单元。也是**只装不 enable**，理由同上（它同样会往群里发消息）。
+# 和预告的区别：这个每 10 分钟就被唤起一次，但绝大多数唤起**不发网络请求**
+# （清单里没有到结算时刻的场次就直接退出），所以开着它并不费什么。
+if [[ -f "$UNIT_DIR/douyu-esports-results.service" \
+   && -f "$UNIT_DIR/douyu-esports-results.timer" ]]; then
+  install -m 644 "$UNIT_DIR/douyu-esports-results.service" \
+    /etc/systemd/system/douyu-esports-results.service
+  install -m 644 "$UNIT_DIR/douyu-esports-results.timer" \
+    /etc/systemd/system/douyu-esports-results.timer
+  echo "已安装 douyu-esports-results.service / .timer（尚未启用）"
 fi
 
 # 看门狗的告警通道配置。**已存在绝不覆盖** —— 里面是你要填的 webhook 密钥。
@@ -406,24 +418,51 @@ cat <<'EOF'
           时刻（不写 config.json 就改 esports.py 里的默认值）。窗口右端点就是它：
           只改定时器不改它，窗口会算偏 —— 偏早漏比赛、偏晚重复推。
 
+    e) 战果公布（可选，跟着赛程预告走）—— 比赛打完之后把比分发出来
+       cd /opt/douyu-live-notify && python3 esports.py --check-results
+       ⚠️ 这个命令**会真去抓一次页面**（1 次请求），但**不发消息、不写状态**，
+          出图到 /tmp/esports_results_check.png。想看排版就跑它。
+       机制：09:30 发预告时顺手把当次要推的场次写进 state_results_pending.json；
+       之后每 10 分钟唤起的 douyu-esports-results.timer 先读这份清单，
+       **没有到结算窗口的场次就一个请求都不发**直接退出（一天实际请求约 10~13 次）。
+       窗口 = 开打时刻 + 宽限 ~ 开打时刻 + 超时，按赛制分档：
+           Bo1 50~90 分钟 / Bo3 100~180 分钟 / Bo5 170~270 分钟。
+       到期后抓**同一个页面**（零新增数据源），比对「已结束」的三个信号
+       （页面计时器上的 data-finished、对手块上的 winner/loser、比分框里的数字，
+       三个同时成立才算打完），配对成功后发一条战果消息 + 一张战果卡片。
+
+       ⚠️ 这个服务**只需要装，不需要「先验收再启用」**：它没有任何外部副作用
+          （不发消息），跑与不跑只影响「要不要发战果」。所以启用与否可以之后再说：
+          systemctl enable --now douyu-esports-results.timer
+          systemctl list-timers douyu-esports-results.timer
+          tail -f /var/log/douyu-watch/esports-results.log
+       ⚠️ 但**要注意**：想让它出结果，前提是 douyu-esports.timer 已经在跑
+          （清单是由预告那一轮写的）。预告没启用 = 清单永远是空的 = 永远静默。
+       ⚠️ 已发过的场次会被标成 reported，不会重复发；超过 24 小时还没结算的会被
+          标成 abandoned 丢掉（免得服务器停机几天后开机一次性补发一堆旧战果）。
+
 【回滚】
     # 只回滚赛程预告：
-    systemctl disable --now douyu-esports.timer
+    systemctl disable --now douyu-esports.timer douyu-esports-results.timer
     rm -f /etc/systemd/system/douyu-esports.{service,timer}
+    rm -f /etc/systemd/system/douyu-esports-results.{service,timer}
     systemctl daemon-reload
     # 只回滚看门狗：
     systemctl disable --now douyu-watchdog.timer
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     systemctl daemon-reload
     # 全部回滚：
-    systemctl disable --now douyu-watch.timer douyu-watchdog.timer douyu-esports.timer
+    systemctl disable --now douyu-watch.timer douyu-watchdog.timer \
+        douyu-esports.timer douyu-esports-results.timer
     rm -f /etc/systemd/system/douyu-watch.{service,timer}
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     rm -f /etc/systemd/system/douyu-esports.{service,timer}
+    rm -f /etc/systemd/system/douyu-esports-results.{service,timer}
     systemctl daemon-reload
     # 注意：不回滚 /var/log/douyu-watch（日志留着排错）和
     #       /var/lib/douyu-watchdog（告警历史留着）、/etc/default/douyu-watchdog（你的密钥）、
-    #       /opt/douyu-live-notify/state_esports.json（连续静默天数）
+    #       /opt/douyu-live-notify/state_esports.json（连续静默天数）、
+    #       /opt/douyu-live-notify/state_results_pending.json（待结算清单）
     #       确认不再用的时候自己删。
 
 ===============================================================

@@ -46,12 +46,17 @@ REQUIRED = [
     # 图片卡片的三件套：字体（二进制）+ 它的许可证 + 生成字体的脚本。
     # 少了字体不会报错，但卡片会**静默降级成纯文本**；少了 make_card_font.py
     # 则 `esports.py --selftest` 里 2 条「两张字符表是否一致」的断言会被跳过
-    # （项数从 183 掉到 181，容易被误判成「少了什么」）。所以缺了就不让打包。
+    # （项数从 235 掉到 233，容易被误判成「少了什么」）。所以缺了就不让打包。
     "card_font.otf",
     "CARD_FONT_LICENSE.txt",
     "make_card_font.py",
     "douyu-esports.service",
     "douyu-esports.timer",
+    # 战果公布（比赛打完后推战果）的两个单元。同样属于「缺了不会当场报错，
+    # 但装了也不会发战果」的那种 —— 必须进 REQUIRED，否则打出来的包看着正常、
+    # install-watch.sh 里那段 install 分支却找不到源文件而静默跳过。
+    "douyu-esports-results.service",
+    "douyu-esports-results.timer",
     "preflight-check.sh",
     "setup-docker-mirror.sh",
     "add-swap.sh",
@@ -74,8 +79,18 @@ TEXT_EXT = {".sh", ".py", ".md", ".json", ".yml", ".yaml", ".service", ".timer",
 
 SKIP_NAMES = {"__pycache__", "pack_deploy.py", "deploy.zip", "selftest_result.txt",
               # 世界排名的抓取缓存：服务器上会自己生成，别把开发机上的那份打进包
-              "rank_cache.json", "rank_cache.json.tmp"}
+              "rank_cache.json", "rank_cache.json.tmp",
+              # 生成 card_font.otf 用的**源字体**（Noto Sans SC，8 MB）。
+              # 产出的卡片字体是 card_font.otf（66 KB），这个源文件只在重跑
+              # make_card_font.py 时才需要 —— 进了包 deploy.zip 会从 260 KB 涨到 8 MB。
+              # （.gitignore 里也钉着，两条都要有：一个管仓库，一个管部署包。）
+              "NotoSansSC-Regular.otf"}
 SKIP_SUFFIX = (".pyc", ".pyo", ".bak", ".orig", ".rej")
+
+# 单个文件超过这个大小就认为「打包名单出问题了」，直接失败。
+# 现状：最大的文件是 card_font.otf（66 KB）。加这条是为了让「不小心把 8 MB 源字体
+# 或数据集打进去」这种事**在打包时就报错**，而不是等传上去才发现包变大了。
+MAX_FILE_BYTES = 1024 * 1024
 
 
 def is_text(name):
@@ -129,6 +144,20 @@ def main():
         print("补齐后再打包，免得服务器上装到一半才报错。", file=sys.stderr)
         return 1
 
+    # ---- 体积守卫 ----
+    # deploy/ 是**全收**（listdir），所以少写一条 SKIP 就可能把大文件带进去。
+    # 这里兜一道：超标就报错，而不是打出一个 8 MB 的包。
+    fat = [(n, os.path.getsize(os.path.join(DEPLOY_DIR, n)))
+           for n in entries if os.path.isfile(os.path.join(DEPLOY_DIR, n))]
+    fat = [(n, s) for n, s in fat if s > MAX_FILE_BYTES]
+    if fat:
+        print("这些文件超过 %d KB，不该进部署包：" % (MAX_FILE_BYTES // 1024),
+              file=sys.stderr)
+        for n, s in fat:
+            print("    %-40s %.1f MB" % (n, s / 1048576.0), file=sys.stderr)
+        print("加进 SKIP_NAMES（本脚本）和 .gitignore（仓库）再打包。", file=sys.stderr)
+        return 1
+
     # ---- 写包 ----
     # 第一层是 deploy/，对应文档里的 `unzip -o deploy.zip && cd deploy`
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
@@ -171,9 +200,9 @@ def main():
             print("    %-16s  %s（!! 包里没有，指纹打不出来）" % ("-", rel), file=sys.stderr)
     # 卡片字体也报一下：它是二进制资产、不参与上面 4 个代码指纹的核对，
     # 但「卡片画不出来 / 字变方块」时第一个要确认的就是这个文件对不对得上。
-    if "card_font.otf" in entries:
-        print("    %-16s  deploy/card_font.otf（卡片字体）"
-              % sha16(entries["card_font.otf"]))
+    for extra in ("card_font.otf", "make_card_font.py"):
+        if extra in entries:
+            print("    %-16s  deploy/%s（卡片资产）" % (sha16(entries[extra]), extra))
     return 0
 
 

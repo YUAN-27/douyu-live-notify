@@ -45,9 +45,43 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
 ----
     python3 esports.py                 # 正常跑一轮（该发就发，该静默就静默）
     python3 esports.py --check         # 只抓 + 打印将要发的内容，**不发消息、不写状态**
+    python3 esports.py --results       # 结算一轮战果（只抓「已到点」的场次，没到点 0 请求）
+    python3 esports.py --check-results # 同上但只打印/出图，**不发消息、不写状态**
+                                       # 清单空着也会演练（拿页面上最近打完的 8 场），
+                                       # 所以刚部署、还没跑过一次预告时也能用它验收
     python3 esports.py --teams         # 列出页面上的真实队名 + 是否已收录，用来校白名单
     python3 esports.py --test-notify   # 往配置的通道发一条测试消息（验证链路用）
     python3 esports.py --selftest      # 离线自检，不联网、不发消息
+
+关于「战果公布」
+----------------
+预告过的比赛打完之后，把比分发出来。**不需要第二个数据源** ——
+同一个页面（Liquipedia:Matches）本来就有两个 ticker 区块：
+  · `type=upcoming|limit=50` → 未来场次
+  · `type=recent |limit=50` → **最近 50 场已结束的比赛**（实测覆盖约 2 天）
+所以战果和预告**共用一次请求、一份解析器、一份限速预算**。
+
+「已结束」有三个独立信号，实测 50 场零冲突，可以互相印证：
+  ① 计时器上的 data-finished="finished"   ← 最权威
+  ② 对手块多带 match-info-header-winner / -loser
+  ③ 比分栏从 "vs" 变成 "2:0" 这类比分
+三个**全部**成立才算已结束（见 parse_matches 的 finished 字段）。
+
+**为什么不监控 HLTV**：HLTV 的队名是显示名，实测 103 个队名里 **79 个**与 Liquipedia
+不同（`BETBOOM` ↔ `BetBoom Team`、`NAVI` ↔ `Natus Vincere`、`G2` ↔ `G2 Esports`…）。
+要手工维护一张近乎全量的别名表，而**写错就是静默漏发** —— 和 hltv_aliases 同一类坑。
+HLTV 唯一不可替代的是逐图比分，QQ 群推送用不上。
+
+**调度怎么省请求**：`douyu-esports-results.timer` 每 10 分钟唤起，但 run_results()
+**先读本地清单、没有「已到结算窗口」的场次就直接退出（0 次网络请求）**。
+有到点的场次时也**只抓 1 次**，一次结算全部。实测一天约 10~13 次请求，
+只落在各场比赛的结算窗口内，其余时段一次都不发。
+（条款上限是 action=parse ≤ 1 次 / 30 秒，余量很大。）
+
+`--check-results` 是**只读演练**（不发消息、不写状态），而且**清单空着也会演示** ——
+它改用 drill_items() 拿页面上最近打完的 8 场走一遍完整流程。这是刻意的：
+刚到手的服务器清单必然为空，如果演练命令这时候只会回一句「清单里没有到结算时刻的场次」，
+那就等于没法验收。
 
 关于解析器
 ----------
@@ -92,6 +126,10 @@ except ImportError:  # pragma: no cover - 只在仓库布局下走到
 
 DEFAULT_CONFIG = os.path.join(HERE, "config.json")
 STATE_FILE = os.path.join(HERE, "state_esports.json")
+# 「待结算清单」：预告发出时把入选场次写进来，结算任务读它决定要不要联网。
+# 单独一个文件（不和 state_esports.json 混）—— 两者由不同的 timer 读写，
+# 混在一起会让「预告」和「结算」互相覆盖对方的字段。
+RESULTS_STATE_FILE = os.path.join(HERE, "state_results_pending.json")
 
 # 状态文件落在这个目录；systemd 单元里用 ProtectSystem=full，只读 /usr /etc，
 # /opt 可写，所以和 watch.py 一样直接写在脚本旁边。
@@ -126,7 +164,10 @@ LOGO_DIR = os.path.join(HERE, "logo_cache")
 #
 # 注：曾经有个红色「中」标（中国队），按用户 2026-10-05 的要求去掉了 ——
 #     只保留「中国队会入选推送」这个口径，不再在版面上打标记。
-CARD_UI_CHARS = "赛程今天明共场次日数据来源：个事图里只列前·→　"
+#
+# 「战果」「周一二三四五六日」是 2026-10-05 加「战果公布」时补的
+# （战果卡片的标题，以及页头上那个 `10-05 周一`）。
+CARD_UI_CHARS = "赛程今天明共场次日数据来源：个事图里只列前·→　战果周一二三四五六日"
 
 # card_font.otf 覆盖的 Unicode 区间，同样要和 make_card_font.py 对齐。
 # 出图前逐个字符核对：只要有一个字不在里面就**退回纯文本**，
@@ -164,6 +205,9 @@ C_LINE = (230, 227, 221)
 C_ROWLINE = (241, 239, 234)
 C_PLACE = (235, 233, 228)
 C_DAY = (192, 57, 43)       # 「次日」
+# 战果卡片专用：胜方用 C_INK + stroke_width=1（假粗体），负方压暗成这个灰，
+# 一深一浅就能看出谁赢了 —— 纯文本里没有颜色，只能靠比分大小。
+C_LOSE = (163, 161, 155)
 
 # 大赛关键词（子串匹配赛事名，大小写不敏感）。
 # ⚠️ 页面上**拿不到**赛事分级（S/A/B）：所有 data-* 属性已普查，没有
@@ -302,6 +346,20 @@ ESPORT_DEFAULTS = {
     "fold_hint": 15,
     # 连续静默多少天后发一条「报平安」，之后每满这么多天再发一次。0 = 从不发。
     "calm_after_empty_days": 7,
+    # ---- 战果公布 ----
+    # 预告过的比赛打完之后把比分发出来。关掉它 = 完全回到「只发预告」的行为。
+    "results_enabled": True,
+    # 战果卡片（复用队标/字体/Pillow 那一整套）。出不了图自动退回纯文本。
+    "card_results_enabled": True,
+    # 「开赛多久之后才开始找结果」—— 这是最重要的一个安全阀：
+    # 它是**时间下限**，没有它就可能把「进行中」的比分当成战果发出去。
+    # 同时它也是节流阀：不到这个点，结算任务连网络请求都不发。
+    # 取值参考：Bo1 约 35~60 分钟、Bo3 约 75 分钟~3 小时、Bo5 约 2~4.5 小时。
+    "results_grace_minutes": {"Bo1": 50, "Bo3": 100, "Bo5": 170},
+    # 「到多久还没结果就放弃」—— 延期/取消的比赛不能让它永远占着清单。
+    "results_timeout_minutes": {"Bo1": 90, "Bo3": 180, "Bo5": 270},
+    # 清单里超过这么多小时还没结算的条目直接清掉（兜底，免得文件无限长大）。
+    "results_max_age_hours": 24,
     # 抓取最多试几次（含首次）。条款限制 1 次/30 秒，所以重试要隔开。
     "fetch_retry_max": 3,
     "parse_min_interval_seconds": 30,
@@ -694,6 +752,23 @@ def parse_matches(text):
 
         bo = re.search(r'scoreholder-lower">\s*\(?(Bo\d)\)?', seg)
 
+        # ---- 「已结束」三件套（战果公布用；预告不看这三个字段）----
+        # 三个信号互相独立，实测 50 场已结束场次零冲突：
+        #   ① data-finished="finished"（计时器控件上；未开打的场次**根本没有这个属性**）
+        #   ② 对手块多带 match-info-header-winner / -loser（未开打时只有 -opponent）
+        #   ③ 比分栏出现两个数字（未开打时是 "vs"）
+        # 必须三个**全部**成立才算 finished —— 宁可漏报，也不能把进行中的比分当战果。
+        fin = re.search(r'data-finished="([^"]*)"', seg)
+        sides = ["W" if "winner" in c else ("L" if "loser" in c else "")
+                 for c in re.findall(
+                     r'<div class="(match-info-header-opponent[^"]*)"', seg)][:2]
+        # 比分单独取两个 <span class="…scoreholder-score…">N</span>，不用「从 upper 抓到 lower」
+        # 那种正则 —— 未开打时 upper 里面是 "vs"，一路抓到 lower 会连 "(Bo3)" 一起吞进来。
+        nums = [tidy(x) for x in re.findall(
+            r'scoreholder-score[^"]*">\s*([^<]*?)\s*</span>', seg)]
+        finished = bool(fin and fin.group(1) == "finished"
+                        and len(nums) >= 2 and sorted(sides) == ["L", "W"])
+
         tour = re.search(r'match-info-tournament-name.{0,300}?<span>([^<]+)</span>',
                          seg, re.S)
         if not tour:
@@ -712,6 +787,12 @@ def parse_matches(text):
             "bo": bo.group(1) if bo else "",
             "tour": tidy(re.sub(r"#.*$", "", tour.group(1))) if tour else "",
             "tbd": len(teams) >= 2 and all(t.upper() == "TBD" for t in teams),
+            # 已结束；sides 与 teams **同序**（左、右）；score 形如 "2:0"。
+            # ⚠️ Bo3/Bo5 给的是**系列比分**，Bo1 给的是**地图比分**（13:4）——
+            #    展示时照抄即可，但别把 Bo1 的 13:4 说成系列比分。
+            "finished": finished,
+            "sides": sides if len(sides) == len(teams) else [""] * len(teams),
+            "score": "%s:%s" % (nums[0], nums[1]) if len(nums) >= 2 else "",
         })
 
     out.sort(key=lambda x: x["ts"])
@@ -1380,6 +1461,404 @@ def _render_card_inner(picked, now, es, rank_names=None):
     return data
 
 
+# ==========================================================================
+# 战果公布
+#
+# 数据来自**同一个页面**（Liquipedia:Matches 的 type=recent 区块），所以
+# 除了「什么时候去抓」之外，没有任何新增的抓取复杂度。
+# 这里只回答两个问题：① 现在该不该去抓 ② 抓到之后发什么。
+# ==========================================================================
+
+def _teams_key(teams):
+    """两支队名的规范键。**排序**后拼接 —— 页面里左右顺序可能和预告不一致。"""
+    return "|".join(sorted((t or "").strip().lower() for t in (teams or [])))
+
+
+def _pairs_label(items, limit=4):
+    """日志里把待结算的几个对阵列出来，够看就行。"""
+    out = []
+    for it in (items or [])[:limit]:
+        t = list(it.get("teams") or [])
+        while len(t) < 2:
+            t.append("?")
+        out.append("%s vs %s" % (t[0], t[1]))
+    if len(items or []) > limit:
+        out.append("…")
+    return "、".join(out)
+
+
+def finished_index(matches):
+    """把已结束的场次做成 {队名键: [比赛, …]}。
+
+    ⚠️ 值是**列表**不是单场：同一对队伍在几天内可能打两遍
+    （实测 `FlyQuest vs Ground Zero Gaming` 在 10-03 打了两次）。
+    只留一场的话，后一场会被前一场顶掉，配对就错了。
+    真正取哪一场由 result_rows 按「时间最近」决定。
+    """
+    out = {}
+    for m in matches or []:
+        if not m.get("finished"):
+            continue
+        key = _teams_key(m.get("teams"))
+        if key:
+            out.setdefault(key, []).append(m)
+    for v in out.values():
+        v.sort(key=lambda x: x["ts"])
+    return out
+
+
+# 预告登记的开赛时间与页面上那场的时间差超过这个值，就不认它是同一场。
+# 取 6 小时：够容忍小幅改期，又不会把「几天前打过的同一对队伍」错认成今天这场。
+RESULTS_TS_TOLERANCE = 6 * 3600
+
+# `--check-results` 演练模式下演示几场。取 8：和「一期预告通常 8 场」一样长，
+# 卡片高度也就和预告卡片一样（880×806），版式好不好看最容易判断。
+DRILL_ROWS = 8
+
+
+def drill_items(matches, limit=DRILL_ROWS):
+    """把页面上「最近打完的 limit 场」做成假的待结算条目，给 `--check-results` 用。
+
+    **只读、不落盘**：返回的是临时对象，既不来自也不写回 state_results_pending.json。
+    存在的理由：刚部署的服务器上清单是空的，而演练命令正是部署验收要用的东西 ——
+    不这么做，`--check-results` 永远只会回一句「清单里没有到结算时刻的场次」。
+    """
+    got = [m for m in (matches or []) if m.get("finished")]
+    got.sort(key=lambda x: int(x.get("ts") or 0))
+    if limit and limit > 0:
+        got = got[-limit:]
+    return [{
+        "teams": list(m.get("teams") or []),
+        "ts": int(m.get("ts") or 0),
+        "bo": m.get("bo") or "",
+        "status": "pending",
+        "noted_at": "-",
+        "reported_at": None,
+    } for m in got]
+
+
+def _settle_seconds(bo, es):
+    """返回 (最短等待, 放弃等待) 秒数。按赛制取，取不到就退回 Bo3。"""
+    es = es or {}
+    bo = (bo or "").strip()
+    for table, fallback in (("results_grace_minutes", 100),
+                            ("results_timeout_minutes", 180)):
+        vals = es.get(table) or {}
+        if not isinstance(vals, dict):
+            vals = {}
+        try:
+            n = int(vals.get(bo) or vals.get("Bo3") or fallback)
+        except (TypeError, ValueError):
+            n = fallback
+        if table == "results_grace_minutes":
+            grace = max(0, n)
+        else:
+            timeout = max(0, n)
+    return grace * 60, timeout * 60
+
+
+def load_results_pending(path=RESULTS_STATE_FILE):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {"items": []}
+
+
+def save_results_pending(data, path=RESULTS_STATE_FILE):
+    """原子写（tmp + rename）—— 预告任务和结算任务是两个 timer，可能同时跑。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def note_pending(picked, now, es, path=RESULTS_STATE_FILE):
+    """预告发出后登记「这些场次要结算」。**只增不改**。
+
+    为什么只增不改：
+      · 已经 reported 的场次不能被重新打开，否则改期/二次预告会让战果重发一遍；
+      · 已经登记过的场次不刷新 ts —— 结算窗口锚定在**第一次预告**报出的开赛时间上，
+        这样「打了多久还没结果」是可解释的。
+    拿不到的场次（延期/取消）由结算任务的 timeout 兜住，不会被永远挂着。
+    """
+    data = load_results_pending(path)
+    have = {_teams_key(it.get("teams")) for it in data["items"]}
+    added = 0
+    for m in picked or []:
+        key = _teams_key(m.get("teams"))
+        if not key or key in have:
+            continue
+        data["items"].append({
+            "teams": list(m.get("teams") or []),
+            "ts": int(m.get("ts") or 0),
+            "bo": m.get("bo") or "",
+            "status": "pending",
+            "noted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "reported_at": None,
+        })
+        have.add(key)
+        added += 1
+    if added:
+        save_results_pending(_prune_pending(data, now, es), path)
+    return added
+
+
+def _prune_pending(data, now, es):
+    """丢掉「已经过了太久」的条目，免得文件无限长大。"""
+    try:
+        max_age = max(1, int((es or {}).get("results_max_age_hours") or 24)) * 3600
+    except (TypeError, ValueError):
+        max_age = 24 * 3600
+    cutoff = now.timestamp() - max_age
+    data["items"] = [it for it in data["items"]
+                     if it.get("status") == "pending" or int(it.get("ts") or 0) >= cutoff]
+    return data
+
+
+def split_due(items, now, es):
+    """把待结算条目分成 (到点了可以查, 超过上限该放弃)。
+
+    到点的定义：`ts + grace <= now <= ts + timeout`。
+    **grace 是最关键的那个安全阀** —— 开赛 100 分钟（Bo3）之内，就算页面
+    已经把某队标成 winner，我们也不会发，因为那时比赛多半还在打。
+    """
+    due, expired = [], []
+    t = now.timestamp()
+    for it in items or []:
+        if it.get("status") != "pending":
+            continue
+        grace, timeout = _settle_seconds(it.get("bo"), es)
+        ts = int(it.get("ts") or 0)
+        if t > ts + timeout:
+            expired.append(it)
+        elif t >= ts + grace:
+            due.append(it)
+    return due, expired
+
+
+def result_rows(due, fin, es):
+    """把「待结算条目」和「页面上的已结束场次」对上，返回可发送的行 + 还没出结果的条目。"""
+    rows, waiting = [], []
+    for it in due:
+        ts0 = int(it.get("ts") or 0)
+        cands = fin.get(_teams_key(it.get("teams"))) or []
+        m = None
+        if cands:
+            best = min(cands, key=lambda x: abs(int(x["ts"]) - ts0))
+            if abs(int(best["ts"]) - ts0) <= RESULTS_TS_TOLERANCE:
+                m = best
+            else:
+                log("[warn] %s 找到同名对阵但时间差 %.1f 小时，不认（多半还没打完）"
+                    % (_pairs_label([it]), abs(int(best["ts"]) - ts0) / 3600.0))
+        if m is None:
+            waiting.append(it)
+            continue
+        nums = (m.get("score") or "").split(":")
+        if len(nums) != 2 or not all(x.isdigit() for x in nums):
+            waiting.append(it)
+            continue
+        left, right = m["teams"][0], m["teams"][1]
+        sides = list(m.get("sides") or [])
+        # 胜方以**比分**为准（两个信号实测一致，万一不一致以数值为准并留痕）
+        winner = left if int(nums[0]) > int(nums[1]) else right
+        if sorted(sides) == ["L", "W"]:
+            by_flag = left if sides[0] == "W" else right
+            if by_flag != winner:
+                log("[warn] %s vs %s 的胜负标记与比分不一致（标记=%s 比分=%s），以比分栏为准"
+                    % (left, right, by_flag, m.get("score")))
+        if int(nums[0]) == int(nums[1]):
+            log("[warn] %s vs %s 比分是平的（%s），跳过" % (left, right, m.get("score")))
+            waiting.append(it)
+            continue
+        if abs(int(m["ts"]) - int(it.get("ts") or 0)) > 3 * 3600:
+            log("[warn] %s vs %s 的时间对不上（登记 %s / 页面 %s），按队名照发"
+                % (left, right,
+                   datetime.fromtimestamp(int(it.get("ts") or 0), CST).strftime("%m-%d %H:%M"),
+                   datetime.fromtimestamp(int(m["ts"]), CST).strftime("%m-%d %H:%M")))
+        rows.append({
+            "item": it, "ts": int(m["ts"]),
+            "teams": [left, right],
+            "shorts": list(m.get("shorts") or []),
+            "logos": list(m.get("logos") or []),
+            "score": m.get("score") or "",
+            "score_left": nums[0], "score_right": nums[1],
+            "winner": winner, "bo": m.get("bo") or it.get("bo") or "",
+            "tour": m.get("tour") or "",
+        })
+    rows.sort(key=lambda x: x["ts"])
+    return rows, waiting
+
+
+def format_results_caption(rows, now):
+    """战果卡片上面那一行（和预告一样：有图也要有字，通知栏才不是「[图片]」）。"""
+    return "【CS2 战果】%s · 共 %d 场" % (_day_label(now), len(rows))
+
+
+def format_results(rows, now):
+    """纯文本版战果（**图片发不出来时的兜底**）。末尾必须署名 Liquipedia。
+
+    这版刻意不分组、每行都写全 `MM-DD HH:MM`：战果通常横跨午夜
+    （22:00 那批和次日 00:30 那批常常一起结算），只写 `HH:MM` 会分不清是哪天。
+    """
+    if not rows:
+        return ""
+    lines = ["【CS2 战果】%s · 共 %d 场" % (_day_label(now), len(rows)), ""]
+    for r in rows:
+        d = datetime.fromtimestamp(r["ts"], CST)
+        lines.append("%s  %s %s:%s %s" % (
+            d.strftime("%m-%d %H:%M"), r["teams"][0],
+            r["score_left"], r["score_right"], r["teams"][1]))
+    lines.append("")
+    lines.append("共 %d 场 · 数据来源：Liquipedia" % len(rows))
+    return "\n".join(lines)
+
+
+def render_results_card(rows, now, es):
+    """战果卡片。前置条件不满足一律返回 None，由上层退回纯文本。"""
+    if Image is None:
+        log("[info] 没装 Pillow，跳过战果卡片（本次发纯文本）")
+        return None
+    if not os.path.isfile(CARD_FONT_FILE):
+        log("[warn] 找不到字体 %s，跳过战果卡片（本次发纯文本）" % CARD_FONT_FILE)
+        return None
+    if not rows:
+        return None
+    try:
+        return _render_results_card_inner(rows, now, es)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] 画战果卡片出错（%s: %s），本次改发纯文本" % (type(exc).__name__, exc))
+        return None
+
+
+def _render_results_card_inner(rows, now, es):
+    es = es or {}
+    max_rows = max(1, int(es.get("card_max_rows") or 12))
+    shown = rows[:max_rows]
+    count = "共 %d 场" % len(rows)
+    if len(shown) < len(rows):
+        count += "（图里只列前 %d 场）" % len(shown)
+    sub = "%s　%s" % (_day_label(now), count)
+
+    texts = ["CS2 战果", sub, "数据来源：Liquipedia", "…", "?"]
+    for r in shown:
+        texts += list(r.get("teams") or [])
+        texts += list(r.get("shorts") or [])
+        texts.append(r.get("score") or "")
+        texts.append(r.get("tour") or "")
+    miss = card_missing_chars(texts)
+    if miss:
+        log("[warn] 字体子集里没有这些字：%s，本次改发纯文本" % "".join(sorted(miss))[:60])
+        log("       要出图就往 deploy/make_card_font.py 的 UI_CHARS 补字并重跑它。")
+        return None
+
+    n = len(shown)
+    height = CARD_HDR_H + CARD_ROW_H * n + CARD_FTR_H
+    if height > 2400:
+        log("[warn] 战果卡片会高达 %d px（%d 场），改用纯文本" % (height, n))
+        return None
+
+    img = Image.new("RGB", (CARD_W, height), C_BG)
+    d = ImageDraw.Draw(img)
+    f_title = load_card_font(34)
+    f_sub = load_card_font(22)
+    f_date = load_card_font(19)
+    f_time = load_card_font(24)
+    f_name = load_card_font(27)
+    f_ft = load_card_font(19)
+
+    # ---- 页头 ----
+    d.text((CARD_PAD, 24), "CS2 战果", font=f_title, fill=C_INK,
+           stroke_width=1, stroke_fill=C_INK)
+    d.text((CARD_PAD, 70), sub, font=f_sub, fill=C_MUTED)
+    d.line([(CARD_PAD, CARD_HDR_H - 1), (CARD_W - CARD_PAD, CARD_HDR_H - 1)],
+           fill=C_LINE, width=1)
+
+    # ---- 列位置（和预告卡片同一套推导，只把中间那列让给比分）----
+    side_w = (CARD_W - 2 * CARD_PAD - CARD_TIME_W - CARD_VS_W) // 2
+    left_x1 = CARD_PAD + CARD_TIME_W + side_w
+    right_x0 = left_x1 + CARD_VS_W
+    score_cx = left_x1 + CARD_VS_W // 2
+    time_right = CARD_PAD + CARD_TIME_W - 14
+
+    budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
+    logos = []
+    for r in shown:
+        urls = list(r.get("logos") or [])
+        while len(urls) < 2:
+            urls.append("")
+        logos.append([ensure_logo(u, es, budget) for u in urls[:2]])
+
+    for i, r in enumerate(shown):
+        top = CARD_HDR_H + CARD_ROW_H * i
+        cy = top + CARD_ROW_H // 2
+        base = cy + 9
+        if i:
+            d.line([(CARD_PAD, top), (CARD_W - CARD_PAD, top)], fill=C_ROWLINE, width=1)
+
+        # 时间列：`10-05 22:00` —— 战果横跨午夜，必须带上日期
+        dt = datetime.fromtimestamp(r["ts"], CST)
+        segs = [(dt.strftime("%m-%d"), f_date, C_FAINT),
+                (dt.strftime("%H:%M"), f_time, C_MUTED)]
+        x = time_right - sum(d.textlength(s, font=f) for s, f, _ in segs) - 6
+        for s, f, col in segs:
+            d.text((int(x), base), s, font=f, fill=col, anchor="ls")
+            x += d.textlength(s, font=f) + 6
+
+        # 比分居中。13:4 / 16:12 比 2:0 宽，所以也走一次字号降级
+        st, sf = _card_fit(d, r["score"], (26, 24, 22, 20), CARD_VS_W - 6)
+        d.text((score_cx, base), st, font=sf, fill=C_INK, anchor="ms")
+
+        # 两侧队伍：胜方 ink + 假粗体，负方压暗 —— 一深一浅就能看出谁赢
+        shorts = list(r.get("shorts") or [])
+        for side, name in enumerate((r.get("teams") or [])[:2]):
+            won = (name == r.get("winner"))
+            room = side_w - CARD_LOGO - 14
+            nm, f = _card_fit(d, name, (27, 25, 23, 21, 20), max(60, room))
+            code = shorts[side] if side < len(shorts) and shorts[side] else name
+            col = C_INK if won else C_LOSE
+            kw = {"stroke_width": 1, "stroke_fill": C_INK} if won else {}
+            if side == 0:
+                _card_logo(img, d, logos[i][0], left_x1 - CARD_LOGO, cy, code)
+                x = left_x1 - CARD_LOGO - 14
+                d.text((int(x - d.textlength(nm, font=f)), base), nm, font=f,
+                       fill=col, anchor="ls", **kw)
+            else:
+                _card_logo(img, d, logos[i][1], right_x0, cy, code)
+                x = right_x0 + CARD_LOGO + 14
+                d.text((int(x), base), nm, font=f, fill=col, anchor="ls", **kw)
+
+    # ---- 页脚 ----
+    fy = CARD_HDR_H + CARD_ROW_H * n
+    d.line([(CARD_PAD, fy), (CARD_W - CARD_PAD, fy)], fill=C_LINE, width=1)
+    fbase = fy + 46
+    credit = "数据来源：Liquipedia"
+    cw = d.textlength(credit, font=f_ft)
+    d.text((CARD_W - CARD_PAD, fbase), credit, font=f_ft, fill=C_MUTED, anchor="rs")
+    tours = []
+    for r in shown:
+        t = (r.get("tour") or "").strip()
+        if t and t not in tours:
+            tours.append(t)
+    left_txt = tours[0] if len(tours) == 1 else ("%d 个赛事" % len(tours) if tours else "")
+    if left_txt:
+        lt, lf = _card_fit(d, left_txt, (19, 18, 17, 16),
+                           max(40, (CARD_W - 2 * CARD_PAD) - cw - 24))
+        if lt:
+            d.text((CARD_PAD, fbase), lt, font=lf, fill=C_MUTED, anchor="ls")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    data = buf.getvalue()
+    log("[info] 战果卡片：%d×%d，PNG %.1f KB，%d 场"
+        % (CARD_W, height, len(data) / 1024.0, n))
+    return data
+
+
 def format_calm(empty_days):
     """连续静默满一周时的「报平安」。
 
@@ -1674,12 +2153,141 @@ def run_once(cfg, args):
     if delivered and not failed:
         log("[sent] 已送达（%d 条）" % len(notifiers))
         save_state(_st)
+        # 预告真的发出去了，才登记「这些场次要结算战果」。
+        # 登记失败不该让整轮算失败 —— 顶多是这轮之后没有战果，预告本身已经送达。
+        try:
+            added = note_pending(picked, now, es)
+            if added:
+                log("[info] 已登记 %d 场待结算（打完之后由 douyu-esports-results.timer 发战果）"
+                    % added)
+        except OSError as exc:
+            log("[warn] 待结算清单写不进去（%s），这轮之后不会发战果" % exc)
         return 0
 
     log("[error] 发送失败：%s" % ("、".join(failed) or "未知"))
     # 故意**不**写状态：写进去就等于「今天已经交代过了」，
     # 而消息其实没到任何人手上。
     return 1
+
+
+def run_results(cfg, args):
+    """结算一轮战果。
+
+    **这个函数的设计目标只有一个：绝大多数被唤起的时候一次网络请求都不发。**
+    timer 每 10 分钟叫一次，但只有「有场次刚进入结算窗口」时才真的去抓 ——
+    条款允许 1 次 / 30 秒，我们要做的是不需要时就别发请求。
+
+    顺序很重要：**先看清单，再决定要不要抓**，绝不能先抓再判断。
+    """
+    es = resolve_config(cfg)
+    now = datetime.now(CST)
+    check = bool(getattr(args, "check_results", False))
+
+    if not es.get("results_enabled", True):
+        log("[silent] 战果公布已关闭（results_enabled=false）")
+        return 0
+
+    data = load_results_pending()
+    due, expired = split_due(data["items"], now, es)
+
+    if expired:
+        log("[info] %d 场超过结算上限仍没出结果，判定为延期/取消，不再等：%s"
+            % (len(expired), _pairs_label(expired)))
+        if not check:
+            for it in expired:
+                it["status"] = "abandoned"
+                it["reported_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    if not due:
+        if not check:
+            # ⚠️ 这一行就是「省请求」的地方：直接 return，连 fetch 都不调
+            log("[silent] 清单里没有到结算时刻的场次，本轮不发任何请求（待结算 %d 场）"
+                % len([it for it in data["items"] if it.get("status") == "pending"]))
+            if expired:
+                save_results_pending(_prune_pending(data, now, es))
+            return 0
+        # --check-results 是给人看的演练命令，**清单空着也得给点东西看** ——
+        # 否则刚部署的服务器上跑它永远只会得到「清单里没有…」，等于没法验收。
+        log("[check] 清单里没有到结算时刻的场次（待结算 %d 场），改走演练模式："
+            "结算页面上当前所有已结束的比赛（不发消息、不写状态）"
+            % len([it for it in data["items"] if it.get("status") == "pending"]))
+    else:
+        log("[info] %d 场进入结算窗口：%s" % (len(due), _pairs_label(due)))
+
+    r = fetch_matches(es)
+    if r is None or not r.get("ok"):
+        log("[warn] 结算抓取失败（%s），本轮不发消息，留到下一轮再试"
+            % ((r or {}).get("error") or "未知"))
+        return 1
+
+    html_text, err = extract_html(r["text"])
+    if html_text is None:
+        log("[error] %s" % err)
+        return 1
+
+    allm = parse_matches(html_text)
+    fin = finished_index(allm)
+    if not due:
+        # 演练模式：拿页面上「最近打完的一批」当待结算条目，走一遍完整配对 + 出图。
+        due = drill_items(allm, DRILL_ROWS)
+        log("[check] 演练：页面上共 %d 场已结束，取最近 %d 场演示结算后的样子"
+            % (sum(len(v) for v in fin.values()), len(due)))
+    rows, waiting = result_rows(due, fin, es)
+
+    if not rows:
+        log("[info] 到点的 %d 场都还没打完，留到下一轮（不写状态、不重复查已完成的）"
+            % len(due))
+        return 0
+
+    log("[info] 本轮结算 %d 场（还有 %d 场在打）" % (len(rows), len(waiting)))
+    for row in rows:
+        log("        %s  %s  %s:%s  %s"
+            % (datetime.fromtimestamp(row["ts"], CST).strftime("%m-%d %H:%M"),
+               row["teams"][0], row["score_left"], row["score_right"], row["teams"][1]))
+
+    card = None
+    if es.get("card_enabled", True) and es.get("card_results_enabled", True):
+        card = render_results_card(rows, now, es)
+    if card:
+        body = format_results_caption(rows, now)
+        log("[info] 本轮发「一行文字 + 一张战果图」")
+    else:
+        body = format_results(rows, now)
+        log("[info] 本轮发纯文本战果（没有出图）")
+
+    if check:
+        log("")
+        log(body)
+        if card:
+            path = os.path.join(tempfile.gettempdir(), "esports_results_check.png")
+            try:
+                with open(path, "wb") as fp:
+                    fp.write(card)
+                log("[check] 这次会发的战果图已存到：%s" % path)
+            except OSError as exc:
+                log("[warn] 战果预览图写不出来：%s" % exc)
+        log("\n[check] 以上是将会发送的内容（未发送、未写状态）")
+        return 0
+
+    notifiers = watch.build_notifiers(cfg)
+    delivered, failed = send_with_retry(with_card_image(notifiers, card), body, es)
+    if not delivered or failed:
+        log("[error] 战果发送失败：%s（不写状态，下一轮会重试）" % ("、".join(failed) or "未知"))
+        return 1
+
+    log("[sent] 战果已送达（%d 条）" % len(notifiers))
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    for row in rows:
+        # 用同一个对象：rows 里存的是 data["items"] 里的引用，改它就是改清单
+        row["item"]["status"] = "reported"
+        row["item"]["reported_at"] = stamp
+        row["item"]["score"] = row["score"]
+        row["item"]["winner"] = row["winner"]
+    for it in expired:
+        it["status"] = "abandoned"
+        it["reported_at"] = stamp
+    save_results_pending(_prune_pending(data, now, es))
+    return 0
 
 
 # ==========================================================================
@@ -1954,7 +2562,105 @@ class _T:
         return 1 if self.fail else 0
 
 
-def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None, shorts=None):
+# 战果解析用的 fixture：三块 —— ① 已结束 Bo3（胜方在左）② 已结束 Bo1（地图比分，胜方在右）
+# ③ **有比分但没有 data-finished**（= 正在进行中）。第 ③ 块是这套断言里最重要的一个：
+#    它钉住「绝不能把进行中的比分当战果发」。
+RESULT_FIXTURE_HTML = """
+<div class="match-info">
+  <span class="match-info-countdown">
+    <span class="timer-object" data-timestamp="1790000300" data-finished="finished">x</span></span>
+  <div class="match-info-header">
+    <div class="match-info-header-opponent match-info-header-opponent-left match-info-header-winner">
+      <div class="block-team flipped">
+        <span class="team-template-image-icon">
+          <a href="/counterstrike/Team_Spirit" title="Team Spirit"><img alt="" src="/commons/images/thumb/1/1a/Spirit_allmode.png/50px-Spirit_allmode.png" /></a></span>
+        <span class="name"><a href="/counterstrike/Team_Spirit" title="Team Spirit">Spirit</a></span>
+      </div></div>
+    <div class="match-info-header-scoreholder">
+      <span class="match-info-header-scoreholder-icon"></span>
+      <span class="match-info-header-scoreholder-scorewrapper">
+        <span class="match-info-header-scoreholder-upper">
+          <span class="match-info-header-scoreholder-score match-info-header-winner">2</span> : <span class="match-info-header-scoreholder-score">1</span></span>
+        <span class="match-info-header-scoreholder-lower">(Bo3)</span></span>
+      <span class="match-info-header-scoreholder-icon"></span></div>
+    <div class="match-info-header-opponent match-info-header-loser">
+      <div class="block-team">
+        <span class="team-template-image-icon">
+          <a href="/counterstrike/MOUZ" title="MOUZ"><img alt="" src="/commons/images/thumb/2/2b/MOUZ_allmode.png/50px-MOUZ_allmode.png" /></a></span>
+        <span class="name"><a href="/counterstrike/MOUZ" title="MOUZ">MOUZ</a></span>
+      </div></div>
+  </div>
+  <div class="match-info-tournament">
+    <span class="match-info-tournament-wrapper">
+      <span class="match-info-tournament-name">
+        <a href="/counterstrike/ESL/Pro_League" title="ESL/Pro League"><span>ESL Pro League Season 24 - Round 3</span></a></span></span>
+  </div>
+</div>
+<div class="match-info">
+  <span class="match-info-countdown">
+    <span class="timer-object" data-timestamp="1790000400" data-finished="finished">x</span></span>
+  <div class="match-info-header">
+    <div class="match-info-header-opponent match-info-header-opponent-left match-info-header-loser">
+      <div class="block-team flipped">
+        <span class="team-template-image-icon">
+          <a href="/counterstrike/TYLOO" title="TYLOO"><img alt="" src="/commons/images/thumb/3/3c/TyLoo_allmode.png/50px-TyLoo_allmode.png" /></a></span>
+        <span class="name"><a href="/counterstrike/TYLOO" title="TYLOO">TYL</a></span>
+      </div></div>
+    <div class="match-info-header-scoreholder">
+      <span class="match-info-header-scoreholder-icon"></span>
+      <span class="match-info-header-scoreholder-scorewrapper">
+        <span class="match-info-header-scoreholder-upper">
+          <span class="match-info-header-scoreholder-score">4</span> : <span class="match-info-header-scoreholder-score match-info-header-winner">13</span></span>
+        <span class="match-info-header-scoreholder-lower">(Bo1)</span></span>
+      <span class="match-info-header-scoreholder-icon"></span></div>
+    <div class="match-info-header-opponent match-info-header-winner">
+      <div class="block-team">
+        <span class="team-template-image-icon">
+          <a href="/counterstrike/9z_Team" title="9z Team"><img alt="" src="/commons/images/thumb/4/4d/9z_allmode.png/50px-9z_allmode.png" /></a></span>
+        <span class="name"><a href="/counterstrike/9z_Team" title="9z Team">9z</a></span>
+      </div></div>
+  </div>
+  <div class="match-info-tournament">
+    <span class="match-info-tournament-wrapper">
+      <span class="match-info-tournament-name">
+        <a href="/counterstrike/Journey" title="Journey"><span>Journey Autumn 2026 - Group A</span></a></span></span>
+  </div>
+</div>
+<div class="match-info">
+  <span class="match-info-countdown">
+    <span class="timer-object" data-timestamp="1790000500">x</span></span>
+  <div class="match-info-header">
+    <div class="match-info-header-opponent match-info-header-opponent-left">
+      <div class="block-team flipped">
+        <span class="team-template-image-icon">
+          <a href="/counterstrike/Natus_Vincere" title="Natus Vincere"><img alt="" src="/commons/images/thumb/5/5e/NAVI_allmode.png/50px-NAVI_allmode.png" /></a></span>
+        <span class="name"><a href="/counterstrike/Natus_Vincere" title="Natus Vincere">NAVI</a></span>
+      </div></div>
+    <div class="match-info-header-scoreholder">
+      <span class="match-info-header-scoreholder-icon"></span>
+      <span class="match-info-header-scoreholder-scorewrapper">
+        <span class="match-info-header-scoreholder-upper">
+          <span class="match-info-header-scoreholder-score">1</span> : <span class="match-info-header-scoreholder-score">0</span></span>
+        <span class="match-info-header-scoreholder-lower">(Bo3)</span></span>
+      <span class="match-info-header-scoreholder-icon"></span></div>
+    <div class="match-info-header-opponent">
+      <div class="block-team">
+        <span class="team-template-image-icon">
+          <a href="/counterstrike/Aurora_Gaming" title="Aurora Gaming"><img alt="" src="/commons/images/thumb/6/6f/Aurora_allmode.png/50px-Aurora_allmode.png" /></a></span>
+        <span class="name"><a href="/counterstrike/Aurora_Gaming" title="Aurora Gaming">Aurora</a></span>
+      </div></div>
+  </div>
+  <div class="match-info-tournament">
+    <span class="match-info-tournament-wrapper">
+      <span class="match-info-tournament-name">
+        <a href="/counterstrike/ESL/Pro_League" title="ESL/Pro League"><span>ESL Pro League Season 24 - Round 3</span></a></span></span>
+  </div>
+</div>
+"""
+
+
+def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None, shorts=None,
+        finished=False, sides=None, score=""):
     n = len(list(teams))
     return {"ts": ts, "teams": list(teams), "bo": bo, "tour": tour, "tbd": tbd,
             # 页面自带的短名，只给「队标拿不到时的灰色占位块」用。
@@ -1962,7 +2668,12 @@ def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None, shorts=None):
             "shorts": (list(shorts) if shorts else [""] * n)[:n],
             # 默认给空 URL：自检**绝不能联网**去下队标，
             # ensure_logo("") 在上面就返回 None，卡片会画占位块。
-            "logos": list(logos) if logos else ["", ""]}
+            "logos": list(logos) if logos else ["", ""],
+            # 战果用的三件套；构造「已结束」的用例时要一起给，
+            # 否则 finished_index / result_rows 会按「没打完」处理。
+            "finished": bool(finished),
+            "sides": (list(sides) if sides else [""] * n)[:n],
+            "score": score}
 
 
 def selftest():
@@ -2397,6 +3108,192 @@ def selftest():
                 "測試隊 vs B" in format_daily(
                     [mk(ts(14), ["測試隊", "B"], "T")], base, es))
 
+    # ---- 3c. 战果公布 ----
+    print("\n-- 3c. 战果公布（解析 / 配对 / 时间闸门 / 去重）--")
+    rms = parse_matches(RESULT_FIXTURE_HTML)
+    t.check("战果 fixture 切出 3 场", len(rms) == 3, "实际 %d" % len(rms))
+    if len(rms) == 3:
+        t.check("①已结束 Bo3 认得走 data-finished", rms[0]["finished"] is True)
+        t.check("②已结束 Bo1 认得走 data-finished", rms[1]["finished"] is True)
+        t.check("⚑ ③有比分但缺 data-finished → **不算已结束**（进行中的比赛）",
+                rms[2]["finished"] is False,
+                "score=%s sides=%s" % (rms[2]["score"], rms[2]["sides"]))
+        t.check("比分从两个 scoreholder-score 里取（不是连 (Bo3) 一起吞进来）",
+                rms[0]["score"] == "2:1" and rms[2]["score"] == "1:0",
+                [m["score"] for m in rms])
+        t.check("Bo1 保留的是**地图比分**（13:4）而不是 1:0",
+                rms[1]["score"] == "4:13", rms[1]["score"])
+        t.check("sides 与 teams 同序：左胜 = ['W','L']", rms[0]["sides"] == ["W", "L"],
+                rms[0]["sides"])
+        t.check("sides 与 teams 同序：右胜 = ['L','W']", rms[1]["sides"] == ["L", "W"],
+                rms[1]["sides"])
+        t.check("未结束场次的 score 是空串、sides 不成对",
+                rms[2]["score"] == "1:0" and sorted(rms[2]["sides"]) != ["L", "W"])
+        t.check("teams / shorts 依旧对齐（战果卡片也要画队标）",
+                [m["teams"] for m in rms][0] == ["Team Spirit", "MOUZ"]
+                and [m["shorts"] for m in rms][0] == ["Spirit", "MOUZ"])
+
+    # finished_index：同一对队伍打过两遍时必须都留着（靠时间区分），不能互相顶掉
+    same_pair = [
+        _mk(1000, ["FlyQuest", "Ground Zero Gaming"], "T", "Bo3",
+            finished=True, sides=["W", "L"], score="2:0"),
+        _mk(9000, ["FlyQuest", "Ground Zero Gaming"], "T", "Bo3",
+            finished=True, sides=["L", "W"], score="0:2"),
+    ]
+    fidx = finished_index(same_pair)
+    t.check("同一对队伍的两场都留在索引里（不是只留一场）",
+            len(fidx.get(_teams_key(["Ground Zero Gaming", "FlyQuest"])) or []) == 2)
+    t.check("队名键与左右顺序无关",
+            _teams_key(["A", "B"]) == _teams_key(["B", "A"]))
+    t.check("未结束的场次不进索引",
+            finished_index([_mk(1, ["A", "B"], "T")]) == {})
+
+    # 按「队名 + 时间最近」配对：不能把几天前同一对队伍的结果当成今天这场
+    item_old = {"teams": ["FlyQuest", "Ground Zero Gaming"], "ts": 1000,
+                "bo": "Bo3", "status": "pending"}
+    item_new = {"teams": ["FlyQuest", "Ground Zero Gaming"], "ts": 9000,
+                "bo": "Bo3", "status": "pending"}
+    rows_x, wait_x = result_rows([item_old], fidx, es)
+    t.check("配对取「时间最近」的那一场（第 1 场）",
+            len(rows_x) == 1 and rows_x[0]["ts"] == 1000, rows_x)
+    rows_y, _w = result_rows([item_new], fidx, es)
+    t.check("配对取「时间最近」的那一场（第 2 场）",
+            len(rows_y) == 1 and rows_y[0]["ts"] == 9000, rows_y)
+    # 要比**最近的那个候选**还远出容忍度，才算「这几场都不是它」
+    far = dict(item_old, ts=9000 + RESULTS_TS_TOLERANCE + 600)
+    rows_z, wait_z = result_rows([far], fidx, es)
+    t.check("⚑ 时间差超出容忍度就不认（免得拿几天前的结果冒充今天）",
+            not rows_z and len(wait_z) == 1)
+
+    t.check("胜方判据：比分大的一方", rows_x[0]["score_left"] == "2"
+            and rows_x[0]["winner"] == "FlyQuest", rows_x[0]["winner"])
+
+    # 时间闸门 + 每赛制的 grace/timeout
+    t.check("Bo1 的 grace/timeout = 50/90 分钟",
+            _settle_seconds("Bo1", es) == (3000, 5400), _settle_seconds("Bo1", es))
+    t.check("Bo3 的 grace/timeout = 100/180 分钟",
+            _settle_seconds("Bo3", es) == (6000, 10800), _settle_seconds("Bo3", es))
+    t.check("Bo5 的 grace/timeout = 170/270 分钟",
+            _settle_seconds("Bo5", es) == (10200, 16200), _settle_seconds("Bo5", es))
+    t.check("赛制认不出来时退回 Bo3 的窗口",
+            _settle_seconds("", es) == _settle_seconds("Bo3", es)
+            and _settle_seconds("Bo7", es) == _settle_seconds("Bo3", es))
+
+    gate = {"teams": ["A", "B"], "ts": 100000, "bo": "Bo3", "status": "pending"}
+    def _gate(offset):
+        return split_due([dict(gate)], datetime.fromtimestamp(100000 + offset, CST), es)
+    t.check("开赛 30 分钟内：既不抓也不算超时（0 请求）", _gate(1800) == ([], []))
+    t.check("刚过 grace（100 分钟）：进入待结算", len(_gate(6000)[0]) == 1)
+    t.check("⚑ 开赛 110 分钟仍在 grace 与 timeout 之间 → 只是待结算，绝不判超时",
+            len(_gate(6600)[0]) == 1 and _gate(6600)[1] == [])
+    t.check("超过 timeout（180 分钟）：判超时放弃", len(_gate(11000)[1]) == 1)
+    t.check("已经 reported 的条目不会再被结算",
+            split_due([dict(gate, status="reported")], datetime.fromtimestamp(200000, CST), es)
+            == ([], []))
+    t.check("abandoned 的条目也不会被重复结算",
+            split_due([dict(gate, status="abandoned")], datetime.fromtimestamp(200000, CST), es)
+            == ([], []))
+
+    # 待结算清单：只增不改、原子写
+    st_path = os.path.join(tempfile.gettempdir(), "__es_results_selftest.json")
+    if os.path.exists(st_path):
+        os.remove(st_path)
+    base_now = datetime.fromtimestamp(200000, CST)
+    picked_a = [_mk(100000, ["A", "B"], "T", "Bo3"), _mk(100100, ["C", "D"], "T", "Bo3")]
+    t.check("首次登记写入 2 场", note_pending(picked_a, base_now, es, st_path) == 2)
+    t.check("重复登记同一批不重复写", note_pending(picked_a, base_now, es, st_path) == 0)
+    t.check("清单条数正确", len(load_results_pending(st_path)["items"]) == 2)
+    t.check("登记的是 pending 状态",
+            all(it["status"] == "pending" for it in load_results_pending(st_path)["items"]))
+    # 已经报过的场次不能被重新打开（否则二次预告会让战果重发）
+    st = load_results_pending(st_path)
+    st["items"][0]["status"] = "reported"
+    st["items"][0]["reported_at"] = "2026-10-05 20:00:00"
+    save_results_pending(st, st_path)
+    note_pending(picked_a, base_now, es, st_path)
+    st2 = load_results_pending(st_path)
+    t.check("⚑ 已 reported 的场次不会被重新打开（战果不会重发）",
+            st2["items"][0]["status"] == "reported", st2["items"][0]["status"])
+    t.check("清单文件是原子写（不留 .tmp 半成品）", not os.path.exists(st_path + ".tmp"))
+    t.check("清单读不出来时给空清单（不炸）",
+            load_results_pending(st_path + ".nope") == {"items": []})
+    # 过期条目会被清掉
+    st3 = {"items": [{"teams": ["X", "Y"], "ts": 100, "bo": "Bo3", "status": "reported"},
+                     {"teams": ["P", "Q"], "ts": 100000, "bo": "Bo3", "status": "pending"}]}
+    pruned = _prune_pending(st3, datetime.fromtimestamp(100000 + 25 * 3600, CST), es)
+    t.check("超过 results_max_age_hours 的旧条目被清掉、pending 的留着",
+            len(pruned["items"]) == 1 and pruned["items"][0]["teams"] == ["P", "Q"],
+            pruned["items"])
+
+    # --check-results 的演练模式：清单空着也能演示（刚部署的服务器就靠它验收）
+    t.check("演练条目只取「已结束」的场次（进行中的不能混进来）",
+            len(drill_items(rms, 8)) == 2,
+            [it["teams"] for it in drill_items(rms, 8)])
+    mixed = [_mk(5000, ["E", "F"], "T", "Bo3"),          # 未结束
+             _mk(6000, ["G", "H"], "T", "Bo3", finished=True, sides=["W", "L"], score="2:0")]
+    t.check("演练条目按时间升序、且只留最近 limit 场",
+            [it["ts"] for it in drill_items(mixed, 8)] == [6000])
+    many = [_mk(t, [chr(65 + i % 2) + str(i), "Z"], "T", "Bo3",
+                finished=True, sides=["W", "L"], score="2:0")
+            for i, t in enumerate(range(100, 100 + 20 * 60, 60))]
+    t.check("演练条目最多取 DRILL_ROWS 场，并且取的是**最近的**那批",
+            [it["ts"] for it in drill_items(many, DRILL_ROWS)]
+            == [it["ts"] for it in many[-DRILL_ROWS:]],
+            [it["ts"] for it in drill_items(many, DRILL_ROWS)])
+    t.check("演练条目全是 pending，且不写成 reported 的样子",
+            all(it["status"] == "pending" and it["reported_at"] is None
+                for it in drill_items(rms, 8)))
+    # ⚑ 演练必须只读：跑完不能凭空造出/改掉清单文件
+    _st_before = os.path.exists(RESULTS_STATE_FILE)
+    drill_items(rms, 8)
+    t.check("⚑ 演练不写 state_results_pending.json（只读，不是真的登记）",
+            os.path.exists(RESULTS_STATE_FILE) == _st_before)
+    t.check("演练条目能直接喂给 result_rows 出正常行",
+            len(result_rows(drill_items(rms, 8), finished_index(rms), es)[0]) == 2)
+
+    # 正文文案
+    sample_rows = [{
+        "item": item_old, "ts": 1791104400, "teams": ["Team Spirit", "MOUZ"],
+        "shorts": ["Spirit", "MOUZ"], "logos": ["", ""], "score": "2:1",
+        "score_left": "2", "score_right": "1", "winner": "Team Spirit",
+        "bo": "Bo3", "tour": "ESL Pro League Season 24 - Round 3",
+    }]
+    txt = format_results(sample_rows, datetime.fromtimestamp(1791104400, CST))
+    t.check("战果正文带日期（横跨午夜时只写 HH:MM 会分不清哪天）",
+            "10-04" in txt and "2:1" in txt, txt)
+    t.check("战果正文署名字典里也是 Liquipedia",
+            txt.rstrip().endswith("数据来源：Liquipedia"))
+    t.check("战果 caption 是一行、带场次数",
+            format_results_caption(sample_rows, datetime.fromtimestamp(1791104400, CST))
+            .startswith("【CS2 战果】") and "共 1 场" in
+            format_results_caption(sample_rows, datetime.fromtimestamp(1791104400, CST)))
+    t.check("空列表不发空消息",
+            format_results([], base_now) == "" and render_results_card([], base_now, es) is None)
+
+    if Image is not None:
+        rpng = render_results_card(sample_rows, base_now, es)
+        t.check("战果卡片能出 PNG",
+                isinstance(rpng, (bytes, bytearray))
+                and bytes(rpng[:8]) == b"\x89PNG\r\n\x1a\n", type(rpng))
+        if rpng:
+            im = Image.open(io.BytesIO(rpng))
+            t.check("战果卡片高度 = 页头 + 行高 × 场次 + 页脚",
+                    im.size == (CARD_W, CARD_HDR_H + CARD_ROW_H * 1 + CARD_FTR_H),
+                    im.size)
+        t.check("⚑ 战果卡片缺字时整张不出（退回纯文本，不画豆腐块）",
+                render_results_card(
+                    [dict(sample_rows[0], teams=["測試隊", "MOUZ"],
+                          shorts=["測試隊", "MOUZ"])], base_now, es) is None)
+        t.check("战果卡片在「两边队标都没有」时照样出图（画占位块）",
+                render_results_card(sample_rows, base_now,
+                                    dict(es, logo_max_new_per_run=0)) is not None)
+        t.check("「战果」两个字在固定字符表里",
+                "战" in CARD_UI_CHARS and "果" in CARD_UI_CHARS)
+        t.check("周一到周日在固定字符表里（战果卡片页头要写 `10-05 周一`）",
+                all(c in CARD_UI_CHARS for c in "周一二三四五六日"))
+        t.check("战果相关的字都在字体子集里（缺字会静默退回纯文本）",
+                card_missing_chars(["CS2 战果", "10-05 周一", "共 2 场", "MOUZ 2:1 9z"]) == set())
+
     # ---- 4. 连续静默与报平安 ----
     print("\n-- 4. 连续静默 → 报平安 --")
     st = load_state(os.path.join(HERE, "__not-exist__.json"))
@@ -2529,6 +3426,10 @@ def main(argv=None):
                         help="打印 HLTV 世界前 N 及它翻成 Liquipedia 队名的结果（只读，核对别名用）")
     parser.add_argument("--test-notify", action="store_true",
                         help="往配置的每个通道发一条测试消息（部署后先跑这个）")
+    parser.add_argument("--results", action="store_true",
+                        help="结算一轮战果：只抓「已到结算窗口」的场次，没到点不发请求")
+    parser.add_argument("--check-results", action="store_true",
+                        help="同上但只打印/出图，不发消息、不写状态")
     parser.add_argument("--selftest", action="store_true", help="离线自检，不联网")
     args = parser.parse_args(argv)
 
@@ -2546,6 +3447,13 @@ def main(argv=None):
 
     if args.test_notify:
         return cmd_test_notify(cfg)
+
+    if args.results or args.check_results:
+        # --check-results 是纯只读演练，连通道都不建，所以不校验推送配置
+        if not args.check_results and not watch.validate_cfg(cfg, args.config):
+            log("[error] config.json 没配好，战果会发不出去（见上面的报错）")
+            return 2
+        return run_results(cfg, args)
 
     # 与 watch.py 共用同一份 config.json：channels / onebot 段直接沿用。
     # 这里校验一遍，免得配置错了却「什么都没发生」——那正是最难排查的状态。

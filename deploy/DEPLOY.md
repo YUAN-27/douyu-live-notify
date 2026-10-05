@@ -484,7 +484,8 @@ sudo bash install-watch.sh
   装不上也不影响 —— 卡片会自动退回纯文本）
 - 打印这几个文件的 sha256 前 16 位（用来确认不是旧版；字体单独一行）
 - 放 `config.json`（**若已存在绝不覆盖**）
-- 装好 systemd 单元（含看门狗），但**不启动任何定时器**（等你验证通过再开）
+- 装好 systemd 单元（含看门狗、`douyu-esports.{service,timer}`、
+  `douyu-esports-results.{service,timer}`），但**不启动任何定时器**（等你验证通过再开）
 - 放一份 `/etc/default/douyu-watchdog`（看门狗告警配置模板，权限 600，**已存在不覆盖**）
 - 最后打印后续步骤清单
 

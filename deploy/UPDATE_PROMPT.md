@@ -5,11 +5,14 @@
 > 这次只是**更新代码**，不重装环境。
 > 全新部署请看 `AGENT_PROMPT.md`；卡在内存那一步的续跑请看 `RESUME_PROMPT.md`。
 >
-> ⚠️ **本文件的正文写于「装下播提醒」那一版，之后包又更新过三次**（新增 `esports.py`
-> 的 CS2 赛程预告、知名队伍白名单、以及**图片卡片**）。场景没变，但**第 0 步的指纹表
-> 已经按当前包更新过 —— 以那张表为准**。`esports.py` 是新增文件，服务器上原本没有，
-> `install-watch.sh` 会直接装上；它的定时器 `douyu-esports.timer` **装完是 disabled 的**，
-> 是否启用另说，不在本流程范围内。
+> ⚠️ **本文件的正文写于「装下播提醒」那一版，之后包又更新过数次**（新增 `esports.py`
+> 的 CS2 赛程预告、知名队伍白名单、**图片卡片**，以及本次的**战果公布**）。场景没变，
+> 但**第 0 步的指纹表已经按当前包更新过 —— 以那张表为准**。`esports.py` 是新增文件，
+> 服务器上原本没有，`install-watch.sh` 会直接装上；它的定时器 `douyu-esports.timer`
+> **装完是 disabled 的**，是否启用另说，不在本流程范围内。
+>
+> 本次还会多装两个单元 `douyu-esports-results.{service,timer}`（战果结算），
+> 同样是**只装不启用**。
 
 ---
 
@@ -18,7 +21,9 @@
 | 提交 | 内容 | 你能看到的变化 |
 |---|---|---|
 | `78f0981` / `3bc7a79` | 新增 `esports.py`：CS2 每日赛程预告 + 知名队伍白名单 | 每天北京 09:30 推一条「今日赛程」（**需要另外启用 `douyu-esports.timer` 才会跑**） |
-| （本次） | 赛程预告改版：**一行文字 + 一张图片卡片**（带队标） | 群里收到的赛程变成长图；**新增 `card_font.otf` 一个文件**，画卡片还要 Pillow（`python3-pil`，装不上会自动退回纯文本） |
+| `cbffcb0` | 赛程预告改版：**一行文字 + 一张图片卡片**（带队标） | 群里收到的赛程变成长图；**新增 `card_font.otf` 一个文件**，画卡片还要 Pillow（`python3-pil`，装不上会自动退回纯文本） |
+| `e87d6f9` / `721dad6` | 占位块改用页面短名；文档同步 | 队标拿不到时，灰块里显示的是页面自带的短名（如 `Spirit`），不再是三个 `TE` |
+| （本次） | 新增**战果公布**：预告过的比赛打完后补一条比分 | 预告后还会收到战果消息；**新增两个单元** `douyu-esports-results.{service,timer}`（只装不启用）。零新增数据源 —— 还是那一个页面、同一份解析器 |
 
 下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 
@@ -53,19 +58,20 @@
 ```bash
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
-sha256sum watch.py selftest.py watchdog.py esports.py card_font.otf | cut -c1-16
-wc -c watch.py selftest.py watchdog.py esports.py card_font.otf
+sha256sum watch.py selftest.py watchdog.py esports.py card_font.otf make_card_font.py | cut -c1-16
+wc -c watch.py selftest.py watchdog.py esports.py card_font.otf make_card_font.py
 ```
 
-前四个（代码）必须完全一致，第五个（卡片字体）是二进制资产、单独对：
+前四个（代码）必须完全一致，后两个（卡片资产）单独对：
 
 | 文件 | sha256 前 16 位 | 字节数 |
 |---|---|---|
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `fb93f9007e7c46bb` | 123686 |
-| `card_font.otf`（卡片字体） | `25640f16a8fad499` | 66612 |
+| `esports.py` | `707030096ae544c2` | 170925 |
+| `card_font.otf`（卡片字体） | `b7ffc2c5a5cdaf18` | 67544 |
+| `make_card_font.py`（生成字体的脚本） | `796117a1f4179f4b` | 5285 |
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
@@ -131,10 +137,10 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **183** |
-  | 少了 `make_card_font.py` | 181（少 2 条「两张字符表是否一致」的断言） |
-  | 没装 Pillow | 167（卡片的 17 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
-  | 两样都没有 | 165 |
+  | 装了 Pillow **且**有 `make_card_font.py`（正常情况） | **235** |
+  | 少了 `make_card_font.py` | 233（少 2 条「两张字符表是否一致」的断言） |
+  | 没装 Pillow | 212（卡片 + 战果卡片的 24 条渲染断言换成 1 条「没 Pillow 就返回 None」的降级断言） |
+  | 两样都没有 | 210 |
 
   **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow 那行、
   再 `ls card_font.otf make_card_font.py`。
@@ -294,11 +300,17 @@ sudo cat /opt/douyu-live-notify/state_6979222.json
 
 ## 最后回报这几项
 
-1. 第 0 步五行 `sha256sum` 输出（原样）
-2. 第 2 步 `install-watch.sh` 的**完整输出**（含它打印的指纹、以及 Pillow 那两行结论）
+1. 第 0 步**六行** `sha256sum` 输出（原样）
+2. 第 2 步 `install-watch.sh` 的**完整输出**（含它打印的指纹、以及 Pillow 那两行结论）；
+   确认里面出现过 `已安装 douyu-esports-results.service / .timer（尚未启用）`
 3. 第 3 步三个自检的**最后一行 + 退出码**（有 `[FAIL]` 就附全文），外加 `card_font.otf` 是否就位、Pillow 是否可用
 4. 第 4 步改前 / 改后那两行配置对照（**token 不要打印**）
 5. 第 5 步离线格式验证的输出原文
 6. 第 6 步 `--status` 全文 + 最近几条 `daily_ok` 记录
 7. 第 7 步 `is-active` / `Result` / `tick.log` 末行 / 状态文件内容
-8. **任何跳过、失败或你不确定的地方 —— 直接说，不要掩盖**
+8. **战果公布**（如果这一步要求做）：`python3 esports.py --check-results` 的完整输出，
+   以及 `systemctl list-timers douyu-esports-results.timer` 的结果。
+   ⚠️ 这条命令**会真抓一次页面**（1 次请求），但**不发消息、不写状态**。
+   清单空着也会演练（拿页面上最近打完的 8 场演示），所以这是**部署后唯一能验证战果版式的手段**。
+   **不要**因为它名字里带 check 就以为它完全不联网。
+9. **任何跳过、失败或你不确定的地方 —— 直接说，不要掩盖**
