@@ -1711,7 +1711,14 @@ ANNOUNCE_STATE_FILE = os.path.join(HERE, "state_esports_announce.json")
 # ---- 开赛提醒（STARTING SOON）的估算参数 ----
 # 数据源没有「比赛实际开打」的实时信号（Liquipedia 计时器到点变 LIVE 需要轮询，
 # 和条款网关冲突），所以 estimatedStart 只能**纯本地**算：自己的计划时刻，
-# 与「同赛事前面那场串场」的推算结束时间取大者。
+# 与「同赛事里**共用同一支队伍**的更早那场」的推算结束时间取大者。
+#
+# ⚠️ 判据是「共用队伍」，不是「同赛事」—— 一个赛事可以同时开两条并行流
+#    （EPL 一个 Round 就是 3 个时段 × 2 条流、12 支不同队伍）。只有**同一支队伍
+#    的两场**才在物理上不可能并行，因此只有那种情况才该级联。
+#    2026-10-06 的线上故障就是这么来的：按「同赛事」级联会把并行流串成一条链，
+#    20:00 的第二场被推到 22:50、22:30 的推到 01:20、01:00 的推到 07:00/09:50，
+#    结果一个 Round 六场里只有第一场按时提醒。
 ANNOUNCE_TURNAROUND_MIN = 30      # 前一场打完到下一场开始的最短间隔
 ANNOUNCE_DURATE_MIN = {"Bo1": 80, "Bo3": 140, "Bo5": 240}   # fallback 时长模型
 ANNOUNCE_REMIND_DRIFT_SEC = 600   # estimated 漂移超过 10 分钟才考虑重提醒
@@ -3706,7 +3713,8 @@ def run_results(cfg, args):
 #   → est 落进「未来 LEAD 分钟」的场次发一条 Match Preview 卡。
 # 为什么不做真实赛况轮询：Liquipedia 计时器到点才变 LIVE，盯它就得高频抓页，
 # 和条款网关（≤1 次/30 秒）直接冲突 —— 所以按 47 节规范的务实映射，
-# estimatedStart 只在**同赛事串场对**上做级联修正，其余场次信登记的 ts。
+# estimatedStart 只在**串场对**（同赛事且共用同一支队伍）上做级联修正，
+# 其余场次信登记的 ts —— 同一赛事内的并行流互不干扰。
 # 提醒锁在 state_esports_announce.json：每场（默认）只提醒一次；
 # estimated 漂移 ≥10 分钟且没重提醒过 → 再提醒一次；之后绝不再打扰。
 
@@ -3717,14 +3725,25 @@ def _match_duration_sec(item):
     return ANNOUNCE_DURATE_MIN.get(bo, ANNOUNCE_DURATE_MIN["Bo3"]) * 60
 
 
+def _share_team(a, b):
+    """两场是否共用至少一支队伍（大小写不敏感）。"""
+    ta = {(t or "").strip().lower() for t in (a.get("teams") or []) if (t or "").strip()}
+    tb = {(t or "").strip().lower() for t in (b.get("teams") or []) if (t or "").strip()}
+    return bool(ta & tb)
+
+
 def estimate_starts(items):
     """给清单条目算 estimatedStart（秒级 epoch），返回 {下标: est_ts}。
 
     · 基准 = 自己登记的 ts（预告时页面报出的开赛时间）；
-    · **同赛事串场对**才级联：同一 tour 里更早的那场，推算结束时间
-      （它的 est + fallback 时长）+ turnaround 就是本场的最早开赛时间；
-      级联用 est 而不是 ts —— A→B→C 连环串场能一路推下去；
-    · 并行场次（不同赛事）互不传染。
+    · **串场对**才级联 —— 判据是「同一 tour **且共用至少一支队伍**」：
+      那支队不可能同时打两场，所以本场最早只能在前一场推算结束时间
+      （它的 est + fallback 时长）+ turnaround 之后开打；
+      级联用 est 而不是 ts —— A/B → A/C → A/D 这种连环串场能一路推下去；
+    · **同一赛事内的并行流不传染**：一个 Round 常见「3 个时段 × 2 条并行流」，
+      两条流是不同的 12 支队，登记的那个时刻就是真的。按「同赛事」级联会把
+      它们串成一条链、越推越晚（2026-10-06 线上故障见文件顶部注释）；
+    · 不同赛事当然也不传染。
     """
     order = sorted(range(len(items or [])),
                    key=lambda i: int((items or [])[i].get("ts") or 0))
@@ -3738,6 +3757,8 @@ def estimate_starts(items):
                 prev = items[j]
                 if (prev.get("tour") or "").strip() != tour:
                     continue
+                if not _share_team(prev, it):
+                    continue                      # 不共用队伍 = 可以并行，不级联
                 cand = est[j] + _match_duration_sec(prev) \
                     + ANNOUNCE_TURNAROUND_MIN * 60
                 if cand > floor_ts:
@@ -5502,17 +5523,35 @@ def selftest():
     est = estimate_starts(items)
     dur = _match_duration_sec(items[0])
     t.check("估算：自己 ts 可满足时不级联（A/B 照常开打）", est[0] == 1000, est)
-    t.check("估算：同赛事串场对级联（A/C = A/B est + Bo3 时长 + turnaround）",
+    t.check("估算：同赛事且共用队伍 → 级联（A/C = A/B est + Bo3 时长 + turnaround）",
             est[1] == 1000 + dur + ANNOUNCE_TURNAROUND_MIN * 60, est)
     t.check("估算：不同赛事并行不传染（D/E 保留自己的 ts）", est[2] == 3000, est)
+
+    # 连环串场：A/B → A/C → A/D 一路共用 A，必须逐级用 est 往下推（不是用 ts）
     chain = [mk_it(1000, "A", "B", "Bo3", "L - R1"),
-             mk_it(1200, "C", "D", "Bo3", "L - R1"),
-             mk_it(1400, "E", "F", "Bo3", "L - R1")]
+             mk_it(1200, "A", "C", "Bo3", "L - R1"),
+             mk_it(1400, "A", "D", "Bo3", "L - R1")]
     estc = estimate_starts(chain)
     d3 = _match_duration_sec(chain[0])
-    t.check("估算：连环串场基于前一场的 est（B 基于 A 的 est，C 基于 B 的 est）",
+    t.check("估算：连环串场基于前一场的 est（A/C 基于 A/B，A/D 基于 A/C）",
             estc[1] == estc[0] + d3 + ANNOUNCE_TURNAROUND_MIN * 60
             and estc[2] == estc[1] + d3 + ANNOUNCE_TURNAROUND_MIN * 60, estc)
+
+    # 2026-10-06 线上故障真身：同一 Round 两条并行流（12 支互不相同的队伍），
+    # 登记时刻就是真的，绝不能被串成一条越来越晚的链。
+    par = [mk_it(1759752000, "G2 Esports", "PARIVISION", "Bo3", "EPL - R4"),
+           mk_it(1759752000, "Team Spirit", "1w Team", "Bo3", "EPL - R4"),
+           mk_it(1759761000, "9z Team", "BetBoom", "Bo3", "EPL - R4"),
+           mk_it(1759761000, "FURIA", "Aurora", "Bo3", "EPL - R4")]
+    estp = estimate_starts(par)
+    t.check("估算：同赛事并行流不传染（互不共用队伍 → 全部保留登记 ts）",
+            estp == {0: 1759752000, 1: 1759752000, 2: 1759761000, 3: 1759761000}, estp)
+    same_team = [mk_it(1759752000, "Team Spirit", "1w Team", "Bo3", "EPL - R4"),
+                 mk_it(1759752000, "Team Spirit", "9z Team", "Bo3", "EPL - R4")]
+    t.check("估算：对照组 —— 同赛事且共用队伍仍级联（证明上一行不是「全都不级联」）",
+            estimate_starts(same_team)[1]
+            == 1759752000 + _match_duration_sec(par[1]) + ANNOUNCE_TURNAROUND_MIN * 60,
+            estimate_starts(same_team))
 
     ann_one = {announce_key(items[0]): {"est_ts": 1000, "reminders": 1}}
     t.check("提醒窗口：只有 est 落进 [now, now+LEAD] 的场次被提醒",
