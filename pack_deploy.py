@@ -48,6 +48,10 @@ REQUIRED = [
     # 所以必须进 REQUIRED —— 免得打出一个「看起来正常、实际上全退旧版」的包。
     "result_template.html",
     "daily_template.html",
+    # 全天整合版的 V2 赛果模板（--daily 渲染 1920x1080 用）。同样属于
+    # 「缺了不报错、但整合版会安静退回 880px Pillow 旧卡」的那种，必须进
+    # REQUIRED —— 2026-10-06 之前整合版压根没有 HTML 层，就是漏了这一件。
+    "daily_results_template.html",
     # 开赛提醒的 Match Preview 模板（--announce 渲染 1920x1080 用）。
     # 缺了 render_preview_card_html 会 raise → log 后 return None → 纯文本发送，
     # 功能不炸但大图卡永远出不来，所以必须进 REQUIRED。
@@ -92,6 +96,7 @@ FROM_ROOT = ["watch.py", "selftest.py"]
 # 这些文件在 deploy/ 里，装到服务器上时要打印指纹
 FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py", "deploy/esports.py",
                "deploy/result_template.html", "deploy/daily_template.html",
+               "deploy/daily_results_template.html",
                "deploy/preview_template.html",
                "deploy/fonts/BebasNeue-Regular.ttf",
                "deploy/fonts/IBMPlexMono-Regular.ttf",

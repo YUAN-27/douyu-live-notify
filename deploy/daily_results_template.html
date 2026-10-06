@@ -38,7 +38,7 @@ body { background:#08090C; color:#F1F3F5;
 .evb .ln { flex:1; height:1px; background:#272D36; }
 .evb .ct { font-size:13px; letter-spacing:3px; color:#7D8796; }
 
-/* ---- 赛程主体 ---- */
+/* ---- 赛果主体 ---- */
 .bd { flex:1; min-height:0; display:flex; gap:56px; padding:20px 64px; }
 .col { flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; }
 
@@ -48,34 +48,53 @@ body { background:#08090C; color:#F1F3F5;
 .sep .tx { font-size:14px; letter-spacing:3px; color:#7D8796; white-space:nowrap; }
 .sep .tx b { color:#00D66B; font-weight:600; }
 
-/* 比赛行 */
-.mrow { flex:none; display:flex; align-items:center; border-radius:12px;
+/* 赛果行 */
+.rrow { flex:none; display:flex; align-items:center; border-radius:12px;
   background:#11151C; border:1px solid #272D36; padding:0 26px 0 22px; margin:5px 0; }
-.mrow .tt { flex:none; width:118px; font-weight:600; color:#F1F3F5;
+.rrow .tt { flex:none; width:96px; font-weight:600; color:#F1F3F5;
   letter-spacing:1px; line-height:1; }
-.mrow .nd { flex:none; width:34px; font-size:12px; letter-spacing:1px;
-  color:#00D66B; line-height:1.15; margin-left:8px; }
-.mrow .tick { flex:none; width:3px; height:56%; background:#00D66B; border-radius:2px;
-  margin-right:24px; opacity:.85; }
-.mrow .mu { flex:1; min-width:0; display:flex; flex-direction:column; gap:5px; }
-.mrow .l1 { display:flex; align-items:center; gap:14px; min-width:0; }
-.mrow .lg { flex:none; height:36px; width:44px; display:flex; align-items:center;
+.rrow .nd { flex:none; width:34px; font-size:12px; letter-spacing:1px;
+  color:#5C6570; line-height:1.15; margin-left:6px; }
+.rrow .tick { flex:none; width:3px; height:56%; background:#00D66B; border-radius:2px;
+  margin-right:20px; opacity:.85; }
+.rrow .mu { flex:1; min-width:0; display:flex; flex-direction:column; gap:5px; }
+.rrow .l1 { display:flex; align-items:center; gap:14px; min-width:0; }
+
+/* 两侧各占一半（flex:1 + min-width:0 → 宽度恒等、比分永远居中），
+   但高亮 chip 只包住队名本身（.bx），不拉满半行 —— 短队名如 G2 才不会被
+   撑成一条绿带。*/
+.rrow .tm { flex:1; min-width:0; display:flex; align-items:center; }
+.rrow .tm.a { justify-content:flex-end; }
+.rrow .tm.b { justify-content:flex-start; }
+.rrow .bx { display:flex; align-items:center; gap:12px; min-width:0; max-width:100%;
+  border-radius:9px; padding:4px 12px; border:1px solid transparent; }
+.rrow .bx.w { background:rgba(0,214,107,.10); border-color:rgba(0,214,107,.40); }
+.rrow .lg { flex:none; height:36px; width:44px; display:flex; align-items:center;
   justify-content:center; }
-.mrow .lg img { max-height:36px; max-width:44px; object-fit:contain; }
-.mrow .lg.ph { font-family:"Bebas Neue"; font-size:20px; color:#7D8796;
+.rrow .lg img { max-height:36px; max-width:44px; object-fit:contain; }
+.rrow .lg.ph { font-family:"Bebas Neue"; font-size:20px; color:#7D8796;
   border:1px solid #272D36; border-radius:6px; height:36px; width:36px;
   display:flex; align-items:center; justify-content:center; }
-.mrow .tn { font-family:"Bebas Neue"; letter-spacing:1.5px; line-height:1;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.mrow .vs { flex:none; font-size:15px; letter-spacing:2px; color:#5C6570; padding:0 4px; }
-.mrow .l2 { font-size:14px; letter-spacing:1px; color:#7D8796; white-space:nowrap;
-  overflow:hidden; text-overflow:ellipsis; }
-.mrow .bo { flex:none; margin-left:20px; font-size:14px; font-weight:600;
+.rrow .tn { font-family:"Bebas Neue"; letter-spacing:1.5px; line-height:1;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.rrow .bx.w .tn { color:#00D66B; }
+.rrow .bx.l .tn { color:#7D8796; }
+.rrow .bx.n .tn { color:#F1F3F5; }
+
+/* 比分：固定宽度居中列，跨行对齐 */
+.rrow .sc { flex:none; width:126px; text-align:center;
+  font-family:"Bebas Neue"; line-height:1; letter-spacing:1px;
+  display:flex; align-items:baseline; justify-content:center; }
+.rrow .sc i { color:#3A4250; font-style:normal; padding:0 8px; }
+.rrow .sc b { font-weight:400; }
+.rrow .sc b.w { color:#00D66B; }
+.rrow .sc b.l { color:#7D8796; }
+
+.rrow .l2 { font-size:14px; letter-spacing:1px; color:#7D8796; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; padding-left:14px; }
+.rrow .bo { flex:none; margin-left:20px; font-size:14px; font-weight:600;
   letter-spacing:1px; color:#7D8796; border:1px solid #272D36; border-radius:5px;
   padding:4px 12px; }
-.mrow .lv { flex:none; display:flex; align-items:center; gap:7px; margin-left:20px;
-  font-size:13px; font-weight:600; letter-spacing:2px; color:#00D66B; }
-.mrow .lv .dot { width:8px; height:8px; border-radius:50%; background:#00D66B; }
 
 /* ---- 页脚 ---- */
 .ftr { flex:none; height:46px; display:flex; align-items:center;
@@ -86,45 +105,59 @@ body { background:#08090C; color:#F1F3F5;
 <body>
 <div id="app"></div>
 <script>
-const daily = __DAILY__;
+const data = __RESULTS__;
 
 function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+function short(t){ return t.short || t.name || "?"; }
 
-// 三档密度：行高 / 队名字号 / 时间字号 / 事件行字号
+// 三档密度：行高 / 队名字号 / 时间字号 / 比分字号 / 事件行字号 / 队标高
 function density(rowsPerCol){
-  if (rowsPerCol <= 8)  return {rh:88, tn:34, tt:30, l2:14, lg:36};
-  if (rowsPerCol <= 11) return {rh:70, tn:27, tt:25, l2:13, lg:30};
-  return                  {rh:58, tn:22, tt:20, l2:13, lg:26};
+  if (rowsPerCol <= 8)  return {rh:88, tn:34, tt:30, sc:40, l2:14, lg:36};
+  if (rowsPerCol <= 11) return {rh:70, tn:27, tt:25, sc:33, l2:13, lg:30};
+  return                  {rh:58, tn:22, tt:20, sc:28, l2:13, lg:26};
 }
 
-function logoHtml(t, lg){
+function logoHtml(t, D){
   if (t.logo) return `<div class="lg"><img src="${t.logo}"></div>`;
   const ini = esc((t.short||t.name||"?")[0]);
   return `<div class="lg ph">${ini}</div>`;
 }
 
+// 胜方绿 chip；负方灰；两边都没赢（数据缺失）走中性白
 function rowHtml(m, D, hideEvent){
   const tnFs = `font-size:${D.tn}px`;
+  const scFs = `font-size:${D.sc}px`;
   const a = m.teamA, b = m.teamB;
-  const live = m.status === "LIVE";
+  const aWin = a.win === true, bWin = b.win === true;
+  const ac = aWin ? "w" : (bWin ? "l" : "n");
+  const bc = bWin ? "w" : (aWin ? "l" : "n");
   const l2 = hideEvent ? "" :
     `<div class="l2" style="font-size:${D.l2}px">${esc(m.event || "")}</div>`;
-  return `<div class="mrow" style="height:${D.rh}px">
+  return `<div class="rrow" style="height:${D.rh}px">
     <div class="tt" style="font-size:${D.tt}px">${esc(m.time)}</div>
     ${m.day > 0 ? `<div class="nd">次日</div>` : ""}
     <div class="tick"></div>
     <div class="mu">
       <div class="l1">
-        ${logoHtml(a, D)}
-        <span class="tn" style="${tnFs}">${esc(a.short || a.name)}</span>
-        <span class="vs">VS</span>
-        <span class="tn" style="${tnFs}">${esc(b.short || b.name)}</span>
-        ${logoHtml(b, D)}
+        <div class="tm a">
+          <div class="bx ${ac}">
+            ${logoHtml(a, D)}
+            <span class="tn" style="${tnFs}">${esc(short(a))}</span>
+          </div>
+        </div>
+        <div class="sc" style="${scFs}">
+          <b class="${aWin?"w":"l"}">${esc(a.score)}</b><i>:</i><b class="${bWin?"w":"l"}">${esc(b.score)}</b>
+        </div>
+        <div class="tm b">
+          <div class="bx ${bc}">
+            <span class="tn" style="${tnFs}">${esc(short(b))}</span>
+            ${logoHtml(b, D)}
+          </div>
+        </div>
       </div>
       ${l2}
     </div>
-    ${live ? `<div class="lv"><span class="dot"></span>LIVE</div>`
-           : (m.bo ? `<div class="bo">${esc(m.bo)}</div>` : "")}
+    ${m.bo ? `<div class="bo">${esc(m.bo)}</div>` : ""}
   </div>`;
 }
 
@@ -183,15 +216,20 @@ function render(d){
     return `<div class="col">${columnHtml(c, D, hideEvent, startDay)}</div>`;
   }).join("") + `</div>`;
 
+  const range = d.dateLabel === d.endDateLabel
+    ? esc(d.dateLabel)
+    : esc(d.dateLabel) + `<span class="arr">→</span>` + esc(d.endDateLabel);
+
   app.innerHTML = `
     <div class="hd">
       <div class="l">
-        <div class="t1">CS2 <span class="g">DAILY</span> MATCHES</div>
-        <div class="t2">TODAY'S SCHEDULE</div>
+        <div class="t1">CS2 <span class="g">RESULTS</span></div>
+        <div class="t2">FULL-DAY RESULT SUMMARY</div>
       </div>
       <div class="r">
-        <div class="d1">${esc(d.dateLabel)}<span class="arr">→</span>${esc(d.endDateLabel)}</div>
-        <div class="d2">${esc(d.windowLabel)} &nbsp;·&nbsp; <b>${n}</b> MATCHES &nbsp;·&nbsp; <b>${events.length}</b> EVENT${events.length===1?"":"S"}</div>
+        <div class="d1">${range}</div>
+        <div class="d2">${esc(d.dayLabel||"")} &nbsp;·&nbsp; <b>${n}</b> MATCHES
+          &nbsp;·&nbsp; <b>${events.length}</b> EVENT${events.length===1?"":"S"}</div>
       </div>
     </div>
     ${banner}${body}
@@ -200,7 +238,7 @@ function render(d){
       <span>LAST UPDATED ${esc(d.generatedAt||"")} · GENERATED BY QQ-ESPORTS-NOTIFY</span>
     </div>`;
 }
-render(daily);
+render(data);
 </script>
 </body>
 </html>

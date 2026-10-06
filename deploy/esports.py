@@ -1704,6 +1704,7 @@ HTML_CARD_W, HTML_CARD_H = 1920, 1080
 HTML_FONT_DIR = os.path.join(HERE, "fonts")
 RESULT_TEMPLATE_FILE = os.path.join(HERE, "result_template.html")
 DAILY_TEMPLATE_FILE = os.path.join(HERE, "daily_template.html")
+DAILY_RESULTS_TEMPLATE_FILE = os.path.join(HERE, "daily_results_template.html")
 PREVIEW_TEMPLATE_FILE = os.path.join(HERE, "preview_template.html")
 ANNOUNCE_STATE_FILE = os.path.join(HERE, "state_esports_announce.json")
 
@@ -1774,7 +1775,8 @@ def render_html_png(template_html, data, es):
     html = (template_html
             .replace("__FONTDIR__", _file_uri(HTML_FONT_DIR))
             .replace("__MATCH__", inject)
-            .replace("__DAILY__", inject))
+            .replace("__DAILY__", inject)
+            .replace("__RESULTS__", inject))
     work = tempfile.mkdtemp(prefix="htmlcard_")
     try:
         hp = os.path.join(work, "card.html")
@@ -1966,6 +1968,95 @@ def render_card_html(picked, now, es):
         log("[warn] HTML 总预告构建出错（%s: %s）→ 退回 880px 旧卡"
             % (type(exc).__name__, exc))
     return None
+
+
+def build_daily_results_data(rows, now, es):
+    """全天整合版 V2 的数据对象（喂 daily_results_template.html）。
+
+    和总预告 build_daily_data 是同一套版式语言，但每行画的是**已定的比分**：
+    `[时间] 队A 2:0 队B`，胜方绿底 chip、负方灰。
+
+    场次太多（>22 —— 双列 11 行/列正好压在第二档密度的舒适区内）或空场次
+    返回 None —— 退回 Pillow 旧卡，绝不硬画。
+    """
+    es = es or {}
+    rs = sorted(rows or [], key=lambda r: int(r.get("ts") or 0))
+    if not rs or len(rs) > 22:
+        return None
+    budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
+    start = now.date()
+    out, events = [], []
+    for r in rs:
+        ts = int(r.get("ts") or 0)
+        dt = datetime.fromtimestamp(ts, CST)
+        teams = list(r.get("teams") or []) + ["", ""]
+        shorts = list(r.get("shorts") or []) + ["", ""]
+        logos = list(r.get("logos") or []) + ["", ""]
+        winner = (r.get("winner") or "").strip()
+        nums = str(r.get("score") or "").split(":")
+        sa, sb = (nums[0], nums[1]) if len(nums) == 2 else ("?", "?")
+        ev = (r.get("tour") or "").strip()
+        if ev and ev not in events:
+            events.append(ev)
+        out.append({
+            "ts": ts, "time": dt.strftime("%H:%M"),
+            "day": (dt.date() - start).days,
+            "dateLabel": dt.strftime("%b %d").upper(),
+            "teamA": {"name": teams[0], "short": shorts[0] or teams[0],
+                      "logo": _html_logo(logos[0], es, budget),
+                      "score": sa, "win": bool(winner) and winner == teams[0]},
+            "teamB": {"name": teams[1], "short": shorts[1] or teams[1],
+                      "logo": _html_logo(logos[1], es, budget),
+                      "score": sb, "win": bool(winner) and winner == teams[1]},
+            "event": ev, "bo": (r.get("bo") or "").strip().upper(),
+            "status": "FINAL",
+        })
+    end = datetime.fromtimestamp(int(rs[-1].get("ts") or 0), CST)
+    return {
+        "generatedAt": now.strftime("%H:%M"),
+        "dateLabel": start.strftime("%b %d").upper(),
+        "endDateLabel": end.strftime("%b %d").upper(),
+        "dayLabel": _day_label(now),
+        "total": len(out),
+        "events": events,
+        "matches": out,
+    }
+
+
+def render_daily_results_card_html(rows, now, es):
+    """全天整合版 HTML 大图（1920×1080）。出不了返回 None（上层退 880px 旧卡）。"""
+    try:
+        if not os.path.isfile(DAILY_RESULTS_TEMPLATE_FILE):
+            raise HtmlCardError("缺模板 %s" % DAILY_RESULTS_TEMPLATE_FILE)
+        data = build_daily_results_data(rows, now, es)
+        if data is None:
+            raise HtmlCardError("空场次或超过 22 场，版式兜不住")
+        with open(DAILY_RESULTS_TEMPLATE_FILE, encoding="utf-8") as f:
+            tmpl = f.read()
+        png = render_html_png(tmpl, data, es)
+        log("[info] 整合版战果大图（HTML 1920×1080）：PNG %.1f KB"
+            % (len(png) / 1024))
+        return png
+    except HtmlCardError as exc:
+        log("[info] HTML 整合版战果出不了（%s）→ 退回 880px 旧卡" % exc)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] HTML 整合版战果构建出错（%s: %s）→ 退回 880px 旧卡"
+            % (type(exc).__name__, exc))
+    return None
+
+
+def render_daily_results_card(rows, now, es):
+    """**全天整合版**战果卡片。优先 HTML 大图（1920×1080），出不了退 880px
+    Pillow 旧卡，再不行返回 None，由上层退回纯文本。
+
+    这条是三条流水线里**最后**补上 HTML 层的一条：在它之前，整合版只有
+    Pillow 一档，所以用户看到的「昨天的总战果」一直是 880px 老卡。
+    """
+    if rows and (es or {}).get("card_html_enabled", True):
+        png = render_daily_results_card_html(rows, now, es)
+        if png:
+            return png
+    return render_results_card(rows, now, es)
 
 
 def build_preview_data(item, est_ts, now, es):
@@ -3926,7 +4017,8 @@ def run_daily(cfg, args):
     label_dt = start
     card = None
     if es.get("card_enabled", True) and es.get("card_results_enabled", True):
-        card = render_results_card(shown, label_dt, es)
+        # 三级降级：HTML 1920×1080 → 880px Pillow 旧卡 → 纯文本。
+        card = render_daily_results_card(shown, label_dt, es)
     body = format_results_caption(rows, label_dt) if card else format_results(rows, label_dt)
     log("[info] 整合版：%d 场，%s"
         % (len(rows), "一行文字 + 一张整合图" if card else "纯文本"))
@@ -5223,13 +5315,28 @@ def selftest():
             os.remove(_probe)
         except OSError:
             pass
-    for _tpl_name in ("result_template.html", "daily_template.html"):
+    # 每份模板：字体占位符必须在（少了 → @font-face 404 → 静默回退系统字体），
+    # 自己的数据占位符也必须在（少了 → 注入不进去 → 卡片空白），且不能残留
+    # **别的**模板的占位符（那是复制粘贴改漏的信号）。
+    _TPL_SPECS = (
+        ("result_template.html", "__MATCH__"),
+        ("daily_template.html", "__DAILY__"),
+        ("daily_results_template.html", "__RESULTS__"),
+        ("preview_template.html", "__MATCH__"),
+    )
+    for _tpl_name, _ph in _TPL_SPECS:
         with open(os.path.join(HERE, _tpl_name), encoding="utf-8") as _tf:
             _tpl_txt = _tf.read()
+        _others = [p for _n, p in _TPL_SPECS if p != _ph]
         t.check("模板 %s：__FONTDIR__ 占位符在、且没有 file:/// 双前缀（会静默回退系统字体）"
                 % _tpl_name,
                 "__FONTDIR__" in _tpl_txt
                 and "file:///__FONTDIR__" not in _tpl_txt)
+        t.check("模板 %s：%s 占位符在、且没有别的模板的占位符残留"
+                % (_tpl_name, _ph),
+                _ph in _tpl_txt and not any(o in _tpl_txt for o in _others))
+        t.check("模板 %s：署名已随仓库改名更新（大小写都不留 douyu）" % _tpl_name,
+                "douyu" not in _tpl_txt.lower())
     t.check("随包字体三件套都在 HTML_FONT_DIR（缺了 @font-face 404 → 系统字体）",
             all(os.path.isfile(os.path.join(HTML_FONT_DIR, _fn)) for _fn in
                 ("BebasNeue-Regular.ttf", "IBMPlexMono-Regular.ttf",
@@ -5294,6 +5401,58 @@ def selftest():
     else:
         t.check("没 Chromium 时 HTML 卡安静退回 None（再退 Pillow/纯文本）",
                 render_result_card_html(srow, es) is None)
+
+    # ---- 3f-2b. 全天整合版 V2（本来就是唯一只有 Pillow 的那条，补 HTML 层）----
+    print("\n-- 3f-2b. 全天整合版 V2（HTML 1920×1080 / 三级降级补齐）--")
+    # _dit / ds / de 来自 3e：两场已结算（1:2 右胜 + 2:0 左胜）
+    rdrows = daily_rows(_dit, ds, de, es)
+    rdat = build_daily_results_data(rdrows, ds, es)
+    t.check("整合版 V2 数据：比分拆成两侧、win 只落在赢的那一边",
+            rdat is not None and len(rdat["matches"]) == 2
+            and (rdat["matches"][0]["teamA"]["score"],
+                 rdat["matches"][0]["teamB"]["score"]) == ("1", "2")
+            and rdat["matches"][0]["teamA"]["win"] is False
+            and rdat["matches"][0]["teamB"]["win"] is True
+            and rdat["matches"][1]["teamA"]["win"] is True
+            and rdat["matches"][1]["teamB"]["win"] is False,
+            [(m["teamA"]["win"], m["teamB"]["win"])
+             for m in (rdat or {}).get("matches", [])])
+    t.check("整合版 V2 数据：dayLabel 用赛程日（和早上那条预告同名，便于对照）",
+            rdat["dayLabel"] == _day_label(ds), rdat["dayLabel"])
+    t.check("整合版 V2 数据：赛事名去重进 events、bo 转大写",
+            rdat["events"] and len(rdat["events"]) == len(set(rdat["events"]))
+            and rdat["matches"][0]["bo"] == "BO3", rdat["events"])
+    t.check("整合版 V2 数据：空场次返回 None（→ 上层退 Pillow/纯文本，绝不硬画）",
+            build_daily_results_data([], ds, es) is None)
+    t.check("整合版 V2 数据：超过 22 场返回 None（版式兜不住就退旧卡）",
+            build_daily_results_data(
+                [dict(rdrows[0], ts=rdrows[0]["ts"] + i) for i in range(23)],
+                ds, es) is None)
+    t.check("整合版 V2 数据：比分不是「两个数字」→ 用 ? 占位（不画假比分）",
+            build_daily_results_data([dict(rdrows[0], score="2:?")], ds, es)
+            ["matches"][0]["teamB"]["score"] == "?")
+    t.check("⚑ run_daily 的卡片入口是 render_daily_results_card（三级降级的头一级）",
+            "render_daily_results_card(shown, label_dt, es)"
+            in open(os.path.join(HERE, "esports.py"), encoding="utf-8").read())
+
+    if find_chrome(es):
+        rdpng = render_daily_results_card_html(rdrows, ds, es)
+        t.check("有 Chromium 时整合版出 1920×1080 HTML 大图（PNG 魔数 + 实际尺寸）",
+                isinstance(rdpng, (bytes, bytearray))
+                and bytes(rdpng[:8]) == b"\x89PNG\r\n\x1a\n"
+                and _png_wh(rdpng) == (1920, 1080),
+                _png_wh(rdpng) if rdpng else type(rdpng))
+    _keep_rdt = globals()["DAILY_RESULTS_TEMPLATE_FILE"]
+    try:
+        globals()["DAILY_RESULTS_TEMPLATE_FILE"] = os.path.join(HERE, "__no-tpl__.html")
+        _rdfb = render_daily_results_card(rdrows, ds, pill)
+        t.check("⚑ 整合版缺模板时安静降级（缺 HTML 模板不该让整合版发不出去）",
+                _rdfb is None or (isinstance(_rdfb, (bytes, bytearray))
+                                  and bytes(_rdfb[:8]) == b"\x89PNG\r\n\x1a\n"),
+                type(_rdfb))
+    finally:
+        globals()["DAILY_RESULTS_TEMPLATE_FILE"] = _keep_rdt
+
     _keep_tpl = globals()["RESULT_TEMPLATE_FILE"]
     try:
         globals()["RESULT_TEMPLATE_FILE"] = os.path.join(HERE, "__no-tpl__.html")

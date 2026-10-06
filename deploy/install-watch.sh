@@ -184,11 +184,12 @@ for cf in card_font.otf CARD_FONT_LICENSE.txt make_card_font.py; do
   fi
 done
 
-# V2 HTML 大图卡（esports.py 渲染 1920x1080 时用）：三份模板 + fonts/ 字体目录。
+# V2 HTML 大图卡（esports.py 渲染 1920x1080 时用）：四份模板 + fonts/ 字体目录。
 # esports.py 按「脚本同目录」找它们（RESULT_TEMPLATE_FILE / DAILY_TEMPLATE_FILE /
-# PREVIEW_TEMPLATE_FILE，HTML_FONT_DIR=HERE/fonts）。缺了不致命 ——
-# 会静默降级回 880px 旧卡，但那就白部署这一版了，所以缺失时给出显眼警告。
-for vf in result_template.html daily_template.html preview_template.html; do
+# DAILY_RESULTS_TEMPLATE_FILE / PREVIEW_TEMPLATE_FILE，HTML_FONT_DIR=HERE/fonts）。
+# 缺了不致命 —— 会静默降级回 880px 旧卡，但那就白部署这一版了，所以缺失时给出显眼警告。
+for vf in result_template.html daily_template.html daily_results_template.html \
+          preview_template.html; do
   if [[ -f "$UNIT_DIR/$vf" ]]; then
     if [[ -f "$APP_DIR/$vf" ]] && cmp -s "$UNIT_DIR/$vf" "$APP_DIR/$vf"; then
       echo "已放入 $APP_DIR/$vf（与原有版本一致）"

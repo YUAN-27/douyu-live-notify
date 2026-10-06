@@ -281,8 +281,9 @@ qq-esports-notify/
     ├── watchdog.py               看门狗：体检 + 自愈 + 独立于 QQ 的告警通道
     ├── result_template.html      卡片模板：单场战报
     ├── daily_template.html       卡片模板：总预告大图（文件名是历史包袱，实际喂的是总预告）
+    ├── daily_results_template.html  卡片模板：全天整合版战果大图
     ├── preview_template.html     卡片模板：开赛提醒（Match Preview）
-    ├── fonts/                    上面三个模板用的字体（Bebas Neue / IBM Plex Mono ×2）+ OFL 许可证
+    ├── fonts/                    上面四个模板用的字体（Bebas Neue / IBM Plex Mono ×2）+ OFL 许可证
     ├── card_font.otf             Pillow 降级卡片的字体子集（Noto Sans SC，65 KB）
     ├── CARD_FONT_LICENSE.txt     ↑ 的 SIL OFL 1.1 全文（OFL 要求随字体分发）
     ├── make_card_font.py         重新生成 card_font.otf
@@ -410,7 +411,7 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
 | 总预告 | HTML 1920×1080（`daily_template.html`） | 880 px PNG，Pillow | 纯文本 |
 | 单场战报 | HTML 1920×1080（`result_template.html`） | PNG，Pillow | 纯文本 |
 | 开赛提醒 | HTML 1920×1080（`preview_template.html`） | — | 纯文本 |
-| 全天整合版 | —（**没有 HTML 版**） | PNG，Pillow | 纯文本 |
+| 全天整合版 | HTML 1920×1080（`daily_results_template.html`） | 880 px PNG，Pillow | 纯文本 |
 
 HTML 那级要 Chromium；Pillow 那级要 Pillow + `card_font.otf`；
 `card_font.otf` 是**随包发布**的 Noto Sans SC 子集（65 KB），
