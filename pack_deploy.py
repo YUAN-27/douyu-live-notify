@@ -130,8 +130,16 @@ def is_runtime_state(name):
     属于最难查的一类故障（本地怎么试都正常）。
     """
     base = os.path.basename(name)
-    return base.startswith("state_") and (base.endswith(".json")
-                                          or base.endswith(".json.tmp"))
+    if not base.startswith("state_"):
+        return False
+    return (base.endswith(".json")
+            or base.endswith(".json.tmp")
+            # 2026-10-06 起 esports.py 用 `state_*.json.lock` 做跨进程 flock。
+            # 它不是 `.json` 结尾，上面两条规则**都挡不住它** —— 开发机跑一次
+            # `--check` 就会留下这个空文件，然后被打进 deploy.zip。
+            # 空文件本身无害，但它会在服务器上留一个来路不明的 `.lock`，
+            # 而且一旦哪天锁文件里真写了东西（比如记 pid），就是白送一份状态出去。
+            or base.endswith(".lock"))
 
 # 单个文件超过这个大小就认为「打包名单出问题了」，直接失败。
 # 现状：最大的文件是 card_font.otf（66 KB）。加这条是为了让「不小心把 8 MB 源字体

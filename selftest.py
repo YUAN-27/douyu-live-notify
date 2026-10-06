@@ -640,6 +640,96 @@ finally:
         log("")
         log("[cleanup] 已删除测试产生的 state 文件")
 
+# ---- 定时器时区：固定钟点的 OnCalendar 必须**显式**写时区 ----
+# systemd 不带时区时按**系统时区**解释。开发机和现在的服务器都是 CST，看不出问题，
+# 但云主机默认 UTC 很常见 —— 那时「每天 09:40」会变成北京时间 17:40，
+# 整合版就会在错误的时刻发（窗口右端点也跟着错位）。
+# 只查「固定钟点」的：每小时/每 10 分钟跑的那种与系统时区无关，不用强求。
+#
+# ⚠️ 这一块（连同下面「运行期状态文件的两条守卫」）查的是**仓库 / 部署包解开后的目录树**：
+#    它要看 `deploy/` 子目录、`.gitignore`、`pack_deploy.py` —— 这三样只在仓库里。
+#    但 `install-watch.sh` 装到服务器上是**扁平**的：unit 文件进了 /etc/systemd/system，
+#    源码摊在 /opt/douyu-live-notify，没有 deploy/ 子目录、也没有 .gitignore。
+#    所以整块按「有没有 deploy/ 子目录」短路：装好的机器上**跳过并写明原因**，
+#    而不是报到服务器上刷一屏红。
+_REPO_LAYOUT = os.path.isdir(os.path.join(HERE, "deploy"))
+log("")
+log("-- 仓库类断言：定时器时区 / 状态文件守卫 --")
+log("   布局：%s" % ("仓库或 deploy.zip 解开后的目录树 —— 下面正常检查"
+                  if _REPO_LAYOUT else
+                  "装好的目录（%s 下没有 deploy/ 子目录）—— 下面几条无对象，跳过" % HERE))
+
+if _REPO_LAYOUT:
+    _TZ_OK = ("UTC", "Asia/", "Europe/", "America/")
+    _timer_dir = os.path.join(HERE, "deploy")
+    _timers = sorted(f for f in os.listdir(_timer_dir) if f.endswith(".timer"))
+    check("找得到 deploy/*.timer（找不到说明目录结构变了，下面两条会失去意义）",
+          len(_timers) >= 6, ", ".join(_timers))
+    _fixed_hour, _no_tz = [], []
+    for _f in _timers:
+        with open(os.path.join(_timer_dir, _f), encoding="utf-8") as _fp:
+            for _ln in _fp:
+                _ln = _ln.strip()
+                if not _ln.startswith("OnCalendar="):
+                    continue
+                _val = _ln.split("=", 1)[1].strip()
+                # 取「看起来像时间」的那个字段（含冒号的那个）；小时 = 它冒号前那段。
+                # ⚠️ 别用 split()[0] —— 那是日期字段 `*-*-*`，会被误判成固定钟点。
+                _hh = ""
+                for _t in _val.split():
+                    if ":" in _t:
+                        _hh = _t.split(":")[0].strip()
+                        break
+                if _hh and _hh != "*":
+                    _fixed_hour.append(_f)
+                    if not any(t in _val for t in _TZ_OK):
+                        _no_tz.append("%s → %s" % (_f, _val))
+    check("⚑ 所有「固定钟点」的 OnCalendar 都显式写了时区（否则 UTC 机器上整体偏 8 小时）",
+          not _no_tz, "；".join(_no_tz) or "、".join(_fixed_hour))
+    check("确实扫到了固定钟点的定时器（否则上面那条等于空断言）",
+          len(_fixed_hour) >= 2, "、".join(_fixed_hour))
+
+    # ---- 运行期状态文件：**.gitignore 和 pack_deploy 两条守卫都得挡住 .lock** ----
+    # 2026-10-06 加了跨进程 flock 之后多出一类文件：`state_*.json.lock`（锁的载体，空的）。
+    # 它**不是 `.json` 结尾** —— `.gitignore` 里的 `state_*.json` 和 pack_deploy 里
+    # `is_runtime_state()` 的 `endswith(".json")` 原来**都挡不住它**。
+    # 后果：开发机跑一次 `--check` 就留下一个空锁文件，`git status` 里冒出来一个
+    # 来路不明的未跟踪文件，打包时还会被塞进 deploy.zip 送到服务器上。
+    _gi_path = os.path.join(HERE, ".gitignore")
+    _gi_txt = ""
+    if os.path.isfile(_gi_path):
+        with open(_gi_path, encoding="utf-8") as _fp:
+            _gi_txt = _fp.read()
+    check("找得到 .gitignore（下面两条靠它）", bool(_gi_txt), _gi_path)
+    _gi_pats = [ln.strip() for ln in _gi_txt.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+    check("⚑ .gitignore 挡得住状态文件的锁文件（`state_*.json` 挡不住 `.lock`）",
+          any(p in ("state_*.lock", "state_*.json.lock") for p in _gi_pats),
+          "；".join(_gi_pats[:6]))
+
+    _pd_path = os.path.join(HERE, "pack_deploy.py")
+    check("找得到 pack_deploy.py（下面两条靠它）", os.path.isfile(_pd_path), _pd_path)
+    if os.path.isfile(_pd_path):
+        _pd_spec = importlib.util.spec_from_file_location("_pd_selftest", _pd_path)
+        _pd_mod = importlib.util.module_from_spec(_pd_spec)
+        # 模块顶层只有常量与函数定义，没有副作用（main 在 __main__ 守卫里）。
+        _pd_spec.loader.exec_module(_pd_mod)
+        _irs_yes = _pd_mod.is_runtime_state("deploy/state_esports_parse.json.lock")
+        _irs_no = _pd_mod.is_runtime_state("deploy/esports.py")
+        check("⚑ pack_deploy.is_runtime_state 认得锁文件（否则空锁文件会被塞进部署包）",
+              _irs_yes is True, "返回 %r" % (_irs_yes,))
+        check("反向：正常源码 / 模板不会被误判成运行期状态文件（免得把包打空）",
+              _irs_no is False and
+              _pd_mod.is_runtime_state("deploy/state_results_pending.json") is True and
+              _pd_mod.is_runtime_state("deploy/state_results_pending.json.tmp") is True,
+              "%r / %r / %r" % (_irs_no,
+                                _pd_mod.is_runtime_state("deploy/state_x.json"),
+                                _pd_mod.is_runtime_state("deploy/state_x.json.tmp")))
+else:
+    log("")
+    log("[skip] 定时器时区扫描 —— 装好的机器上没有 deploy/ 子目录，无对象（不算失败）")
+    log("[skip] 状态文件守卫（.gitignore / pack_deploy）—— 同上，两者都不在本机")
+
 report.append("")
 report.append("=" * 68)
 report.append("结果：%d 项通过，%d 项失败（共 %d 项）"

@@ -132,7 +132,9 @@ parse_matches() 与 deploy/check-esports-net.py 里的那份是**同一份实现
 """
 
 import argparse
+import ast
 import base64
+import contextlib
 import hashlib
 import html as html_mod
 import io
@@ -406,6 +408,36 @@ DEFAULT_HLTV_ALIASES = {
     # FURIA / MOUZ / Legacy / Natus Vincere / Astralis / MIBR / B8
 }
 
+# ==========================================================================
+# 1920×1080 大图**真的画得下**几行 —— 这个数是**量出来的**，不是估的（2026-10-06）
+# ==========================================================================
+#
+# 两张模板共用这一个数：`daily_template.html`（总预告）和
+# `daily_results_template.html`（全天整合版）。它们不是「碰巧相等」——
+# 页头 96px、页脚 46px、主体 `.bd` 的 flex:1 + padding、`.col` 两列、
+# `.sep` 跨午夜分隔线、以及 `density()` 那三档行高（≤8 行 88px / ≤11 行 70px /
+# 否则 58px）是**同一套几何**，所以容量当然一样。谁哪天把其中一个模板改瘦了/改胖了，
+# 就重跑尺子、把这个数拆成两个。
+#
+# 怎么量的：把模板灌上 N 场数据、用 Chrome 无头 `--dump-dom` 把页面上量到的几何值
+# 打回来 —— 比较「最后一行的下边缘」和「主体区（.bd）的下边缘」。溢出就是被
+# `overflow:hidden` 切掉（截图上根本看不出来，只能这么量）。
+# 结果（`deploy/measure_img_capacity.py`，单赛事横幅在 / 跨午夜分隔线在，分别测）：
+#
+#     N=18  列 [9,9]    下边缘 942  ≤ 主体下边缘 1034   ✓
+#     N=20  列 [10,11]  下边缘 1002 ≤ 1034              ✓
+#     N=21  列 [11,11]  下边缘 1022 ≤ 1034              ✓（只剩 12px 余量）
+#     N=22  列 [11,12]  下边缘 1042 >  1034              ✗ 溢出 8px，最后一列被切
+#
+# 为什么 22 比 21 差这么多：22 场时两列是 11 + 12 —— 列高由 12 行那一列决定，
+# 行高档位一跳（70 → 58）反而让版面更紧。两张模板实测都是这个形状。
+# 结论：**21 是上限**，22 起一定切版面。
+#
+# ⚠️ 别再在别处写 22 / 24 之类的数：`daily_max_rows` 的默认值、这个常量、
+#    `config.example.json`、`douyu-esports-daily.service` 的注释、ESPORTS.md
+#    必须是同一个数，自检会盯着它们一致。
+HTML_IMG_MAX_ROWS = 21
+
 ESPORT_DEFAULTS = {
     # 总开关。关掉后本脚本立刻退出，systemd 那边不会当成失败。
     "enabled": True,
@@ -468,8 +500,12 @@ ESPORT_DEFAULTS = {
     # 汇总的就变成前天那一场（run_daily 里有一条显式校验挡这件事）。
     # 定 09:40 还有个好处：此时赛程日已经过完 10 分钟，该结算的都结算了。
     "daily_run_time": "09:40",
-    # 一个赛程日最多在整合版里列几场（多了图太长，手机上反而看不清）。
-    "daily_max_rows": 24,
+    # 一个赛程日最多在整合版里列几场。
+    # ⚠️ 这个默认值**必须等于** `HTML_IMG_MAX_ROWS`（= 1920×1080 模板实测画得下的
+    #    行数）。原来写的是 24 —— 而模板 22 行起就会切版面、23 行起直接拒绝渲染，
+    #    三个数各说各话（24 / 22 / 880px 旧卡的 12）。2026-10-06 统一到 21，自检盯着。
+    #    超出的场次**仍然会出现在那一行文字里**（文字不限行），只是不进图。
+    "daily_max_rows": HTML_IMG_MAX_ROWS,
     # 「开赛多久之后才开始找结果」—— 这是最重要的一个安全阀：
     # 它是**时间下限**，没有它就可能把「进行中」的比分当成战果发出去。
     # 同时它也是节流阀：不到这个点，结算任务连网络请求都不发。
@@ -555,6 +591,68 @@ def fetch_once(url, ua, timeout=25, accept="application/json"):
                 "error": "%s: %s" % (type(exc).__name__, exc)}
 
 
+try:
+    import fcntl                       # POSIX（线上是 Linux，锁一定生效）
+except ImportError:                    # pragma: no cover - Windows 开发机
+    fcntl = None                       # 没有 fcntl → file_lock 退化成「无锁放行」
+
+
+@contextlib.contextmanager
+def file_lock(path):
+    """给「读—改—写同一个状态文件」加一把**跨进程**排他锁（POSIX: `flock`）。
+
+    为什么原子写不够：`tmp + os.replace` 只保证**文件不会被写坏**，
+    不保证**不丢更新** ——
+      A 读到 {1}、B 也读到 {1}；A 写回 {1,2}、B 写回 {1,3} → A 加的那条没了。
+    本项目里这条路径真实存在（三个**独立进程**都改同一份清单）：
+      · `douyu-esports`（每日 09:30）登记待结算；
+      · `douyu-esports-results`（每 10 分钟）结算并记战果；
+      · `douyu-esports-daily`（每日 09:40）补漏。
+    2026-10-06 外部复查提的「状态文件原子写不等于并发安全」就是这一条。
+
+    ⚠️ 锁的持有时间必须是**一次文件读写（毫秒级）**。凡是「读 → 联网/发消息 → 写」
+    的长流程，都要改成「锁内重读 + 按身份键合并」（见 `update_pending`），
+    否则一个进程能把别的进程堵上几分钟。
+
+    退化：Windows 没有 `fcntl` → 只创建锁文件、**不加锁**（本机自检因此在 Windows 上
+    照样跑得动）。锁文件总是会建出来 —— 这样「锁的是独立文件」这件事在两个平台上
+    都看得见，自检也就能钉住它。
+    拿不到锁（权限、磁盘满之类）也只记一笔 warn 后放行 —— 宁可极小概率丢更新，
+    也不能因为加锁失败就不发消息。
+    """
+    lock_path = path + ".lock"
+    fp = None
+    try:
+        try:
+            d = os.path.dirname(lock_path)
+            if d and not os.path.isdir(d):
+                os.makedirs(d)
+            # 用独立的 .lock 文件而不是锁状态文件本身：状态文件是 rename 替换的，
+            # 锁在「被替换掉的那个 inode」上会立刻失效，等于没锁。
+            fp = open(lock_path, "a+")
+            if fcntl is not None:
+                fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            log("[warn] 状态文件加锁失败（%s），本轮退化成无锁：%s" % (lock_path, exc))
+        yield
+    finally:
+        if fp is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                fp.close()
+            except OSError:
+                pass
+
+
+def print_lock_note():
+    """自检/日志用：本机到底有没有真的上锁。"""
+    return "flock 生效" if fcntl is not None else "无 fcntl，退化成无锁"
+
+
 def parse_gate_delay(last_ts, now_ts, gap):
     """纯函数：距离「允许再发一次 action=parse」还差几秒。
 
@@ -598,18 +696,23 @@ def parse_gate(es, path=PARSE_STAMP_FILE):
          单靠「把 OnCalendar 错开」挡不住偶发重叠。
     所以把「上一次请求时刻」落盘，让节流**跨进程**生效：谁先到谁先写。
 
-    ⚠️ 两个进程同时读旧值时都会决定等待、然后各自写 —— 极端情况下仍有极小的重叠窗口。
-       这个量级的风险可以接受（本来留的就是 30 秒整，而实际用法离这个频率很远）。
+    ⚠️ 整个「读时间戳 → 等 → 写时间戳」都在**同一把跨进程锁**里（2026-10-06 加）。
+       原来只是「读完再写」，两个进程同时读到旧值时都会决定「不用等」、然后各自写 ——
+       30 秒的间隔就白留了。加锁之后第二个进程会等第一个走完，**在锁内重读**时间戳，
+       于是它算出的是真正的剩余等待时间。这就是节流该有的语义。
 
     为什么不放进 `fetch_once`：队标走的是 commons 图片，不在 parse 的限制里，
     不该跟着一起等 30 秒。
     """
     gap = max(0, int((es or {}).get("parse_min_interval_seconds") or 30))
-    delay = parse_gate_delay(_load_parse_stamp(path), time.time(), gap)
-    if delay > 0:
-        log("[info] 条款节流：距上一次请求不足 %d 秒，先等 %.1f 秒再抓" % (gap, delay))
-        time.sleep(delay)
-    _save_parse_stamp(time.time(), path)
+    delay = 0.0
+    with file_lock(path):
+        # ⚠️ 必须在**锁内**重读：锁外读到的是可能已经被别人刷新过的旧值。
+        delay = parse_gate_delay(_load_parse_stamp(path), time.time(), gap)
+        if delay > 0:
+            log("[info] 条款节流：距上一次请求不足 %d 秒，先等 %.1f 秒再抓" % (gap, delay))
+            time.sleep(delay)
+        _save_parse_stamp(time.time(), path)
     return delay
 
 
@@ -1905,12 +2008,14 @@ def build_result_match(row, es):
 def build_daily_data(picked, now, es):
     """总预告 V2 的数据对象（喂 daily_template.html）。
 
-    场次太多（>22 —— 双列 11 行/列正好压在第二档密度的舒适区内，再大就贴
-    1080px 底边有裁切险）或空场次返回 None —— 退回 Pillow 旧卡，绝不硬画。
+    场次太多（> `HTML_IMG_MAX_ROWS`）或空场次返回 None —— 退回 Pillow 旧卡，绝不硬画。
+    ⚠️ 以前这里写的是 22（「双列 11 行/列正好压在第二档密度的舒适区」），
+       2026-10-06 实测发现 **22 行就溢出 8px、21 行才装得下** —— 和整合版是同一套几何、
+       同一个常量。改模板后请重跑 `deploy/measure_img_capacity.py`。
     """
     es = es or {}
     ms = sorted(picked or [], key=lambda m: int(m.get("ts") or 0))
-    if not ms or len(ms) > 22:
+    if not ms or len(ms) > HTML_IMG_MAX_ROWS:
         return None
     budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
     start = now.date()
@@ -1994,8 +2099,8 @@ def build_daily_results_data(rows, now, es, gen_at=None):
     和总预告 build_daily_data 是同一套版式语言，但每行画的是**已定的比分**：
     `[时间] 队A 2:0 队B`，胜方绿底 chip、负方灰。
 
-    场次太多（>22 —— 双列 11 行/列正好压在第二档密度的舒适区内）或空场次
-    返回 None —— 退回 Pillow 旧卡，绝不硬画。
+    场次太多（> `HTML_IMG_MAX_ROWS`）或空场次返回 None —— 退回 880px Pillow 旧卡，
+    绝不硬画一张被 `overflow:hidden` 切掉的图。
 
     `now` 是**赛程日**（窗口起点），用来出 `dayLabel`、`dateLabel` 这一组
     「这是哪天的战果」标签；`gen_at` 是**真正生成这张卡的时刻**，只用来出页脚的
@@ -2005,7 +2110,11 @@ def build_daily_results_data(rows, now, es, gen_at=None):
     """
     es = es or {}
     rs = sorted(rows or [], key=lambda r: int(r.get("ts") or 0))
-    if not rs or len(rs) > 22:
+    # ⚠️ `HTML_IMG_MAX_ROWS`（21）是**量出来的**模板容量，见常量定义处的实测表。
+    #    超过就返回 None 让上层退 880px 旧卡 —— 旧卡页脚会明说「图里只列前 N 场」，
+    #    比硬画一张被 overflow:hidden 切掉最后一行的图诚实。
+    #    (`run_daily` 已经按同一个常量截过一刀，这里是给直接调用方的兜底。)
+    if not rs or len(rs) > HTML_IMG_MAX_ROWS:
         return None
     budget = [max(0, int(es.get("logo_max_new_per_run") or 0))]
     start = now.date()
@@ -2054,7 +2163,7 @@ def render_daily_results_card_html(rows, now, es, gen_at=None):
             raise HtmlCardError("缺模板 %s" % DAILY_RESULTS_TEMPLATE_FILE)
         data = build_daily_results_data(rows, now, es, gen_at)
         if data is None:
-            raise HtmlCardError("空场次或超过 22 场，版式兜不住")
+            raise HtmlCardError("空场次或超过 %d 场，版式兜不住" % HTML_IMG_MAX_ROWS)
         with open(DAILY_RESULTS_TEMPLATE_FILE, encoding="utf-8") as f:
             tmpl = f.read()
         png = render_html_png(tmpl, data, es)
@@ -2419,11 +2528,62 @@ def load_results_pending(path=RESULTS_STATE_FILE):
 
 
 def save_results_pending(data, path=RESULTS_STATE_FILE):
-    """原子写（tmp + rename）—— 预告任务和结算任务是两个 timer，可能同时跑。"""
+    """原子写（tmp + rename）—— 预告任务和结算任务是两个 timer，可能同时跑。
+
+    ⚠️ **原子写 ≠ 并发安全**：它只保证文件不会被写坏，不保证不丢更新。
+    单条「读—改—写」要整体放进 `update_pending`（= 一把跨进程锁里）。
+    """
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fp:
         json.dump(data, fp, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def update_pending(apply_fn, path=RESULTS_STATE_FILE):
+    """在**排他锁**里做一次「读 → `apply_fn(data)` → 写」。返回写回的数据。
+
+    `apply_fn` 的约定：
+      · **只做内存操作** —— 绝不能联网/发消息，否则锁会被持有多久就堵别人多久；
+      · 返回 dict → 写回它；返回 `None`/`False` → **无变化、不写盘**（少一次无谓 IO）。
+
+    为什么必须「锁内重读」：调用方手上的 data 可能是几分钟前读的（结算一轮要发消息、
+    抓逐图、抓选手数据）。这中间 `douyu-esports` 可能刚登记了新场次；拿旧快照整体写回
+    会把那些新场次**抹掉**。锁内重读 + 调用方按身份键合并（见 `_absorb_rows`）才是对的。
+    """
+    with file_lock(path):
+        data = load_results_pending(path)
+        out = apply_fn(data)
+        if out is None or out is False:
+            return data
+        if out is True:
+            out = data
+        save_results_pending(out, path)
+        return out
+
+
+def _item_ident(it):
+    """清单条目的身份键：队名规范键 + 登记 ts。
+
+    和 `note_pending` 的第一条去重判据**同源** —— 读日志/查清单时它们是同一个「这一场」。
+    """
+    return (_teams_key(it.get("teams")), int(it.get("ts") or 0))
+
+
+def _absorb_rows(data, rows, stamp):
+    """把已经**送达**的 rows 按身份键合并进 data 并记账。就地改 data。"""
+    idx = {_item_ident(it): it for it in data["items"]}
+    for row in rows:
+        src = row.get("item") or {}
+        k = _item_ident(src)
+        it = idx.get(k)
+        if it is None:
+            # 磁盘上没这条（理论上不该发生：它就是我们登记的那条）。
+            # 不丢战果 —— 补一条进去。
+            it = dict(src)
+            data["items"].append(it)
+            idx[k] = it
+        absorb_result(it, row, stamp)
+    return data
 
 
 def note_pending(picked, now, es, path=RESULTS_STATE_FILE):
@@ -2434,32 +2594,64 @@ def note_pending(picked, now, es, path=RESULTS_STATE_FILE):
       · 已经登记过的场次不刷新 ts —— 结算窗口锚定在**第一次预告**报出的开赛时间上，
         这样「打了多久还没结果」是可解释的。
     拿不到的场次（延期/取消）由结算任务的 timeout 兜住，不会被永远挂着。
+
+    ---- 去重判据（2026-10-06 修正）----
+    ⚠️ **不能只用队名当键**。原来的键是「排序后的队名」，而 `_prune_pending` 会把
+       `reported`/`abandoned` 的条目**留 36 小时**才清 —— 于是同一对队伍在这个窗口内
+       再打一场（EPL 这种瑞士轮 + 淘汰赛连着打的赛制很常见），第二场会被 `key in have`
+       直接吞掉：不进待结算、拿不到单场战报、也进不了整合版。
+
+    现在用两条判据，一起满足才算「同一场」：
+      1. `(队名键, 赛事, 登记 ts)` 完全一致 → 同一场被重复预告，跳过；
+      2. 已存在**同队名的 pending 条目** → 视为同一场（能兜住赛事名写法变化、
+         ts 小幅漂移这类情况），跳过并打 `[warn]` 留痕。
+    前一场**已经结算**（reported/abandoned）之后，同一对队伍再出现就当作**新的一场**，
+    正常登记 —— 这一半正是原来缺的。
+
+    ⚠️ 整个「读 → 判断 → 追加」都在一把**跨进程锁**里（`update_pending`）。
+       这条路径和结算进程/补漏进程会同时改同一个文件，锁外做的话，
+       一方刚登记的场次会被另一方的旧快照整体写回时抹掉。
     """
-    data = load_results_pending(path)
-    have = {_teams_key(it.get("teams")) for it in data["items"]}
-    added = 0
-    for m in picked or []:
-        key = _teams_key(m.get("teams"))
-        if not key or key in have:
-            continue
-        data["items"].append({
-            "teams": list(m.get("teams") or []),
-            "ts": int(m.get("ts") or 0),
-            "bo": m.get("bo") or "",
-            "status": "pending",
-            "noted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "reported_at": None,
-            # 开赛提醒（--announce）渲染 Match Preview 卡要用的快照：
-            # 登记时页面手上就有，不存的话提醒卡只能画灰底占位块。
-            "shorts": list(m.get("shorts") or []),
-            "logos": list(m.get("logos") or []),
-            "tour": m.get("tour") or "",
-        })
-        have.add(key)
-        added += 1
-    if added:
-        save_results_pending(_prune_pending(data, now, es), path)
-    return added
+    added = {"n": 0}
+
+    def _apply(data):
+        have_key = {(_teams_key(it.get("teams")),
+                     (it.get("tour") or "").strip(),
+                     int(it.get("ts") or 0)) for it in data["items"]}
+        open_pairs = {_teams_key(it.get("teams")) for it in data["items"]
+                      if it.get("status") == "pending"}
+        for m in picked or []:
+            tk = _teams_key(m.get("teams"))
+            if not tk:
+                continue
+            k3 = (tk, (m.get("tour") or "").strip(), int(m.get("ts") or 0))
+            if k3 in have_key:
+                continue
+            if tk in open_pairs:
+                log("[warn] %s 已有未结算的条目（同一场重复预告，或赛事名/时间有漂移），"
+                    "本轮不重复登记" % _pairs_label([m]))
+                continue
+            data["items"].append({
+                "teams": list(m.get("teams") or []),
+                "ts": int(m.get("ts") or 0),
+                "bo": m.get("bo") or "",
+                "status": "pending",
+                "noted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "reported_at": None,
+                # 开赛提醒（--announce）渲染 Match Preview 卡要用的快照：
+                # 登记时页面手上就有，不存的话提醒卡只能画灰底占位块。
+                "shorts": list(m.get("shorts") or []),
+                "logos": list(m.get("logos") or []),
+                "tour": m.get("tour") or "",
+            })
+            have_key.add(k3)
+            open_pairs.add(tk)
+            added["n"] += 1
+        # 没加就不写盘 —— 保持「只增不改」的原语义（不刷新已有条目的 ts）。
+        return _prune_pending(data, now, es) if added["n"] else None
+
+    update_pending(_apply, path)
+    return added["n"]
 
 
 def _prune_pending(data, now, es):
@@ -2495,8 +2687,62 @@ def split_due(items, now, es):
     return due, expired
 
 
-def result_rows(due, fin, es):
-    """把「待结算条目」和「页面上的已结束场次」对上，返回可发送的行 + 还没出结果的条目。"""
+def _bo_clinch(bo):
+    """「赢下这个系列赛要拿几图」。认不出的赛制返回 None（= 不做任何胜负条件校验）。"""
+    b = (bo or "").strip().upper()
+    if b == "BO1":
+        return 1
+    if b == "BO3":
+        return 2
+    if b == "BO5":
+        return 3
+    return None
+
+
+def series_partial(bo, left_score, right_score):
+    """比分是否**不可能**是这个赛制的最终比分（= 系列赛还没打完）。
+
+    只有一种情况返回 True：赛制认得出、且**双方都没拿到赢下系列赛所需的图数**。
+    Bo3 的 `1:0`/`0:1`、Bo5 的 `1:0`/`2:1`/`2:0` 这些，数学上都不可能是终局。
+
+    Bo1 永远返回 False —— `1:0` 本来就是一个完整的 Bo1 结果，
+    而且 Bo1 的比分栏给的是**地图比分**（13:4），一律不该拦。
+    赛制认不出（`bo` 空串/写错）也返回 False：**宁可发，也别拿一个不确定的判据
+    把合法战果永远挡住**（2026-10-05 那两场就是被门闸挡丢的，教训在文件顶上）。
+    """
+    need = _bo_clinch(bo)
+    if need is None or need <= 1:
+        return False
+    try:
+        hi = max(int(left_score), int(right_score))
+    except (TypeError, ValueError):
+        return False
+    return hi < need
+
+
+def series_overshoot(bo, left_score, right_score):
+    """比分是否**超过**了这个赛制的上限（Bo3 出现 `3:0` 之类）。**只留痕、不拦。**
+
+    为什么不拦：数字超过上限，更可能是**页面把赛制标错了**（其实是 Bo5），
+    而不是比分错了 —— 拿它当闸门会把真战果挡掉。Bo1 跳过：它的比分栏是地图比分。
+    """
+    need = _bo_clinch(bo)
+    if need is None or need <= 1:
+        return False
+    try:
+        hi = max(int(left_score), int(right_score))
+    except (TypeError, ValueError):
+        return False
+    return hi > need
+
+
+def result_rows(due, fin, es, strict=True):
+    """把「待结算条目」和「页面上的已结束场次」对上，返回可发送的行 + 还没出结果的条目。
+
+    `strict=True`（结算流水线）：比分配不上赛制时**拦下来**留在待结算。
+    `strict=False`（整合版发之前的补漏）：**不拦** —— 那是最后一道兜底，
+    宁可把可疑的终局带上，也不能让一整场从汇总里消失。
+    """
     rows, waiting = [], []
     for it in due:
         ts0 = int(it.get("ts") or 0)
@@ -2529,6 +2775,23 @@ def result_rows(due, fin, es):
             log("[warn] %s vs %s 比分是平的（%s），跳过" % (left, right, m.get("score")))
             waiting.append(it)
             continue
+
+        # ---- 校验「这个比分配得上这个赛制吗」（2026-10-06 加）----
+        # 「已结束」的三个信号（data-finished / 胜负标记 / 两个数字）只说明**页面认为打完了**，
+        # 没有一个在管「赢下系列赛了吗」。Bo3 打到 1:0、Bo5 打到 2:1 的时候页面一旦抢跑，
+        # 就会把**进行中的比分**当战果发出去 —— 消息发出去就收不回来了，比漏发严重得多。
+        bo_txt = m.get("bo") or it.get("bo") or ""
+        if strict and series_partial(bo_txt, nums[0], nums[1]):
+            log("[warn] %s vs %s 页面标了「已结束」，但 %s 的比分是 %s —— "
+                "谁都还没赢下系列赛，判定为**还没打完**，留在待结算（下一轮再看）"
+                % (left, right, bo_txt or "未知赛制", m.get("score")))
+            waiting.append(it)
+            continue
+        if series_overshoot(bo_txt, nums[0], nums[1]):
+            log("[warn] %s vs %s 的比分 %s 超过了 %s 的上限"
+                "（多半是页面把赛制标错了，不是比分错），仍按页面发，记一笔"
+                % (left, right, m.get("score"), bo_txt))
+
         if abs(int(m["ts"]) - int(it.get("ts") or 0)) > 3 * 3600:
             log("[warn] %s vs %s 的时间对不上（登记 %s / 页面 %s），按队名照发"
                 % (left, right,
@@ -2873,6 +3136,11 @@ def render_results_card(rows, now, es):
 
 def _render_results_card_inner(rows, now, es):
     es = es or {}
+    # ⚠️ 这里是 **880px Pillow 旧卡**（`render_results_card`），不是那张 1920×1080 的
+    #    HTML 大图 —— 画布尺寸不同，容量自然不同：这张画得下 12 行，
+    #    大图画得下 `HTML_IMG_MAX_ROWS`（21）行。所以**不是**同一个数，
+    #    别为了「看起来一致」把两个常量硬合成一个。
+    #    这条路径只在「HTML 出不了图」时走，超过 12 行会在页脚明说「图里只列前 N 场」。
     max_rows = max(1, int(es.get("card_max_rows") or 12))
     shown = rows[:max_rows]
     count = "共 %d 场" % len(rows)
@@ -3598,14 +3866,28 @@ def run_results(cfg, args):
 
     data = load_results_pending()
     due, expired = split_due(data["items"], now, es)
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    abandoned_ids = {_item_ident(it) for it in expired}
+
+    def _persist(rows_to_absorb):
+        """把这一轮的变化**在锁内**合并进清单（重读 + 按身份键合并）。
+
+        为什么不直接把手上这份 data 整体写回：`data` 是几分钟前读的，
+        这中间 `douyu-esports`（登记）或 `-daily`（补漏）可能刚改了同一个文件，
+        整体写回会把它们的变化**抹掉**。锁内重读、只合并我们改过的那几条，才对。
+        """
+        def _apply(fresh):
+            _absorb_rows(fresh, rows_to_absorb, stamp)
+            for it in fresh["items"]:
+                if _item_ident(it) in abandoned_ids:
+                    it["status"] = "abandoned"
+                    it["reported_at"] = stamp
+            return _prune_pending(fresh, now, es)
+        return update_pending(_apply)
 
     if expired:
         log("[info] %d 场超过结算上限仍没出结果，判定为延期/取消，不再等：%s"
             % (len(expired), _pairs_label(expired)))
-        if not check:
-            for it in expired:
-                it["status"] = "abandoned"
-                it["reported_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
 
     if not due:
         if not check:
@@ -3613,7 +3895,7 @@ def run_results(cfg, args):
             log("[silent] 清单里没有到结算时刻的场次，本轮不发任何请求（待结算 %d 场）"
                 % len([it for it in data["items"] if it.get("status") == "pending"]))
             if expired:
-                save_results_pending(_prune_pending(data, now, es))
+                _persist([])
             return 0
         # --check-results 是给人看的演练命令，**清单空着也得给点东西看** ——
         # 否则刚部署的服务器上跑它永远只会得到「清单里没有…」，等于没法验收。
@@ -3709,15 +3991,19 @@ def run_results(cfg, args):
             continue
         log("[sent] %s 的战报已送达（%d 个通道）" % (pair, len(notifiers)))
         sent.append(row)
+        # ⚑ 送达后**立刻**落盘，不等整轮跑完。
+        #    为什么必须立刻：万一进程在「消息已发出」和「状态已保存」之间被杀
+        #    （OOM、部署重启、systemd 收工、磁盘满），这一场在清单里还是 pending，
+        #    下一轮 10 分钟后会**原样再发一遍**。攒到整轮末尾才保存的话，本轮已发出的
+        #    每一条都会变成重复战报；这样最多只丢「最后一条」的登记。
+        #    落盘走 `_persist`：锁内重读 + 按身份键合并，不是把旧快照整体写回。
+        _persist([row])
 
-    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
-    for row in sent:
-        # row["item"] 是 data["items"] 里的**引用**，改它就是改清单。
-        absorb_result(row["item"], row, stamp)
-    for it in expired:
-        it["status"] = "abandoned"
-        it["reported_at"] = stamp
-    save_results_pending(_prune_pending(data, now, es))
+    # expired 的 status 由 `_persist` 在锁内重读后一并写（靠 abandoned_ids 认条目），
+    # 正常情况下跟着上面每次落盘一起生效；但「一场都没送达」时上面一次都没落盘，
+    # 末尾必须补一次，否则下一轮又拿同一批过期条目问一遍。
+    if not sent:
+        _persist([])
 
     if not_sent:
         log("[error] 本轮 %d 场：发出 %d 场、%d 场没发出去（没发的下一轮重试）"
@@ -3811,6 +4097,30 @@ def save_announce_state(state, path=ANNOUNCE_STATE_FILE):
     with open(tmp, "w", encoding="utf-8") as fp:
         json.dump(state, fp, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def _announce_mark(state, key, rec):
+    """把「这一场提醒过了」记进状态（就地改并返回 state）。"""
+    state.setdefault("announced", {})[key] = rec
+    return state
+
+
+def update_announce(apply_fn, path=ANNOUNCE_STATE_FILE):
+    """在**排他锁**里做一次「读 → `apply_fn(state)` → 写」，语义同 `update_pending`。
+
+    这里的锁比清单文件那把更要紧：提醒锁丢了 = **同一场提醒会再发一遍**。
+    每发一条就在锁内读-改-写一次（而不是攒到整轮末尾），
+    这样「已发出但锁没保存」的窗口只有一条消息那么长。
+    """
+    with file_lock(path):
+        state = load_announce_state(path)
+        out = apply_fn(state)
+        if out is None or out is False:
+            return state
+        if out is True:
+            out = state
+        save_announce_state(out, path)
+        return out
 
 
 def announce_due(items, est_map, now_ts, lead_minutes, announced):
@@ -3916,7 +4226,6 @@ def run_announce(cfg, args):
     log("[info] %d 场进入提醒窗口（LEAD=%d 分钟）" % (len(due), lead))
 
     state = load_announce_state()
-    announced = state.setdefault("announced", {})
     notifiers = watch.build_notifiers(cfg)
     want_card = bool(es.get("card_enabled", True))
     sent_cnt = 0
@@ -3934,11 +4243,11 @@ def run_announce(cfg, args):
             continue
         log("[sent] %s 的开赛提醒已送达（%s）"
             % (pair, "第 %d 次" % (reminder + 1) if reminder else "首次"))
-        announced[key] = {"announced_at": stamp, "est_ts": est_ts,
-                          "reminders": reminder + 1}
+        # ⚑ 送达后**立刻**写锁（锁内重读-改-写）。攒到整轮末尾才写的话，
+        #    进程在「已发出」和「写锁」之间挂掉，下一分钟会把同一条提醒**再发一遍**。
+        _rec = {"announced_at": stamp, "est_ts": est_ts, "reminders": reminder + 1}
+        update_announce(lambda st, _k=key, _r=_rec: _announce_mark(st, _k, _r))
         sent_cnt += 1
-    if sent_cnt:
-        save_announce_state(state)
     return 0 if sent_cnt == len(due) else (1 if sent_cnt == 0 else 0)
 
 
@@ -4061,7 +4370,10 @@ def backfill_abandoned(items, start, end, es, dry=False):
         log("[warn] 补漏：%s" % err)
         return 0
     fin = finished_index(parse_matches(html_text))
-    rows, still = result_rows(lost, fin, es)
+    # ⚠️ `strict=False`：补漏是**最后一道兜底**。这里再拦「比分配不上赛制」的话，
+    #    万一真是页面把赛制标错/弃权判负这类边角情况，这一场就从汇总里彻底消失了 ——
+    #    而汇总「少一场」正是 2026-10-05 用户报的那个故障。宁可带上可疑的终局，也不丢场次。
+    rows, still = result_rows(lost, fin, es, strict=False)
     if not rows:
         log("[info] 补漏：页面上这 %d 场仍没有结果，确认是延期/取消，整合版不列它们"
             % len(lost))
@@ -4076,7 +4388,21 @@ def backfill_abandoned(items, start, end, es, dry=False):
         log("[check] 补漏（演练）：%d 场会改判为已结算并补进整合版，**只改内存未落盘**"
             % len(rows))
     else:
-        save_results_pending(_prune_pending({"items": items}, now2, es))
+        # ⚠️ 原来这里是 `save_results_pending({"items": items})` —— 把调用方手上那份
+        #    快照**整体覆盖**上去。`items` 是 run_daily 开始时就读的，这中间
+        #    `douyu-esports`(登记) / `-results`(结算) 都可能改过同一个文件，
+        #    整体覆盖会把它们的改动**静默抹掉**。现在改成锁内重读 + 只改我们认得的条目。
+        def _apply(fresh):
+            idx = {_item_ident(it): it for it in fresh["items"]}
+            for row in rows:
+                it = idx.get(_item_ident(row.get("item") or {}))
+                if it is None:
+                    # 磁盘上已经没这条了（被 prune 清掉），不凭空造一条回来。
+                    continue
+                absorb_result(it, row, stamp)
+                it["backfilled"] = True      # 留痕：这条不是实时战报报过的
+            return _prune_pending(fresh, now2, es)
+        update_pending(_apply)
         # 注意用 [info] 而不是 [sent] —— 补漏**不往外发消息**，
         # 它只是把场次补进下面那条整合版汇总里。
         log("[info] 补漏：%d 场从「延期/取消」改判为已结算，将补进这次的整合版：%s"
@@ -4141,7 +4467,7 @@ def run_daily(cfg, args):
         log("[silent] 这个赛程日没有已结算的比赛，不发整合版")
         return 0
 
-    max_rows = max(1, int(es.get("daily_max_rows") or 24))
+    max_rows = max(1, int(es.get("daily_max_rows") or HTML_IMG_MAX_ROWS))
     shown = rows[:max_rows]
     if len(shown) < len(rows):
         log("[info] 整合版只列前 %d 场（共 %d 场）" % (max_rows, len(rows)))
@@ -4643,6 +4969,30 @@ def _mk(ts, teams, tour, bo="Bo3", tbd=False, logos=None, shorts=None,
 def selftest():
     t = _T()
     es = dict(ESPORT_DEFAULTS)
+
+    # ---- 本文件自己的源码 / 语法树：下面几条「结构断言」共用 ----
+    # 为什么要 AST 而不是字符串 needle：自检就写在本文件里，字符串 needle 会**把自己
+    # 匹配到**（正向 `in` 恒真、反向 `not in` 恒假，2026-10-06 已踩三次，见 _bad_call
+    # 那几处的注解）。AST 问的是「谁调了谁、谁在谁后面」，天然没有自指问题。
+    _src_txt = open(os.path.join(HERE, "esports.py"), encoding="utf-8").read()
+    _ast_tree = ast.parse(_src_txt)
+
+    def _call_names(node):
+        """{被调用的名字: [行号, ...]} —— 只认 Name / Attribute 两种调用形式。"""
+        out = {}
+        for _c in ast.walk(node) if node is not None else []:
+            if not isinstance(_c, ast.Call):
+                continue
+            _f = _c.func
+            _nm = _f.id if isinstance(_f, ast.Name) else (
+                _f.attr if isinstance(_f, ast.Attribute) else None)
+            if _nm:
+                out.setdefault(_nm, []).append(_c.lineno)
+        return out
+
+    def _fn_def(name):
+        return next((n for n in ast.walk(_ast_tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == name), None)
 
     print("CS2 每日赛程 · 离线自检（不联网、不发消息、不写状态）")
     print("版本 %s\n" % VERSION)
@@ -5148,6 +5498,51 @@ def selftest():
     t.check("胜方判据：比分大的一方", rows_x[0]["score_left"] == "2"
             and rows_x[0]["winner"] == "FlyQuest", rows_x[0]["winner"])
 
+    # ---- 「这个比分，配得上这个赛制吗」（2026-10-06 加）----
+    #   三个「已结束」信号只说明页面认为打完了，没一个在管「赢下系列赛了吗」。
+    t.check("系列赛判据：Bo3 的 1:0 / 0:1 都 = 还没打完",
+            series_partial("Bo3", "1", "0") and series_partial("Bo3", "0", "1"))
+    t.check("系列赛判据：Bo3 的 2:0 / 2:1 = 打完了",
+            not series_partial("Bo3", "2", "0") and not series_partial("Bo3", "2", "1"))
+    t.check("系列赛判据：Bo5 的 2:1 / 2:0 = 还没打完，3:0 / 3:2 = 打完了",
+            series_partial("Bo5", "2", "1") and series_partial("Bo5", "2", "0")
+            and not series_partial("Bo5", "3", "0") and not series_partial("Bo5", "3", "2"))
+    t.check("⚑ 系列赛判据：Bo1 的 1:0 是**完整结果**，绝不能拦",
+            not series_partial("Bo1", "1", "0"))
+    t.check("⚑ 系列赛判据：赛制认不出就一律不拦（判据不确定时宁可发）",
+            not series_partial("", "1", "0") and not series_partial("BO7", "1", "0"))
+    t.check("系列赛判据：比分不是数字时不炸也不拦",
+            not series_partial("Bo3", "?", "") and not series_partial("Bo3", None, None))
+    t.check("超上限只留痕不拦：Bo3 的 3:0 算超上限；Bo1 永远不算（它是地图比分）",
+            series_overshoot("Bo3", "3", "0")
+            and not series_overshoot("Bo1", "13", "4")
+            and not series_overshoot("Bo3", "2", "1"))
+
+    # 页面抢跑：标了已结束，但比分只到 Bo3 的 1:0 → strict 下留在待结算，不发
+    it_rush = {"teams": ["Alpha", "Bravo"], "ts": 1000, "bo": "Bo3",
+               "status": "pending"}
+    rush = _mk(1000, ["Alpha", "Bravo"], "T", "Bo3",
+               finished=True, sides=["W", "L"], score="1:0")
+    rows_r, wait_r = result_rows([it_rush], finished_index([rush]), es)
+    t.check("⚑ 页面抢跑标 finished、比分只到 Bo3 的 1:0 → 不当战果发（strict）",
+            not rows_r and len(wait_r) == 1,
+            [r["score"] for r in rows_r])
+    rows_r2, _w2 = result_rows([it_rush], finished_index([rush]), es, strict=False)
+    t.check("⚑ 补漏那一遍（strict=False）不拦 —— 兜底宁可带上可疑终局，也不丢场次",
+            len(rows_r2) == 1 and rows_r2[0]["score"] == "1:0", rows_r2)
+    # 页面没给赛制时退回登记时的 bo，判据一样生效
+    rush_nobo = _mk(1000, ["Alpha", "Bravo"], "T", "",
+                    finished=True, sides=["W", "L"], score="1:0")
+    rows_nb, wait_nb = result_rows([it_rush], finished_index([rush_nobo]), es)
+    t.check("⚑ 页面没给赛制时退回登记时的 bo，同样拦得住 Bo3 的 1:0",
+            not rows_nb and len(wait_nb) == 1, rows_nb)
+    good_r = _mk(1000, ["Alpha", "Bravo"], "T", "Bo3",
+                 finished=True, sides=["W", "L"], score="2:1")
+    rows_g, _wg = result_rows([it_rush], finished_index([good_r]), es)
+    t.check("闪电战不能误伤：Bo3 的 2:1 照常发",
+            len(rows_g) == 1 and rows_g[0]["score_left"] == "2",
+            [r["score"] for r in rows_g])
+
     # 时间闸门 + 每赛制的 grace/timeout
     t.check("Bo1 的 grace/timeout = 50/150 分钟",
             _settle_seconds("Bo1", es) == (3000, 9000), _settle_seconds("Bo1", es))
@@ -5207,6 +5602,106 @@ def selftest():
     t.check("超过 results_max_age_hours 的旧条目被清掉、pending 的留着",
             len(pruned["items"]) == 1 and pruned["items"][0]["teams"] == ["P", "Q"],
             pruned["items"])
+
+    # ---- ⚑ 同一对队伍「再交手」（2026-10-06 修的 bug）----
+    #    旧键只有「排序后的队名」，而 _prune_pending 会把 reported/abandoned 的条目留满
+    #    results_max_age_hours（36h）才清 —— 于是同一对队伍在这个窗口内打第二场
+    #    （EPL 瑞士轮 + 淘汰赛连着打，很常见）时，第二场被 `key in have` 直接吞掉：
+    #    不进待结算、拿不到单场战报、也进不了整合版。
+    rr_path = os.path.join(tempfile.gettempdir(), "__es_results_selftest_rr.json")
+    if os.path.exists(rr_path):
+        os.remove(rr_path)
+    t.check("再交手：首场（A vs B）登记成功",
+            note_pending([_mk(100000, ["A", "B"], "T", "Bo3")], base_now, es, rr_path) == 1)
+    _rr = load_results_pending(rr_path)
+    _rr["items"][0]["status"] = "reported"          # 首场已结算并留在窗口内
+    _rr["items"][0]["reported_at"] = "2026-10-05 20:00:00"
+    save_results_pending(_rr, rr_path)
+    t.check("⚑ 同一对队伍结算后再交手（不同 ts）能登记第二场 —— 旧键会把这场吞掉",
+            note_pending([_mk(110000, ["A", "B"], "T", "Bo3")], base_now, es, rr_path) == 1)
+    _rr2 = load_results_pending(rr_path)
+    t.check("⚑ 第二场确实进了清单、且是 pending（reported 的那场也没被抹掉）",
+            len(_rr2["items"]) == 2
+            and sum(1 for it in _rr2["items"] if it["status"] == "pending") == 1
+            and sum(1 for it in _rr2["items"] if it["status"] == "reported") == 1,
+            [(it["teams"], it["ts"], it["status"]) for it in _rr2["items"]])
+    t.check("同一场（同队 + 同赛事 + 同 ts）重复预告仍被跳过",
+            note_pending([_mk(110000, ["A", "B"], "T", "Bo3")], base_now, es, rr_path) == 0)
+    t.check("⚑ 同队同赛事仍有 pending 时不重复登记（兜赛事名写法/ts 小幅漂移）",
+            note_pending([_mk(110900, ["A", "B"], "T", "Bo3")], base_now, es, rr_path) == 0)
+    # 同队、但**赛事名不同**、且前一场还挂着 pending —— 仍然被挡。这是刻意选的保守口径：
+    # open_pairs 只按队名，用来兜「同一场被赛事名写法漂移骗过去、重复登记成两条 pending」。
+    # 代价是「同队同日两场不同赛事」也会被挡 —— 但那种组合几乎不可能发生，且一旦前一场
+    # 结算（reported/abandoned）就立刻解禁，不像旧键要等满 36 小时。而且它会打 [warn]，
+    # 不再像旧代码那样**静默**吞掉。
+    t.check("⚑ 同队仍有 pending 时，即使赛事名不同也保守跳过（防赛事名漂移重复登记）",
+            note_pending([_mk(111000, ["A", "B"], "T2", "Bo3")], base_now, es, rr_path) == 0)
+    os.path.exists(rr_path) and os.remove(rr_path)
+
+    # ---- 状态文件的并发安全（2026-10-06 加）----
+    #   原子写（tmp + rename）只保证**文件不会写坏**，不保证**不丢更新**：
+    #   A 读到 {1}、B 也读到 {1}；A 写 {1,2}、B 写 {1,3} → A 加的那条没了。
+    #   线上 `douyu-esports`(09:30 登记) / `-results`(每 10 分钟结算) / `-daily`(09:40 补漏)
+    #   是三个独立进程，这条路径真实存在。
+    t.check("锁的可用性：本机有 fcntl 就真锁，Windows 上退化成无锁放行（都不该炸）",
+            print_lock_note() in ("flock 生效", "无 fcntl，退化成无锁"),
+            print_lock_note())
+    lk_path = os.path.join(tempfile.gettempdir(), "__es_lock_selftest.json")
+    try:
+        with file_lock(lk_path):
+            _lock_ok = True
+    except Exception as exc:  # noqa: BLE001
+        _lock_ok = "%s: %s" % (type(exc).__name__, exc)
+    t.check("file_lock 当上下文管理器用不会炸（拿不到锁只打 warn、不抛给调用方）",
+            _lock_ok is True, _lock_ok)
+    t.check("⚑ file_lock 锁的是独立的 .lock 文件，不是状态文件本身"
+            "（状态文件靠 rename 替换，锁在被换掉的 inode 上等于没锁）",
+            os.path.exists(lk_path + ".lock"))
+
+    up_path = os.path.join(tempfile.gettempdir(), "__es_update_selftest.json")
+    if os.path.exists(up_path):
+        os.remove(up_path)
+    save_results_pending({"items": [
+        {"teams": ["A", "B"], "ts": 1000, "bo": "Bo3", "status": "pending"}]}, up_path)
+    # 模拟「我们读完之后，另一个进程又登记了一条新场次」
+    _conc = load_results_pending(up_path)
+    _conc["items"].append({"teams": ["C", "D"], "ts": 2000, "bo": "Bo3",
+                           "status": "pending"})
+    save_results_pending(_conc, up_path)
+
+    def _mark_ab(d):
+        for it in d["items"]:
+            if _item_ident(it) == (_teams_key(["A", "B"]), 1000):
+                it["status"] = "reported"
+        return d
+
+    update_pending(_mark_ab, up_path)
+    _after = load_results_pending(up_path)
+    t.check("⚑ 锁内读改写不会抹掉「别的进程刚登记的那条」（整体覆盖的旧写法会丢它）",
+            len(_after["items"]) == 2, _after["items"])
+    t.check("锁内读改写：自己改的那条生效了",
+            any(it["status"] == "reported" for it in _after["items"]), _after["items"])
+    t.check("⚑ 身份键与 note_pending 的去重判据同源（队名键 + 登记 ts）",
+            _item_ident({"teams": ["B", "A"], "ts": 1000})
+            == (_teams_key(["A", "B"]), 1000))
+
+    def _noop(d):
+        d["sentinel_should_not_be_written"] = 1
+        return None                      # 明确表示「无变化、别写盘」
+
+    update_pending(_noop, up_path)
+    _raw = json.load(open(up_path, encoding="utf-8"))
+    t.check("⚑ apply_fn 返回 None 就不写盘（免得把「只增不改」变成「每轮都重写一遍」）",
+            "sentinel_should_not_be_written" not in _raw, list(_raw))
+
+    # 补漏的落盘也必须走锁内合并，不能把调用方手上的旧快照整体覆盖回去
+    t.check("⚑ 补漏调 update_pending（锁内合并），不再整体覆盖清单",
+            "update_pending" in _call_names(_fn_def("backfill_abandoned")))
+    # ⚠️ needle 必须**拼**出来：本自检就写在 esports.py 里，整串写出来的话
+    #    它会数到自己（正向断言因此恒假 —— 2026-10-06 第 N 次踩这个坑）。
+    _overwrite = "save_results_pending(" + "_prune_pending("
+    t.check("⚑ 全文件已无「把旧快照整体覆盖回清单」的裸调用",
+            _src_txt.count(_overwrite) == 0, _src_txt.count(_overwrite))
 
     # ---- 补漏：把被判「延期/取消」的场次捞回来（2026-10-05 因此少发 2 场的修复）----
     day_lo = datetime.fromtimestamp(100000, CST)
@@ -5571,9 +6066,66 @@ def selftest():
 
     # ---- 3f-2b. 全天整合版 V2（本来就是唯一只有 Pillow 的那条，补 HTML 层）----
     print("\n-- 3f-2b. 全天整合版 V2（HTML 1920×1080 / 三级降级补齐）--")
+
+    def _caprow(i):
+        """整合版/预告通用的一行。**logos 必须是空串** —— 自检绝不能联网下队标。"""
+        return {"ts": 100000 + i * 3600,
+                "teams": ["T%02dA" % i, "T%02dB" % i],
+                "shorts": ["T%02dA" % i, "T%02dB" % i], "logos": ["", ""],
+                "winner": "T%02dA" % i, "score": "2:1", "bo": "Bo3",
+                "tour": "T", "maps": []}
+
     # _dit / ds / de 来自 3e：两场已结算（1:2 右胜 + 2:0 左胜）
     rdrows = daily_rows(_dit, ds, de, es)
     rdat = build_daily_results_data(rdrows, ds, es)
+
+    # ---- 整合版行数上限：**只准有一个数**（2026-10-06 对齐）----
+    #   原来三处各说各话：`daily_max_rows`=24、模板 22 行起切版面（23 行起直接拒绝）、
+    #   880px 旧卡 12 行。于是 22~24 场的日子会「HTML 拒绝 → 退旧卡只剩 12 行」，
+    #   而 22 场时会硬画一张被 overflow:hidden 切掉最后一列的图。
+    #   那个 21 是**量出来的**（deploy/measure_img_capacity.py，改动模板后重跑一遍）。
+    t.check("⚑ daily_max_rows 的默认值 == HTML_IMG_MAX_ROWS（量出来的模板容量，"
+            "两处写不一样的数就是这次要修的 bug）",
+            ESPORT_DEFAULTS["daily_max_rows"] == HTML_IMG_MAX_ROWS,
+            (ESPORT_DEFAULTS["daily_max_rows"], HTML_IMG_MAX_ROWS))
+    _cfg_ex = json.load(open(os.path.join(HERE, "config.example.json"),
+                             encoding="utf-8")).get("esports") or {}
+    t.check("⚑ config.example.json 里的 daily_max_rows 也是这个数"
+            "（示例配置是用户复制出去改的那份，它写 24 就等于没修）",
+            _cfg_ex.get("daily_max_rows") == HTML_IMG_MAX_ROWS,
+            _cfg_ex.get("daily_max_rows"))
+    t.check("config.example.json 里的 card_max_rows 与代码默认值一致"
+            "（示例写 12、代码写 12，别只改一处）",
+            _cfg_ex.get("card_max_rows") == ESPORT_DEFAULTS["card_max_rows"],
+            (_cfg_ex.get("card_max_rows"), ESPORT_DEFAULTS["card_max_rows"]))
+    _svc = open(os.path.join(HERE, "douyu-esports-daily.service"),
+                encoding="utf-8").read()
+    t.check("⚑ daily.service 的注释也说的是这个数，且不再说「24 行」"
+            "（注释里的数是排查时唯一能看到的线索）",
+            ("%d 行" % HTML_IMG_MAX_ROWS) in _svc and "24 行" not in _svc)
+    _cap_ok = build_daily_results_data(
+        [_caprow(i) for i in range(HTML_IMG_MAX_ROWS)], ds, es)
+    _cap_no = build_daily_results_data(
+        [_caprow(i) for i in range(HTML_IMG_MAX_ROWS + 1)], ds, es)
+    t.check("⚑ 整合版模板数据：正好 %d 场要能出图、%d 场要**拒绝**"
+            "（22 行实测溢出 8px —— 硬画就是切版面，拒绝才是对的）"
+            % (HTML_IMG_MAX_ROWS, HTML_IMG_MAX_ROWS + 1),
+            _cap_ok is not None and len(_cap_ok["matches"]) == HTML_IMG_MAX_ROWS
+            and _cap_no is None,
+            (None if _cap_ok is None else len(_cap_ok["matches"]), _cap_no))
+    t.check("⚑ 总预告模板数据：同一个上限（两张模板是同一套几何，见常量注释）",
+            build_daily_data([_caprow(i) for i in range(HTML_IMG_MAX_ROWS)],
+                             ds, es) is not None
+            and build_daily_data(
+                [_caprow(i) for i in range(HTML_IMG_MAX_ROWS + 1)],
+                ds, es) is None)
+    # 880px 旧卡是**另一个画布**，容量天然不同 —— 别为了「看起来一致」把两个数合并。
+    t.check("⚑ card_max_rows(880px 旧卡) 与 HTML_IMG_MAX_ROWS(1920×1080 模板)"
+            "是两个独立的数，都 > 0 且旧卡更小（合并它们 = 要么切版面、要么白浪费版面）",
+            ESPORT_DEFAULTS["card_max_rows"] > 0
+            and ESPORT_DEFAULTS["card_max_rows"] < HTML_IMG_MAX_ROWS,
+            (ESPORT_DEFAULTS["card_max_rows"], HTML_IMG_MAX_ROWS))
+
     t.check("整合版 V2 数据：比分拆成两侧、win 只落在赢的那一边",
             rdat is not None and len(rdat["matches"]) == 2
             and (rdat["matches"][0]["teamA"]["score"],
@@ -5591,10 +6143,10 @@ def selftest():
             and rdat["matches"][0]["bo"] == "BO3", rdat["events"])
     t.check("整合版 V2 数据：空场次返回 None（→ 上层退 Pillow/纯文本，绝不硬画）",
             build_daily_results_data([], ds, es) is None)
-    t.check("整合版 V2 数据：超过 22 场返回 None（版式兜不住就退旧卡）",
+    t.check("整合版 V2 数据：超过 HTML_IMG_MAX_ROWS 场返回 None（版式兜不住就退旧卡）"
+            "—— 上限用常量而不是字面量，免得常量改了这条还在测 23",
             build_daily_results_data(
-                [dict(rdrows[0], ts=rdrows[0]["ts"] + i) for i in range(23)],
-                ds, es) is None)
+                [_caprow(i) for i in range(HTML_IMG_MAX_ROWS + 1)], ds, es) is None)
     t.check("整合版 V2 数据：比分不是「两个数字」→ 用 ? 占位（不画假比分）",
             build_daily_results_data([dict(rdrows[0], score="2:?")], ds, es)
             ["matches"][0]["teamB"]["score"] == "?")
@@ -5606,7 +6158,6 @@ def selftest():
             and rdat["generatedAt"] == ds.strftime("%H:%M")
             and rdat["dayLabel"] == _day_label(ds),
             rdat["generatedAt"])
-    _src_txt = open(os.path.join(HERE, "esports.py"), encoding="utf-8").read()
     t.check("⚑ run_daily 的卡片入口是 render_daily_results_card（三级降级的头一级）",
             "render_daily_results_card(shown, label_dt, es, gen_at=now)"
             in _src_txt)
@@ -5631,6 +6182,77 @@ def selftest():
     _bad_sent = "[sent]" + " 补漏"
     t.check("⚑ 补漏的日志不许标 [sent]（它只改清单，真正发出去的是那条整合版汇总）",
             _bad_sent not in _src_txt)
+
+    # ---- 源码结构（AST）：战报「送达后立刻落盘」 ----
+    # 这里**故意用 ast 而不是字符串 needle**：needle 写在本文件里会把自己匹配到
+    # （见上面 _bad_call / _bf_call 的注解，2026-10-06 已踩三次）。AST 按语法树问
+    # 「谁在谁后面」，天然没有自指问题。
+    # ⚠️ `_src_txt` / `_ast_tree` / `_call_names` / `_fn_def` 都在 selftest 开头定义好，
+    #    这里直接复用 —— 别在本块里再 `_ast_tree = ast.parse(...)` 一次。
+    _rr = _fn_def("run_results")
+    t.check("⚑ 找得到 run_results（找不到说明函数被改名，下面两条会失去意义）",
+            _rr is not None)
+
+    # ⚠️ 不能用「第一个 `for … in rows`」来认这个循环：run_results 里前面还有一个
+    #    **只打印清单**的 `for row in rows`（连它一起数的话，下面两条会认错循环、
+    #    变成恒假 —— 2026-10-06 就是这么先失败了一次）。按内容认：含 send_with_retry 的那个。
+    _send_loops = [n for n in (ast.walk(_rr) if _rr is not None else [])
+                   if isinstance(n, ast.For) and "send_with_retry" in _call_names(n)]
+    t.check("⚑ run_results 里找得到「逐场发送」的 for 循环，且只有一个"
+            "（剥掉它下面两条就变成空断言）",
+            len(_send_loops) == 1, [n.lineno for n in _send_loops])
+    _calls = _call_names(_send_loops[0]) if _send_loops else {}
+    _need = ("send_with_retry", "_persist")
+    t.check("⚑ 逐场发送循环里同时有「发送」和「落盘」两个动作",
+            all(k in _calls for k in _need),
+            {k: _calls.get(k) for k in _need})
+    # 顺序就是修复本身：消息先出去 → 立刻落盘。
+    # 攒到整轮末尾才落盘的话，「已发出但状态没保存」会让整轮战报下一轮重发一遍。
+    t.check("⚑ 落盘在**送达之后**：_persist 的行号大于 send_with_retry",
+            all(k in _calls for k in _need)
+            and min(_calls["_persist"]) > min(_calls["send_with_retry"]),
+            {k: _calls.get(k) for k in _need})
+    # 落盘必须走「锁内重读 + 按身份键合并」，不能把旧快照整体写回。
+    _persist_fn = next((n for n in ast.walk(_rr) if isinstance(n, ast.FunctionDef)
+                        and n.name == "_persist"), None) if _rr is not None else None
+    _pc = _call_names(_persist_fn)
+    t.check("⚑ run_results 的 _persist 是「锁内读改写」：调 update_pending"
+            "（不是直接 save_results_pending 覆盖整份）",
+            "update_pending" in _pc and "save_results_pending" not in _pc, sorted(_pc))
+    t.check("⚑ _persist 里按身份键合并（_absorb_rows），不是整体覆盖",
+            "_absorb_rows" in _pc, sorted(_pc))
+    _absorb_fn = _fn_def("_absorb_rows")
+    t.check("⚑ _absorb_rows 里真的调了 absorb_result（否则合并等于什么都没记）",
+            _absorb_fn is not None
+            and "absorb_result" in _call_names(_absorb_fn))
+    # 提醒锁同理：送达一条写一条，而不是攒到末尾
+    _ann_fn = _fn_def("run_announce")
+    _ann_loops = [n for n in (ast.walk(_ann_fn) if _ann_fn is not None else [])
+                  if isinstance(n, ast.For) and "send_with_retry" in _call_names(n)]
+    t.check("⚑ 开赛提醒的发送循环也「送达后立刻写锁」（update_announce）",
+            len(_ann_loops) == 1
+            and "update_announce" in _call_names(_ann_loops[0]),
+            [n.lineno for n in _ann_loops])
+
+    # 补漏必须显式关掉「比分配不上赛制」的闸门：那是最后一道兜底，
+    # 在那里再拦一次的话，边角情况（页面标错赛制/弃权判负）会让一整场从汇总里消失，
+    # 而汇总「少一场」正是 2026-10-05 用户报的那个故障。
+    _bf_fn = _fn_def("backfill_abandoned")
+    t.check("⚑ 找得到 backfill_abandoned（找不到说明改名了，下面一条会失去意义）",
+            _bf_fn is not None)
+    _bf_strict = []
+    for _n in (ast.walk(_bf_fn) if _bf_fn is not None else []):
+        if (isinstance(_n, ast.Call) and isinstance(_n.func, ast.Name)
+                and _n.func.id == "result_rows"):
+            for _kw in _n.keywords:
+                _bf_strict.append(ast.literal_eval(_kw.value)
+                                  if (isinstance(_kw.value, ast.Constant)) else None)
+    t.check("⚑ 补漏调用 result_rows 时显式传 strict=False"
+            "（否则边角情况会把整场从汇总里丢掉）",
+            _bf_strict == [False], _bf_strict)
+    t.check("⚑ 补漏落盘走 update_pending（锁内重读 + 按身份键合并），"
+            "不再把调用方手上的旧快照整体覆盖回清单",
+            "update_pending" in _call_names(_bf_fn), sorted(_call_names(_bf_fn)))
 
     if find_chrome(es):
         rdpng = render_daily_results_card_html(rdrows, ds, es)

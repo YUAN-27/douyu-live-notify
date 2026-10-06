@@ -13,7 +13,8 @@ ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py --daily
 
 # ⚠️ 这一轮**一次网络请求都不发**（不抓页面、不下队标 —— 队标在单场战报时就缓存好了）。
 #    它只是把 state_results_pending.json 里的快照重新排一次版。
-#    给 180 秒是因为要画一张 24 行的大图（Pillow 渲染 + PNG 编码），实测不到 3 秒。
+#    给 180 秒是因为要画一张最多 21 行的 1920×1080 大图（Chromium 截图 + PNG 编码），
+#    实测不到 3 秒。21 = esports.py 里 HTML_IMG_MAX_ROWS 的实测容量，别在别处另写一个数。
 TimeoutStartSec=180
 
 # 单独一个日志文件：预告 / 单场战报 / 整合版是三条流水，混一起排错很费劲。

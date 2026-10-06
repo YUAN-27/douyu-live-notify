@@ -9,6 +9,10 @@ watchdog.env
 
 # ---- 运行期产物 ----
 state_*.json
+# 状态文件的 flock 锁文件（`state_*.json.lock`，2026-10-06 起 esports.py 会用它们做
+# 跨进程互斥）。它们**不是 .json 结尾**，所以上面那条 `state_*.json` 挡不住 ——
+# 开发机跑一次 `--check` 就会留下一个空锁文件。两条都要有。
+state_*.lock
 selftest_result.txt
 # 世界排名（HLTV）的抓取缓存：只是排名的副本，随时可重建，没必要进仓库
 rank_cache.json

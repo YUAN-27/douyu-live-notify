@@ -94,37 +94,82 @@ sha256sum ../deploy.zip | cut -c1-16
 | 文件 | sha256 前 16 位 | 字节数 |
 |---|---|---|
 | `watch.py` | `13243138d39468a9` | 54493 |
-| `selftest.py` | `ad142bcd05d58df7` | 28399 |
+| `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `94a6c640c9536543` | 306456 |
+| `esports.py` | `57cc2092bc9d1675` | 344357 |
 | `result_template.html`（V2 单场战报模板） | `82638848c4a48a07` | 10494 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
-| `config.example.json`（配置样板，含结算超时默认值） | `1a833ba940e60dbc` | 13308 |
+| `config.example.json`（配置样板，含结算超时默认值） | `09d39720904e3568` | 13662 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `b692eada86ff9cf1` | 5403 |
 
-本版（commit 见 `git log -1 --oneline`）修的是**整合版少列场次**：结算的放弃时刻锚在
+本版（commit 见 `git log -1 --oneline`）是一次**外部代码复查后的批量修复**：复查报告基于
+旧提交 `172b7d1`（落后 11 个提交），8 条里 2 条已过时/不成立，剩下 **6 条**逐条修掉，
+每条都带自检断言 + 变异验证。**四个模板与字体文件一个字都没动**；
+变的是 `esports.py` / `selftest.py` / `config.example.json` / `douyu-esports-daily.{service,timer}`
+/ `.gitignore` / `pack_deploy.py`。按影响面排序：
+
+① **状态文件的并发安全**（复查 #6，最重）。`state_esports.json`（待结算清单）与
+   `state_esports_announce.json`（开赛提醒）的「读—改—写」现在走一把**跨进程 `flock`**
+   （`file_lock`）。三个要点：锁的是**独立的 `*.lock` 文件**（状态文件是 rename 替换的，
+   锁在「被替换掉的那个 inode」上等于没锁）；**必须在锁内重读**再合并，不能拿锁外的旧快照；
+   合并按**身份键**（`_item_ident` = 队名键 + 登记 ts，和去重判据同源）。
+   原来 `backfill_abandoned` 里 `save_results_pending({"items": items})` 那种
+   **把手上旧快照整体覆盖回去**的写法已全部清除（有断言钉住「全文件无此裸调用」）。
+   条款节流 `parse_gate` 也改成锁内「重读 → 等待 → 写」。
+   没有 `fcntl` 的平台（Windows 开发机）自动退化成「不加锁放行」，自检在两边都能跑。
+② **战报的崩溃重复窗口从「整批」缩到「一条」**（复查 #7）。`run_results` 改成
+   **每场发送成功后就立刻落盘**（`_persist([row])`），不再等整轮跑完统一保存；
+   `run_announce` 同样逐条写锁。进程若正好卡在「已发出」和「写状态」之间被杀，
+   最多重复最后一条，而不是整批重发。用 **AST 结构断言**钉住
+   「循环里同时有发送与落盘、且落盘在发送之后」——不是靠源码里有没有某个字符串。
+③ **同队再交手的第二场不再被吞**（复查 #3）。去重键原来是「排序后的队名」，而
+   `_prune_pending` 会把 `reported` 条目留 36 小时 —— 同一对队伍当天打两场时，
+   第二场会被当成重复预告丢掉。现在键是 `(队名键, 赛事名, 登记 ts)`，
+   另加 `open_pairs` 守卫（同队仍有 `pending` 时保守跳过，防赛事名写法/时间漂移重复登记）。
+④ **系列赛没打完不当战果**（复查 #5）。新增 `_bo_clinch` / `series_partial` /
+   `series_overshoot`：页面标了「已结束」但比分谁都还没赢下系列赛（Bo3 出现 1:0）时
+   **留在待结算**、下一轮再看。三条刻意的克制：**Bo1 永不拦**（1:0 是地图比分）、
+   赛制认不出就一律不拦、超上限（Bo3 的 3:0）**只留痕不拦**。
+   整合版出图前的补漏 `backfill_abandoned` 显式传 `strict=False` ——
+   兜底宁可带上可疑终局，也不能像 2026-10-05 那样丢掉场次。
+⑤ **`douyu-esports-daily.timer` 补上 `Asia/Shanghai`**（复查 #4）。09:40 那条原来没写时区，
+   系统时区是 UTC 的机器上会跑到北京时间 17:40。`selftest.py` 新增扫描：
+   所有**固定钟点**的 `OnCalendar` 必须显式写时区。
+⑥ **大图行数上限三处对齐**（复查 #8）。新增尺子 `deploy/measure_img_capacity.py`
+   （用无头浏览器量真实 DOM，不是估），**实测**确立 `HTML_IMG_MAX_ROWS = 21`：
+   22 行时主体下边缘 1042 越过 1034、溢出 8px、最后一列被切。关键发现：
+   **总预告 `daily_template.html` 和整合版是同一套几何、同一个数**
+   （页头 96 + 页脚 46 + 主体 `flex:1` + 同一个 `density()` 三档行高），
+   所以原来「总预告 22 场」那条守卫同样是错的。
+   `daily_max_rows` 默认值 24 → 21、`config.example.json` 同步、
+   `douyu-esports-daily.service` 的注释改成 21 行。880px 旧卡的 `card_max_rows`
+   （默认 12）是**另一个画布**，刻意不合并（有断言钉住两者是不同的数）。
+
+> `deploy.zip` 里还多一个 `measure_img_capacity.py`（上面那把尺子，指纹
+> `130e41031a4e519c` / 9286）。它**只在开发机/维护时手动跑**，线上任何 timer 都不调用；
+> 对不上也不影响运行，不用为它停下来。
+
+**上一版**（`48051fc`）修的是**整合版少列场次**：结算的放弃时刻锚在
 「登记（计划）开赛时刻」上，而前一档打满三图会把下一档拖后 30~60 分钟，
 于是「打满三图的 Bo3」经常在放弃时刻前后才出结果 —— 2026-10-05 因此丢掉
 `M80 vs TYLOO` 2:1 与 `Aurora Gaming vs BetBoom` 2:1 两场，次日整合版只剩 6 场。
-两处修改：
-① `results_timeout_minutes` 由 `{Bo1:90, Bo3:180, Bo5:270}` 调成
-   `{Bo1:150, Bo3:270, Bo5:360}`（= 最长时长 + 约 90 分钟迟到/页面延迟余量）；
+两处修改：① `results_timeout_minutes` 由 `{Bo1:90, Bo3:180, Bo5:270}` 调成
+`{Bo1:150, Bo3:270, Bo5:360}`（= 最长时长 + 约 90 分钟迟到/页面延迟余量）；
 ② 新增 `backfill_abandoned()`：整合版出图前把该赛程日所有 `abandoned` 的场次
-   再捞一次，配上就改回 `reported` 补进汇总。**只在真有 abandoned 条目时才抓页面**，
-   正常日仍是 0 网络请求。同步改了 `ESPORTS.md` §3.1 与 `config.example.json`。
-模板与字体**未动**。
-**上一版**（`8c6c4d8`）修的是开赛提醒的级联判据（「同一赛事」→「同一赛事且共用队伍」）。
-**再上一版**（`4bdb153`）新增 **V2 全天整合版模板** `daily_results_template.html`，
-并同步 `esports.py`（新增 `build_daily_results_data` / `render_daily_results_card_html` /
+再捞一次，配上就改回 `reported` 补进汇总。**只在真有 abandoned 条目时才抓页面**，
+正常日仍是 0 网络请求。**再上一版**（`8c6c4d8`）修的是开赛提醒的级联判据
+（「同一赛事」→「同一赛事且共用队伍」）。**再往前**（`4bdb153`）新增
+**V2 全天整合版模板** `daily_results_template.html`，并同步 `esports.py`
+（新增 `build_daily_results_data` / `render_daily_results_card_html` /
 `render_daily_results_card`，`run_daily` 改走三级降级）与 `result_template.html` /
 `daily_template.html`（署名随仓库改名）。**再往前**是开赛提醒（`--announce`）；
-再上一版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、
+更早的修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、
 `find_chrome` 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选、总预告 HTML 上限 30→22 场、
 生僻字断言按 V2 行为拆分、自检含真渲染 PNG 实际尺寸校验。
 
@@ -214,15 +259,19 @@ python3 watchdog.py --selftest; echo "退出码=$?"
 python3 esports.py --selftest; echo "退出码=$?"
 ```
 
-- `selftest.py`：这一版是 **92 项**，**期望 0 项失败**、退出码 0。
+- `selftest.py`：这一版在**仓库/包目录**里跑是 **100 项**，**期望 0 项失败**、退出码 0。
+  ⚠️ 在**装好的机器上**（`/opt/douyu-live-notify`，没有 `deploy/` 子目录）项数会**少 8 项**：
+  其中有 3 条查定时器时区、5 条查 `.gitignore` / `pack_deploy.py`（这两个文件只在仓库里），
+  它们会打 `[skip]` 说明并**跳过**，不报红。所以「项数不是 100」本身不代表有问题 ——
+  要看的仍然是 **0 项失败**。（要跑满 100 项就在解开 `deploy.zip` 的目录里跑。）
 - `watchdog.py --selftest`：**期望 0 项失败**（项数随版本变，不用数）。
 - `esports.py --selftest`：**期望 0 项失败**、退出码 0。它**不联网**（队标断言用本地
   fixture），跑得很快。**项数会随环境浮动，都是正常的**：
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **363** |
-  | 少了 `make_card_font.py` | 361（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **407** |
+  | 少了 `make_card_font.py` | 405（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
 
