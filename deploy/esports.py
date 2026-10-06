@@ -476,7 +476,18 @@ ESPORT_DEFAULTS = {
     # 取值参考：Bo1 约 35~60 分钟、Bo3 约 75 分钟~3 小时、Bo5 约 2~4.5 小时。
     "results_grace_minutes": {"Bo1": 50, "Bo3": 100, "Bo5": 170},
     # 「到多久还没结果就放弃」—— 延期/取消的比赛不能让它永远占着清单。
-    "results_timeout_minutes": {"Bo1": 90, "Bo3": 180, "Bo5": 270},
+    #
+    # ⚠️ 时钟的**锚点**是「登记 ts」，也就是**计划**开赛时刻，不是实际开赛时刻。
+    #    同一个场地上前一档打满三图，会把下一档拖后 30~60 分钟（实测 2026-10-05：
+    #    Aurora Gaming vs BetBoom 登记 00:30、页面实际 01:20，晚了 50 分钟）。
+    #    于是「打满三图的 Bo3」的总耗时 = 迟到 + 最长时长 + 页面更新延迟，
+    #    必然超过「登记 ts + 最长时长」。
+    #    2026-10-05 就是这么丢掉两场的：M80 vs TYLOO(2:1) 与
+    #    Aurora Gaming vs BetBoom(2:1) 都被判成「延期/取消」，次日整合版只剩 6 场；
+    #    同一档的另一场 Team Vitality vs Team Falcons(2:1) 是 03:26 才出的结果，
+    #    距离当时的放弃时刻 03:30 **只差 4 分钟** —— 说明卡的就是余量。
+    #    所以这里 = 最长时长 + 约 90 分钟的「迟到 + 页面延迟」余量。
+    "results_timeout_minutes": {"Bo1": 150, "Bo3": 270, "Bo5": 360},
     # 清单里超过这么多小时还没结算的条目直接清掉（兜底，免得文件无限长大）。
     # 取 36 而不是 24：整合版是**次日早上**才发的，窗口最早那场（前一天 09:30）
     # 到发的时候已经 23 小时 50 分，用 24 会被清掉一半 → 汇总缺场次。
@@ -2543,6 +2554,28 @@ def result_rows(due, fin, es):
     return rows, waiting
 
 
+def absorb_result(it, row, stamp):
+    """把一条结算结果**写进清单条目**，返回该条目。
+
+    ⚠️ 下面这几个快照字段不是冗余：整合版要到**次日早上**才发，那时赛程页早翻篇了
+    （recent 只有约 2 天窗口），队名/短名/队标/赛事名全都不在手上 —— 只能结算时存下来。
+
+    抽成独立函数是因为**两条路径**都要写同样的字段：
+      · `run_results` 的正常结算；
+      · `backfill_abandoned` 的补漏（次日早上把被判延期/取消的场次捞回来）。
+    """
+    it["status"] = "reported"
+    it["reported_at"] = stamp
+    it["score"] = row["score"]
+    it["winner"] = row["winner"]
+    it["teams"] = list(row["teams"])
+    it["shorts"] = list(row["shorts"])
+    it["logos"] = list(row["logos"])
+    it["tour"] = row["tour"]
+    it["bo"] = row["bo"]
+    return it
+
+
 def attach_maps(rows, es):
     """给战果行补上逐图比分。返回 (抓了几个赛事页, 补上了几行)。
 
@@ -3679,19 +3712,8 @@ def run_results(cfg, args):
 
     stamp = now.strftime("%Y-%m-%d %H:%M:%S")
     for row in sent:
-        it = row["item"]            # 是 data["items"] 里的引用，改它就是改清单
-        it["status"] = "reported"
-        it["reported_at"] = stamp
-        it["score"] = row["score"]
-        it["winner"] = row["winner"]
-        # ⚠️ 下面这几个是**给全天整合版存的快照**，不是冗余。
-        #    整合版要到次日早上才发，那时赛程页早翻篇了（recent 只有约 2 天窗口），
-        #    队名/短名/队标/赛事名全都不在手上 —— 只能在这里存下来。
-        it["teams"] = list(row["teams"])
-        it["shorts"] = list(row["shorts"])
-        it["logos"] = list(row["logos"])
-        it["tour"] = row["tour"]
-        it["bo"] = row["bo"]
+        # row["item"] 是 data["items"] 里的**引用**，改它就是改清单。
+        absorb_result(row["item"], row, stamp)
     for it in expired:
         it["status"] = "abandoned"
         it["reported_at"] = stamp
@@ -3993,8 +4015,81 @@ def daily_rows(items, start, end, es):
     return rows
 
 
+def lost_items(items, start, end):
+    """挑出这个赛程日里**被判成延期/取消**（`abandoned`）的场次。**纯函数、不联网。**
+
+    这些就是「本该出现在整合版里、却因为结算放弃时刻太早而漏掉」的候选。
+    """
+    lo, hi = start.timestamp(), end.timestamp()
+    return [it for it in (items or [])
+            if it.get("status") == "abandoned" and lo <= int(it.get("ts") or 0) < hi]
+
+
+def backfill_abandoned(items, start, end, es, dry=False):
+    """把上一个赛程日里被判「延期/取消」的场次**再捞一次**。返回补回来的场次数。
+
+    为什么需要它 —— 结算流水线的放弃时刻是「登记 ts + timeout」，而**登记 ts 是
+    *计划*开赛时刻，不是实际开赛时刻**：同一个场地前一档打满三图会把下一档拖后
+    30~60 分钟，所以「打满三图的 Bo3」经常在放弃时刻前后才出结果。
+    2026-10-05 的 M80 vs TYLOO(2:1) 与 Aurora Gaming vs BetBoom(2:1) 就这么丢了，
+    次日整合版只剩 6 场（用户报「应该是八场」）。
+
+    把 timeout 调大只是减少发生的概率；**这里才是兜底** —— 整合版是次日早上才发的，
+    那时所有场次早已尘埃落定，页面上一定查得到。
+
+    成本控制：**只在确实有 abandoned 条目时才抓页面**。正常日 0 网络请求，
+    性质上和原来「0 请求」的口径不冲突（有场次丢了才付这 1 次请求）。
+
+    补回来的场次只进整合版，**不会补发单场战报** —— 隔了十几个小时再推一条
+    「XX 2:1 YY」是纯噪音，汇总里带上才是它该在的地方。
+
+    `dry=True`（`--check-daily` 演练）：照常抓、照常配对，**只改内存、不落盘**，
+    这样预览图是对的（会显示补回来的场次），而清单文件一个字节都不动。
+    """
+    lost = lost_items(items, start, end)
+    if not lost:
+        return 0
+    log("[info] 补漏：上一个赛程日有 %d 场被判延期/取消，再捞一次：%s"
+        % (len(lost), _pairs_label(lost)))
+    r = fetch_matches(es)
+    if r is None or not r.get("ok"):
+        log("[warn] 补漏：抓取失败（%s），这几场补不回来，整合版会少列"
+            % ((r or {}).get("error") or "未知"))
+        return 0
+    html_text, err = extract_html(r["text"])
+    if html_text is None:
+        log("[warn] 补漏：%s" % err)
+        return 0
+    fin = finished_index(parse_matches(html_text))
+    rows, still = result_rows(lost, fin, es)
+    if not rows:
+        log("[info] 补漏：页面上这 %d 场仍没有结果，确认是延期/取消，整合版不列它们"
+            % len(lost))
+        return 0
+    stamp = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    for row in rows:
+        absorb_result(row["item"], row, stamp)
+        row["item"]["backfilled"] = True     # 留痕：这条不是实时战报报过的
+    if dry:
+        log("[check] 补漏（演练）：%d 场已改判为已结算，**只改内存未落盘**"
+            % len(rows))
+    else:
+        save_results_pending(_prune_pending({"items": items}, datetime.now(CST), es))
+    log("[sent] 补漏：%d 场从「延期/取消」改判为已结算，已补进整合版：%s"
+        % (len(rows), "、".join("%s %s" % (" vs ".join(row["teams"][:2]), row["score"])
+                              for row in rows)))
+    if still:
+        log("[info] 补漏：另外 %d 场页面上确实没有结果：%s"
+            % (len(still), _pairs_label(still)))
+    return len(rows)
+
+
 def run_daily(cfg, args):
-    """发「上一个赛程日」的整合版战果。**一次网络请求都不发。**
+    """发「上一个赛程日」的整合版战果。
+
+    **正常日 0 网络请求**；只有「这个赛程日有场次被判成延期/取消」时，才多发 1 次
+    请求把它们补回来（见 `backfill_abandoned`）—— 不补的话汇总会**静默地**少列几场，
+    2026-10-05 就因此只发了 6 场（实际 8 场）。
 
     幂等是第一要求：这个 job 每天由 timer 触发，但完全可能被手动再跑一次，
     所以发成功之后在 state_esports_daily.json 里记下「哪个赛程日已经发过了」。
@@ -4028,6 +4123,10 @@ def run_daily(cfg, args):
             return 0
 
     data = load_results_pending()
+    # 补漏：结算的放弃时刻锚在**登记（计划）开赛时刻**上，而前一档打满三图会把
+    # 下一档拖后 30~60 分钟 → 打满三图的 Bo3 很容易被误判成「延期/取消」。
+    # 出汇总之前再捞一次；没有 abandoned 条目时 0 网络请求。
+    backfill_abandoned(data["items"], start, end, es, dry=check)
     rows = daily_rows(data["items"], start, end, es)
     n_all = len([it for it in data["items"]
                  if start.timestamp() <= int(it.get("ts") or 0) < end.timestamp()])
@@ -5046,12 +5145,12 @@ def selftest():
             and rows_x[0]["winner"] == "FlyQuest", rows_x[0]["winner"])
 
     # 时间闸门 + 每赛制的 grace/timeout
-    t.check("Bo1 的 grace/timeout = 50/90 分钟",
-            _settle_seconds("Bo1", es) == (3000, 5400), _settle_seconds("Bo1", es))
-    t.check("Bo3 的 grace/timeout = 100/180 分钟",
-            _settle_seconds("Bo3", es) == (6000, 10800), _settle_seconds("Bo3", es))
-    t.check("Bo5 的 grace/timeout = 170/270 分钟",
-            _settle_seconds("Bo5", es) == (10200, 16200), _settle_seconds("Bo5", es))
+    t.check("Bo1 的 grace/timeout = 50/150 分钟",
+            _settle_seconds("Bo1", es) == (3000, 9000), _settle_seconds("Bo1", es))
+    t.check("Bo3 的 grace/timeout = 100/270 分钟",
+            _settle_seconds("Bo3", es) == (6000, 16200), _settle_seconds("Bo3", es))
+    t.check("Bo5 的 grace/timeout = 170/360 分钟",
+            _settle_seconds("Bo5", es) == (10200, 21600), _settle_seconds("Bo5", es))
     t.check("赛制认不出来时退回 Bo3 的窗口",
             _settle_seconds("", es) == _settle_seconds("Bo3", es)
             and _settle_seconds("Bo7", es) == _settle_seconds("Bo3", es))
@@ -5063,7 +5162,10 @@ def selftest():
     t.check("刚过 grace（100 分钟）：进入待结算", len(_gate(6000)[0]) == 1)
     t.check("⚑ 开赛 110 分钟仍在 grace 与 timeout 之间 → 只是待结算，绝不判超时",
             len(_gate(6600)[0]) == 1 and _gate(6600)[1] == [])
-    t.check("超过 timeout（180 分钟）：判超时放弃", len(_gate(11000)[1]) == 1)
+    t.check("⚑ 开赛 183 分钟（**旧的**放弃点）现在仍处于待结算 —— "
+            "前三小时正是「打满三图的 Bo3」的尾声，旧值在这里容易误判成延期",
+            len(_gate(11000)[0]) == 1 and _gate(11000)[1] == [], _gate(11000))
+    t.check("超过 timeout（270 分钟）：判超时放弃", len(_gate(17000)[1]) == 1)
     t.check("已经 reported 的条目不会再被结算",
             split_due([dict(gate, status="reported")], datetime.fromtimestamp(200000, CST), es)
             == ([], []))
@@ -5101,6 +5203,34 @@ def selftest():
     t.check("超过 results_max_age_hours 的旧条目被清掉、pending 的留着",
             len(pruned["items"]) == 1 and pruned["items"][0]["teams"] == ["P", "Q"],
             pruned["items"])
+
+    # ---- 补漏：把被判「延期/取消」的场次捞回来（2026-10-05 因此少发 2 场的修复）----
+    day_lo = datetime.fromtimestamp(100000, CST)
+    day_hi = datetime.fromtimestamp(200000, CST)
+    mixed_st = [dict(gate, status="abandoned"),                 # 窗口内 + abandoned → 该补
+                dict(gate, ts=300, status="abandoned"),         # 窗口外 → 不该补
+                dict(gate, ts=150000, status="reported")]       # 已报 → 不该补
+    t.check("补漏候选：只挑「窗口内 + abandoned」的（纯函数、不联网）",
+            [it["ts"] for it in lost_items(mixed_st, day_lo, day_hi)] == [100000],
+            [it["ts"] for it in lost_items(mixed_st, day_lo, day_hi)])
+    t.check("⚑ 补漏：没有 abandoned 条目时候选为空 —— 正常日「0 网络请求」就是靠这条",
+            lost_items([dict(gate, status="reported"),
+                        dict(gate, status="pending")], day_lo, day_hi) == [])
+
+    brief = {"teams": ["M80", "TYLOO"], "ts": 100000, "bo": "BO3", "status": "abandoned",
+             "reported_at": None, "score": None, "winner": None,
+             "shorts": None, "logos": None, "tour": None}
+    brow = {"teams": ["M80", "TYLOO"], "shorts": ["M80", "TYLOO"],
+            "logos": ["u-m80", "u-tyloo"], "score": "2:1", "winner": "M80",
+            "tour": "ESL Pro League Season 24 - Round 3", "bo": "Bo3", "ts": 100030}
+    absorb_result(brief, brow, "2026-10-06 09:40:00")
+    t.check("absorb_result：状态转 reported，比分/胜方/队标/赛事快照全部落袋"
+            "（整合版次日才发，这些快照只能现在存）",
+            brief["status"] == "reported" and brief["reported_at"] == "2026-10-06 09:40:00"
+            and brief["score"] == "2:1" and brief["winner"] == "M80"
+            and brief["logos"] == ["u-m80", "u-tyloo"]
+            and brief["tour"] == "ESL Pro League Season 24 - Round 3"
+            and brief["bo"] == "Bo3", brief)
 
     # --check-results 的演练模式：清单空着也能演示（刚部署的服务器就靠它验收）
     t.check("演练条目只取「已结束」的场次（进行中的不能混进来）",
@@ -5482,6 +5612,13 @@ def selftest():
                  + "label_dt)")
     t.check("⚑ run_daily 把**真实时刻**（now）传给了 gen_at，不是 label_dt",
             "gen_at=now)" in _src_txt and _bad_call not in _src_txt)
+    t.check("⚑ run_daily 出汇总前先跑一次补漏（否则被判延期的场次永远补不回来，"
+            "2026-10-05 就是这么少了 2 场）",
+            "backfill_abandoned(data[\"items\"], start, end, es, dry=check)" in _src_txt)
+    # 演练（--check-daily）必须走 dry=True：图要预览对，但清单文件一个字节都不能动。
+    t.check("⚑ --check-daily 的补漏只改内存：dry=check → 演练时不落盘",
+            "dry=check" in _src_txt and "def backfill_abandoned(items, start, end, es, "
+            "dry=False)" in _src_txt)
 
     if find_chrome(es):
         rdpng = render_daily_results_card_html(rdrows, ds, es)

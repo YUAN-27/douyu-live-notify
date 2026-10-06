@@ -81,9 +81,11 @@
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
 sha256sum watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html \
-  daily_results_template.html preview_template.html card_font.otf make_card_font.py fonts/*.ttf | cut -c1-16
+  daily_results_template.html preview_template.html config.example.json \
+  card_font.otf make_card_font.py fonts/*.ttf | cut -c1-16
 wc -c watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html \
-  daily_results_template.html preview_template.html card_font.otf make_card_font.py fonts/*.ttf
+  daily_results_template.html preview_template.html config.example.json \
+  card_font.otf make_card_font.py fonts/*.ttf
 sha256sum ../deploy.zip | cut -c1-16
 ```
 
@@ -94,26 +96,34 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `117c01d01c015605` | 297312 |
+| `esports.py` | `b486a7e1734491b6` | 305601 |
 | `result_template.html`（V2 单场战报模板） | `82638848c4a48a07` | 10494 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
+| `config.example.json`（配置样板，含结算超时默认值） | `1a833ba940e60dbc` | 13308 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `b692eada86ff9cf1` | 5403 |
 
-本版（`8c6c4d8`）修的是**开赛提醒的级联判据**：`estimate_starts` 原按「同一
-`tour`」级联，会把一个赛事同 Round 的**并行流**（如 EPL 的 3 时段 × 2 条流、
-12 支不同队伍）串成一条越来越晚的链，导致除第一场外全部错过提醒窗口。
-现收紧为「同一 `tour` **且共用至少一支队伍**」（新增 `_share_team`）。
-只改了 `esports.py` 与 `ESPORTS.md`，模板与字体**未动**。
-**上一版**（`4bdb153`）新增 **V2 全天整合版模板** `daily_results_template.html`，并同步
-`esports.py`（新增 `build_daily_results_data` / `render_daily_results_card_html` /
+本版（commit 见 `git log -1 --oneline`）修的是**整合版少列场次**：结算的放弃时刻锚在
+「登记（计划）开赛时刻」上，而前一档打满三图会把下一档拖后 30~60 分钟，
+于是「打满三图的 Bo3」经常在放弃时刻前后才出结果 —— 2026-10-05 因此丢掉
+`M80 vs TYLOO` 2:1 与 `Aurora Gaming vs BetBoom` 2:1 两场，次日整合版只剩 6 场。
+两处修改：
+① `results_timeout_minutes` 由 `{Bo1:90, Bo3:180, Bo5:270}` 调成
+   `{Bo1:150, Bo3:270, Bo5:360}`（= 最长时长 + 约 90 分钟迟到/页面延迟余量）；
+② 新增 `backfill_abandoned()`：整合版出图前把该赛程日所有 `abandoned` 的场次
+   再捞一次，配上就改回 `reported` 补进汇总。**只在真有 abandoned 条目时才抓页面**，
+   正常日仍是 0 网络请求。同步改了 `ESPORTS.md` §3.1 与 `config.example.json`。
+模板与字体**未动**。
+**上一版**（`8c6c4d8`）修的是开赛提醒的级联判据（「同一赛事」→「同一赛事且共用队伍」）。
+**再上一版**（`4bdb153`）新增 **V2 全天整合版模板** `daily_results_template.html`，
+并同步 `esports.py`（新增 `build_daily_results_data` / `render_daily_results_card_html` /
 `render_daily_results_card`，`run_daily` 改走三级降级）与 `result_template.html` /
-`daily_template.html`（署名随仓库改名）。**再上一版**是开赛提醒（`--announce`）；
+`daily_template.html`（署名随仓库改名）。**再往前**是开赛提醒（`--announce`）；
 再上一版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、
 `find_chrome` 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选、总预告 HTML 上限 30→22 场、
 生僻字断言按 V2 行为拆分、自检含真渲染 PNG 实际尺寸校验。
@@ -211,8 +221,8 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **356** |
-  | 少了 `make_card_font.py` | 354（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **362** |
+  | 少了 `make_card_font.py` | 360（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
 

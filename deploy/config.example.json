@@ -108,9 +108,9 @@
       "Bo5": 170
     },
     "results_timeout_minutes": {
-      "Bo1": 90,
-      "Bo3": 180,
-      "Bo5": 270
+      "Bo1": 150,
+      "Bo3": 270,
+      "Bo5": 360
     },
     "results_max_age_hours": 36,
 
