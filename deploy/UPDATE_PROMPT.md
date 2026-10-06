@@ -96,7 +96,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `57cc2092bc9d1675` | 344357 |
+| `esports.py` | `d86b45fbfbaf24fa` | 348733 |
 | `result_template.html`（V2 单场战报模板） | `82638848c4a48a07` | 10494 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
@@ -150,6 +150,15 @@ sha256sum ../deploy.zip | cut -c1-16
    `daily_max_rows` 默认值 24 → 21、`config.example.json` 同步、
    `douyu-esports-daily.service` 的注释改成 21 行。880px 旧卡的 `card_max_rows`
    （默认 12）是**另一个画布**，刻意不合并（有断言钉住两者是不同的数）。
+⑦ **两个自检都得能在「装好的机器」上跑完**（本版自己踩出来的一条）。上面 ⑥ 的断言
+   顺手读了 `config.example.json` 和 `douyu-esports-daily.service`，可这两个文件
+   `install-watch.sh` **不装**到 `/opt/douyu-live-notify` —— 于是包内 408 项全绿、
+   服务器上第一条路径就 `FileNotFoundError`，**整个自检在中途断掉**。
+   现在两处都改成「先 `os.path.isfile` 挡一道，不在就打 `[skip]` 写明原因」：
+   `esports.py --selftest` 在装好的机器上是 **405 项**（少 3 条），
+   `selftest.py` 是 **92 项**（少 8 条，见第 3 步）。并且用**语法树**加了一条断言，
+   钉住「那几个 `open()` 必须落在带 `isfile` 的分支里」——
+   **别把守卫删掉**。
 
 > `deploy.zip` 里还多一个 `measure_img_capacity.py`（上面那把尺子，指纹
 > `130e41031a4e519c` / 9286）。它**只在开发机/维护时手动跑**，线上任何 timer 都不调用；
@@ -273,10 +282,18 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **407** |
-  | 少了 `make_card_font.py` | 405（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **408** |
+  | 少了 `make_card_font.py` | 406（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
+  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **405**（少 3 条，打 `[skip]`） |
+
+  ⚠️ 最后那一行是新加的：`config.example.json` 和 `douyu-esports-daily.service`
+  只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。
+  所以那 3 条要**先 `os.path.isfile` 挡一道**再读 —— 否则服务器上第一条路径就
+  `FileNotFoundError`，整个自检**在中途断掉**（2026-10-06 首次部署这一版真的崩过一次，
+  包内 408 项全绿、服务器上直接抛异常）。现在有断言用语法树钉着这个守卫，
+  别把它删掉。
 
   **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow / 浏览器那两行、
   再 `ls card_font.otf make_card_font.py`。

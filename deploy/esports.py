@@ -4784,6 +4784,15 @@ class _T:
             print("  [FAIL] %s%s" % (name, ("   <- " + str(detail)) if detail else ""),
                   flush=True)
 
+    def note(self, msg):
+        """不计入项数的说明行：本机**没有可查的对象**时用它，别硬写一条永真断言。
+
+        典型场景：某条断言要读 `config.example.json` / `*.service`，但那些文件
+        只在仓库和部署包里，`install-watch.sh` 装到服务器上之后就没有了。
+        那种情况下打一行 [skip] 说明为什么跳过，而不是让整个自检抛异常崩掉。
+        """
+        print("  [skip] %s" % msg, flush=True)
+
     def done(self, title):
         print("\n结果：%d 项通过，%d 项失败（共 %d 项）"
               % (self.n - self.fail, self.fail, self.n), flush=True)
@@ -6088,21 +6097,80 @@ def selftest():
             "两处写不一样的数就是这次要修的 bug）",
             ESPORT_DEFAULTS["daily_max_rows"] == HTML_IMG_MAX_ROWS,
             (ESPORT_DEFAULTS["daily_max_rows"], HTML_IMG_MAX_ROWS))
-    _cfg_ex = json.load(open(os.path.join(HERE, "config.example.json"),
-                             encoding="utf-8")).get("esports") or {}
-    t.check("⚑ config.example.json 里的 daily_max_rows 也是这个数"
-            "（示例配置是用户复制出去改的那份，它写 24 就等于没修）",
-            _cfg_ex.get("daily_max_rows") == HTML_IMG_MAX_ROWS,
-            _cfg_ex.get("daily_max_rows"))
-    t.check("config.example.json 里的 card_max_rows 与代码默认值一致"
-            "（示例写 12、代码写 12，别只改一处）",
-            _cfg_ex.get("card_max_rows") == ESPORT_DEFAULTS["card_max_rows"],
-            (_cfg_ex.get("card_max_rows"), ESPORT_DEFAULTS["card_max_rows"]))
-    _svc = open(os.path.join(HERE, "douyu-esports-daily.service"),
-                encoding="utf-8").read()
-    t.check("⚑ daily.service 的注释也说的是这个数，且不再说「24 行」"
-            "（注释里的数是排查时唯一能看到的线索）",
-            ("%d 行" % HTML_IMG_MAX_ROWS) in _svc and "24 行" not in _svc)
+    # ⚠️ 下面两条要读 `config.example.json` 和 `douyu-esports-daily.service`，
+    #    而这两个文件**只在仓库 / 部署包里**：`install-watch.sh` 装到服务器上之后
+    #    只有 *.py + 模板 + 字体（unit 进 /etc/systemd/system，示例配置不装）。
+    #    所以先看文件在不在，不在就 [skip] 说明，**不能直接 open()** ——
+    #    2026-10-06 首次部署这一版时就是这么崩的：包内 407 项全绿，
+    #    装好的目录里一条路径就 FileNotFoundError，整个自检中断。
+    #    自检必须在两种布局下都能跑完，这是硬要求。
+    _ex_path = os.path.join(HERE, "config.example.json")
+    _svc_path = os.path.join(HERE, "douyu-esports-daily.service")
+    if not (os.path.isfile(_ex_path) and os.path.isfile(_svc_path)):
+        t.note("示例配置 / daily.service 不在本目录（装好的机器就是这样）—— "
+               "「示例配置的 daily_max_rows」「示例配置的 card_max_rows」"
+               "「service 注释写的是 %d 行」这 3 条跳过。"
+               "想跑满就在仓库或解开 deploy.zip 的目录里跑。" % HTML_IMG_MAX_ROWS)
+    else:
+        _cfg_ex = json.load(open(_ex_path, encoding="utf-8")).get("esports") or {}
+        t.check("⚑ config.example.json 里的 daily_max_rows 也是这个数"
+                "（示例配置是用户复制出去改的那份，它写 24 就等于没修）",
+                _cfg_ex.get("daily_max_rows") == HTML_IMG_MAX_ROWS,
+                _cfg_ex.get("daily_max_rows"))
+        t.check("config.example.json 里的 card_max_rows 与代码默认值一致"
+                "（示例写 12、代码写 12，别只改一处）",
+                _cfg_ex.get("card_max_rows") == ESPORT_DEFAULTS["card_max_rows"],
+                (_cfg_ex.get("card_max_rows"), ESPORT_DEFAULTS["card_max_rows"]))
+        _svc = open(_svc_path, encoding="utf-8").read()
+        t.check("⚑ daily.service 的注释也说的是这个数，且不再说「24 行」"
+                "（注释里的数是排查时唯一能看到的线索）",
+                ("%d 行" % HTML_IMG_MAX_ROWS) in _svc and "24 行" not in _svc)
+
+    # ---- 把上面那层守卫本身也钉住 ----
+    # 规则：凡是「读只在仓库/包里才有的文件」的 open()，都必须落在带 `isfile` 判定的分支里。
+    # 分两步做，**不能只认字面量** —— 代码里路径都存进了变量（`_ex_path`），
+    # 所以 `open(_ex_path)` 的源码片段里根本没有文件名：
+    #   ① 先找出「哪些变量被赋成了 os.path.join(HERE, "<只在仓库里才有的文件名>")」；
+    #   ② 再从 selftest 根节点往下走，一路记住「当前是否处在带 isfile 的分支中」，
+    #      凡是 open() 的实参用到①那些变量、却不在这种分支里的，就记一笔。
+    # 第①步特意**不看 isfile** —— 否则守卫一改名（isfile→exists）两条会一起消失，
+    # 断言又变成恒真。第一版写成「在 open() 片段里搜文件名」就是这么废掉的（变异测试抓到）。
+    _repo_only_files = ("config.example.json", "douyu-esports-daily.service")
+    _st_def = _fn_def("selftest")
+
+    _repo_path_vars = set()
+    for _n in (ast.walk(_st_def) if _st_def is not None else []):
+        if not (isinstance(_n, ast.Assign) and len(_n.targets) == 1
+                and isinstance(_n.targets[0], ast.Name)):
+            continue
+        _v = _n.value
+        if (isinstance(_v, ast.Call) and isinstance(_v.func, ast.Attribute)
+                and _v.func.attr == "join"
+                and any(isinstance(_a, ast.Constant) and _a.value in _repo_only_files
+                        for _a in _v.args)):
+            _repo_path_vars.add(_n.targets[0].id)
+
+    def _walk_opens(node, guarded, bad):
+        if isinstance(node, ast.If) and "isfile" in _call_names(node.test):
+            guarded = True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "open"):
+            _used = {_a.id for _a in node.args if isinstance(_a, ast.Name)}
+            if _used & _repo_path_vars and not guarded:
+                bad.append(node.lineno)
+        for _ch in ast.iter_child_nodes(node):
+            _walk_opens(_ch, guarded, bad)
+
+    _bad_open = []
+    if _st_def is not None:
+        _walk_opens(_st_def, False, _bad_open)
+    t.check("⚑ 「只在仓库/包里才有」的那几个文件，自检读它们之前必须先 isfile 挡一道"
+            "（否则装好的机器上 FileNotFoundError 会让整个自检在**中途**断掉"
+            " —— 2026-10-06 首次部署这一版就是这么崩的：包内全绿、服务器上一条路径就炸）",
+            bool(_repo_path_vars) and not _bad_open,
+            "受管变量=%s 未加守卫的 open 行号=%s"
+            % (sorted(_repo_path_vars), _bad_open))
+
     _cap_ok = build_daily_results_data(
         [_caprow(i) for i in range(HTML_IMG_MAX_ROWS)], ds, es)
     _cap_no = build_daily_results_data(
