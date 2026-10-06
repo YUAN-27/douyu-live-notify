@@ -1,12 +1,34 @@
 # douyu-live-notify
 
-斗鱼直播间开播提醒：主播**真人开播**时，通过 QQ 推一条消息给你。
+**一个自用的 QQ 群推送机器人。** 主线是 **CS2 职业赛程推送** —— 每天赛程预告、逐场战报、
+开赛前提醒，全部推到自己的 QQ 群；另外附带一条**斗鱼直播间开播/下播提醒**。
 
-单个 Python 文件，**只用标准库**，不需要装任何依赖，也不用登录斗鱼账号。
+跑在 Linux 服务器上：systemd 定时器驱动，Docker 里的 NapCat（OneBot）负责发群，
+装好之后无人值守。核心逻辑只依赖 Python 标准库 ——
+开播提醒那条线本身就是单文件、零依赖。
+
+> 仓库名是历史遗留：最早只有开播提醒，后来越加越偏向赛事推送，名字没跟着改。
 
 ---
 
-## 它想解决什么
+## 两条推送线
+
+五条流水线，各跑各的定时器，互不阻塞：
+
+| 线 | 流水线 | 触发 | 网络请求 | 发什么 |
+|---|---|---|---|---|
+| **赛事推送** | 赛程预告 | 每天 09:30 | Liquipedia 1 次 | 入选场次 + 总预告大图；顺手写待结算清单 |
+| **赛事推送** | 单场战报 | 每 10 分钟 | 有到点场次才抓 | 每场一条：胜绿负红 + 逐图比分 + 选手数据 |
+| **赛事推送** | 全天整合版 | 每天 09:40 | **零网络** | 上一个赛程日汇总，一场一行 |
+| **赛事推送** | 开赛提醒 | **每分钟** | **零网络** | 开赛前约 5 分钟发 Match Preview 大图 |
+| **开播提醒** | 开播 / 下播 | 每 45 秒 | 斗鱼接口 | 开播、下播各一条（带直播时长） |
+
+赛事推送的口径、窗口划分、数据源与排查见 **`deploy/ESPORTS.md`** ——
+它是这块的主文档，下面只讲结论。开播提醒的原理见下一节。
+
+---
+
+## 它想解决什么（开播提醒那条线）
 
 斗鱼接口里那个「是否在直播」的字段**不可靠**。
 
@@ -19,6 +41,27 @@
 
 ## 特性
 
+### 赛事推送（主线）
+
+- **每天一条赛程预告**：北京 09:30 抓一次 Liquipedia，只推**窗口内还没开打**、且满足
+  四条之一（或）的场次：**有中国队** / **有世界前 15 的队伍**（自动抓 HLTV 排名）/
+  **大赛且对阵里有知名队伍** / **同一赛事当天凑够 4 支知名队伍**（整体放行）
+- **窗口 = 「现在 → 下一次预告」，不是「今天」这个自然日** ——
+  否则次日凌晨的比赛会永远漏掉（今天的预告够不着、明天的还没发）
+- **每场打完发一条单场战报**：系列比分（胜绿负红）+ 逐图比分 + 每图每队 rating 前 3 名
+  的选手数据（K-D / ADR / 评分）；选手数据拿不到就少发一段，**绝不影响发送**
+- **每天一条全天整合版**：上一个赛程日一场一行、只有系列比分，**完全不联网**，
+  只读本地清单快照
+- **开赛前提醒**：开赛时刻**不抓页面**，由同赛事前一场的结果串场级联估算得出，
+  所以能每分钟一拍、不碰 Liquipedia 的「1 次 / 30 秒」节流条款
+- **出图多级降级，消息一定发得出去**：HTML 1920×1080（Chromium 截图）→
+  PNG（Pillow 直接画）→ 纯文本。缺 Chromium / Pillow / 字体，都只是往下退一级，
+  不会让消息发不出去。四条流水线各自能退到哪一级见「部署」一节
+- **没比赛就静默**，但连着静默满 7 天会报个平安 ——
+  免得「今天没比赛」和「程序挂了」在群里长得一样
+
+### 开播提醒（支线，可单独使用）
+
 - **零依赖**：只用 Python 标准库。Python 3.9+ 就能跑
 - **能识别轮播**：不把「循环放录播」误报成开播
 - **开播 + 下播都提醒，并报出本次直播总时长**：时长由程序自己记账得出，
@@ -28,21 +71,28 @@
 - **多通道**：控制台 / OneBot（NapCat 等）/ QQ 官方机器人，可以同时启用
 - **两种跑法**：常驻进程，或每分钟执行一次（给 cron / 青龙面板 / 云函数用）
 - **配置错了会明确报错**：最坑的 `room_id` 填错会给可照做的提示，而不是安静地什么都不做
+
+### 两条线共用
+
 - **自带看门狗**：`watch.py` 有两个静默失败（掉线不发、停摆不说），
   看门狗每 2 分钟独立体检一次并告警，能自愈的自己动手。有一条**独立于 QQ 的告警通道**，
   所以掉线时也通知得到你 —— 详见 `deploy/WATCHDOG.md`
-- **顺带每天报一次 CS2 赛程**：每天北京 09:30 抓一次 Liquipedia，只推**窗口内还没开打**、
-  且满足四条之一（或）的场次：**有中国队** / **有世界前 15 的队伍**（自动抓 HLTV 排名）/
-  **大赛且对阵里有知名队伍** / **同一赛事当天凑够 4 支知名队伍**（整体放行）；
-  **窗口 = 「现在 → 下一次预告」，不是「今天」这个自然日** —— 否则次日凌晨的比赛会永远漏掉。
-  推送形态是**一行文字 + 一张 880px 宽的图片卡片**（带队标），因为手机 QQ 对长文本换行处理很差；
-  图出不来就自动退回纯文本，**消息一定发得出去**。
-  没比赛就静默，但连着静默满 7 天会报个平安 ——
-  免得「今天没比赛」和「程序挂了」长得一样。独立功能，不要可以整个删掉 —— 详见 `deploy/ESPORTS.md`
+- **凭据体检**：`check-secrets.py` 扫已跟踪文件里有没有真实凭据（token / 群号 / webhook），
+  CI 每次都跑 —— 凭据一旦推进公开仓库就永久留在 git 历史里，事后删文件也删不掉
+- **CI 自检**：`.github/workflows/selftest.yml` 在 Python 3.9 / 3.12 / 3.13 上跑
+  `selftest.py` + `watchdog.py --selftest` + `esports.py --selftest`，三条都不联网
 
 ---
 
 ## 快速开始
+
+两条路，按你要哪条线走：
+
+- **只要开播提醒** → 本机就能跑，照下面 1 → 2 → 3 走，几分钟搞定，不需要服务器。
+- **要赛事推送（主线，推荐）** → 它需要常驻服务器 + Docker + systemd，
+  直接跳到「部署」一节；或者把 `deploy/AGENT_PROMPT.md` 那份提示词丢给 AI agent 帮你装。
+
+下面先讲开播提醒的最小闭环。
 
 ### 1. 拿到真实 room_id（最容易踩的坑，务必先看）
 
@@ -129,6 +179,8 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --results` | 结算到期场次并发**单场战报**（定时器调的就是它；没到窗口会**一个请求都不发**就退出）。**每两队打完就发这一条**（一场一条，不再合并） |
 | `python deploy/esports.py --check-daily` | **看全天整合版长什么样**：出图到 `/tmp/esports_daily_check.png`，不发消息、不写状态。**完全不联网**，只读清单快照 |
 | `python deploy/esports.py --daily` | 发上一个赛程日的**全天整合版**（一场一行、只有系列比分），由 `douyu-esports-daily.timer` 每天 09:40 拉起。有幂等标记，同一天重复跑不会重发 |
+| `python deploy/esports.py --check-announce` | **看开赛提醒会发什么**：只把 Match Preview 卡渲染到 `$TEMP`，不发消息、不写状态。**零网络请求**，随时可跑 |
+| `python deploy/esports.py --announce` | 开赛提醒一轮：估算的开赛时刻落进提醒窗的场次发一张 Match Preview 卡（`douyu-esports-announce.timer` 每分钟拉起的就是它）。**零网络请求**，只读本地清单 + 锁文件防重 |
 | `python deploy/esports.py --test-notify` | 验证赛程预告用的推送通道 |
 | `python deploy/esports.py --check`（同上） | 顺带把要发的那张卡片渲染到 `/tmp/esports_card_check.png`，可以下载下来看排版 |
 | `python pack_deploy.py` | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py` / **`card_font.otf`** / `install-watch.sh`，并归一为 LF） |
@@ -205,6 +257,76 @@ https://www.douyu.com/6979222
 
 ---
 
+## 文件目录
+
+```
+douyu-live-notify/
+├── README.md                     本文件
+├── LICENSE                       MIT
+├── watch.py                      开播提醒主程序（单文件、零依赖）
+├── selftest.py                   watch.py 的不联网逻辑自检
+├── check-secrets.py              凭据体检：已跟踪文件里不该有任何真实 token / 群号 / webhook
+├── pack_deploy.py                打 deploy.zip（自动带上根目录的几个 .py，归一为 LF）
+├── qr_make.py                    把 NapCat 登录二维码变成本地可扫的图片
+├── config.example.json           开播提醒的配置模板
+├── .github/workflows/selftest.yml   CI：3 个 Python 版本 × 三条离线自检 + 凭据体检
+│
+└── deploy/                       部署包 —— 服务器上要用的全部东西
+    ├── esports.py                赛事推送主程序（预告 / 战报 / 整合版 / 开赛提醒四合一）
+    ├── watchdog.py               看门狗：体检 + 自愈 + 独立于 QQ 的告警通道
+    ├── result_template.html      卡片模板：单场战报
+    ├── daily_template.html       卡片模板：总预告大图（文件名是历史包袱，实际喂的是总预告）
+    ├── preview_template.html     卡片模板：开赛提醒（Match Preview）
+    ├── fonts/                    上面三个模板用的字体（Bebas Neue / IBM Plex Mono ×2）+ OFL 许可证
+    ├── card_font.otf             Pillow 降级卡片的字体子集（Noto Sans SC，65 KB）
+    ├── CARD_FONT_LICENSE.txt     ↑ 的 SIL OFL 1.1 全文（OFL 要求随字体分发）
+    ├── make_card_font.py         重新生成 card_font.otf
+    ├── check-esports-net.py      赛事数据源连通性自检（只读）
+    ├── docker-compose.yml        NapCat 容器（端口只绑 127.0.0.1，ACCOUNT 必填）
+    ├── install-watch.sh          安装主程序 / 看门狗 / 卡片资产 与 systemd 单元
+    ├── preflight-check.sh        部署前环境预检（只读，含内存判定）
+    ├── setup-docker-mirror.sh    探测可用的 Docker 镜像源
+    ├── mem-report.sh             内存被谁占了（只读，含 OOM 历史）
+    ├── add-swap.sh               加 / 删 swap（幂等、可撤销，小内存机器用）
+    ├── why-no-notify.sh          排查「为什么没收到通知」
+    ├── config.example.json       主配置模板（开播 + 赛事两段都在这里）
+    ├── .env.example              WebUI token / 机器人 QQ 号 / 容器内存上限
+    ├── watchdog.env.example      告警通道与阈值（装到 /etc/default/douyu-watchdog）
+    ├── douyu-watch.{service,timer}             每 45 秒跑一次 watch.py --tick
+    ├── douyu-watchdog.{service,timer}          每 2 分钟体检，异常时告警 / 自愈
+    ├── douyu-esports.{service,timer}           每天 09:30 赛程预告
+    ├── douyu-esports-results.{service,timer}   每 10 分钟结算刚打完的场次 → 单场战报
+    ├── douyu-esports-daily.{service,timer}     每天 09:40 全天整合版
+    ├── douyu-esports-announce.{service,timer}  每分钟看一次要不要发开赛提醒
+    ├── douyu-watch.tmpfiles                    日志与状态目录兜底（装到 /etc/tmpfiles.d/）
+    ├── DEPLOY.md                 完整部署手册（先看这个）
+    ├── ESPORTS.md                赛事推送主文档：口径、窗口、数据源、排查
+    ├── WATCHDOG.md               看门狗设计说明 + 「怎么验证它真的会叫」
+    ├── SCAN_QR_WITHOUT_SSH.md    扫码登录的替代做法（不必开 SSH 隧道）
+    ├── AGENT_PROMPT.md           想让 AI agent 帮你部署？把这份提示词丢给它
+    ├── RESUME_PROMPT.md          预检判定内存不足、处理完之后接着部署的续跑提示词
+    └── UPDATE_PROMPT.md          旧部署要更新到新版时，丢给 agent 的提示词
+```
+
+### 只在本机存在、不进仓库的文件
+
+`.gitignore` 挡在门外的这些**不是可有可无**，其中两个丢了不可恢复：
+
+| 文件 | 是什么 | 丢了会怎样 |
+|---|---|---|
+| `deploy/config.json`、`deploy/.env`、`deploy/watchdog.env` | **真实配置与凭据** | 得照着 `.example` 重填；凭据本来就绝不该进公开仓库 |
+| `HANDOFF.md` | 项目内部交接文档 | **只在本地有，GitHub 上没有** —— 唯一不可重建的一个 |
+| `deploy/NotoSansSC-Regular.otf` | 生成 `card_font.otf` 的**源字体**（8 MB） | 无所谓，重跑 `make_card_font.py` 会自动下载 |
+| `deploy/logo_cache/` | 队标缓存（文件名 = sha256(url) 前 16 位） | 无所谓，从赛程页自动重建 |
+| `deploy.zip` | `pack_deploy.py` 的产物 | 无所谓，重打一次即可 |
+| `qr.png` | NapCat 登录二维码 | 无所谓，本质是一次性凭据，生成即作废 |
+| `selftest_result.txt`、`state_*.json`、`rank_cache.json` | 运行期产物 | 无所谓 |
+
+服务器上另有一批运行时状态（`state_*.json`、`logo_cache/`、`rank_cache.json`），
+都在 `/opt/douyu-live-notify/` 下，同样不进仓库。
+
+---
+
 ## 部署
 
 ### 方式 A：本机 / 任何有 Python 的机器
@@ -217,40 +339,8 @@ https://www.douyu.com/6979222
 
 ### 方式 B：服务器 + Docker（推荐）
 
-`deploy/` 目录里有整套东西，Ubuntu 22.04 / 24.04 实测通过：
-
-```
-deploy/
-├── DEPLOY.md              完整部署手册（先看这个）
-├── AGENT_PROMPT.md        想让 AI agent 帮你部署？把这份提示词丢给它
-├── RESUME_PROMPT.md       预检判定内存不足、处理完之后接着部署的续跑提示词
-├── SCAN_QR_WITHOUT_SSH.md 扫码登录的替代做法（不必开 SSH 隧道）
-├── watch.py               主程序（部署包里有副本，源头在仓库根目录）
-├── selftest.py            逻辑自检（部署包里有副本，源头在仓库根目录）
-├── watchdog.py            看门狗：体检「有没有在跑 / 掉线没有 / 通知丢了没」并自愈
-├── WATCHDOG.md            看门狗设计说明 + 「怎么验证它真的会叫」
-├── esports.py             CS2 每日赛程预告（独立功能，可选）
-├── ESPORTS.md             赛程预告的口径、限制、排查，以及改选择器时的注意事项
-├── card_font.otf          卡片字体（Noto Sans SC 子集，65 KB，随包发布）
-├── CARD_FONT_LICENSE.txt  上面的字体许可证（SIL OFL 1.1 全文，OFL 要求随字体分发）
-├── make_card_font.py      重新生成 card_font.otf 的脚本（往卡片上加新中文文案时才要跑）
-├── check-esports-net.py   赛程数据源连通性自检（上线前先跑，只读）
-├── docker-compose.yml     NapCat 容器（端口只绑 127.0.0.1，ACCOUNT 必填）
-├── .env.example           WebUI token / 机器人 QQ 号 / 容器内存上限模板
-├── config.example.json    配置模板
-├── preflight-check.sh     部署前环境预检（只读，含内存判定）
-├── setup-docker-mirror.sh 探测可用的 Docker 镜像源
-├── mem-report.sh          内存被谁占了（只读，含 OOM 历史）
-├── add-swap.sh            加/删 swap（幂等、可撤销，小内存机器用）
-├── install-watch.sh       安装 watch.py / watchdog.py / esports.py / 卡片字体 与 systemd 单元
-├── douyu-watch.{service,timer}  systemd 每分钟拉起 watch.py --tick
-├── douyu-watchdog.{service,timer}  每 2 分钟体检一次，异常时告警 / 自愈
-├── douyu-esports.{service,timer}   每天北京 09:30 推一次 CS2 赛程预告（覆盖到次日 09:30）
-├── douyu-esports-results.{service,timer}  每 10 分钟看一次「有没有比赛刚打完」→ **每场一条单场战报**（带逐图比分）
-├── douyu-esports-daily.{service,timer}    每天 09:40 发**上一个赛程日的全天整合版**（一场一行，不联网）
-├── watchdog.env.example   告警通道与阈值模板（装到 /etc/default/douyu-watchdog）
-└── douyu-watch.tmpfiles   日志与状态目录兜底（装到 /etc/tmpfiles.d/）
-```
+`deploy/` 目录里有整套东西，Ubuntu 22.04 / 24.04 实测通过。
+里面**每个文件是干什么的**见上面「文件目录」一节，这里不重复。
 
 > `.env` 里的 **`ACCOUNT`（机器人 QQ 号）是必填的**。镜像靠它给 QQ 传 `-q` 走快速登录；
 > 不填的话容器每次重启都可能退回「等你扫码」，做不到长期无人值守。漏填时 compose
@@ -266,7 +356,12 @@ deploy/
 配法 `ALERT_WEBHOOK=pushplus|https://www.pushplus.plus/send?token=<token>`；
 Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 —— 两个都用 `;` 连起来写即可。
 
-**CS2 每日赛程预告（可选，独立功能）**：`esports.py` 每天北京 09:30 抓一次 Liquipedia，
+**CS2 赛事推送（主线功能）**：`esports.py` 一个程序管**四条流水线** ——
+每天 09:30 的赛程预告、每 10 分钟的单场战报、每天 09:40 的全天整合版，
+以及每分钟一拍的赛前提醒。下面以**赛程预告**为例讲口径，另外三条的时间安排、
+数据源与验收方式见 `ESPORTS.md`。
+
+赛程预告每天北京 09:30 抓一次 Liquipedia，
 只推**窗口内还没开打**、且满足**四条之一（或）**的场次：
 
 1. **有中国队参赛** —— 无条件发；
@@ -290,8 +385,7 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
 【CS2 赛程】10-05 周一 09:30 → 10-06 周二 09:30 · 共 8 场
 ```
 
-卡片是 880 px 宽的 PNG，带队标（队标是赛程页自带的，**零额外请求**），
-赛事名和 Bo 放在页脚，正文只有「时间 + 对阵」，跨天场次时间前加「次日」：
+卡片长这样（总预告版；正文只有「时间 + 对阵」，跨天场次时间前加「次日」）：
 
 ```
  CS2 赛程
@@ -302,10 +396,21 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
  ESL Pro League Season 24 - Round 3 · Bo3  数据来源：Liquipedia
 ```
 
-⚠️ **图出不来时自动退回纯文本版，消息一定发得出去**（没装 Pillow / 缺字体 /
-文案里有字体子集外的字 → 走这条路，日志留 `[warn]`）。画卡片要 Pillow，
-是**可选依赖**：`apt install -y python3-pil`（`install-watch.sh` 会尽力自动装）。
-字体随包发布（`card_font.otf`，65 KB 的 Noto Sans SC 子集），所以服务器和本地画出来一模一样。
+出图是**多级降级**的，四条流水线各自能退到哪一级不一样 ——
+但**退到最后一定是纯文本，消息永远发得出去**：
+
+| 流水线 | 一级 | 二级 | 三级 |
+|---|---|---|---|
+| 总预告 | HTML 1920×1080（`daily_template.html`） | 880 px PNG，Pillow | 纯文本 |
+| 单场战报 | HTML 1920×1080（`result_template.html`） | PNG，Pillow | 纯文本 |
+| 开赛提醒 | HTML 1920×1080（`preview_template.html`） | — | 纯文本 |
+| 全天整合版 | —（**没有 HTML 版**） | PNG，Pillow | 纯文本 |
+
+HTML 那级要 Chromium；Pillow 那级要 Pillow + `card_font.otf`；
+`card_font.otf` 是**随包发布**的 Noto Sans SC 子集（65 KB），
+所以服务器和本地画出来一模一样。HTML 层用 `deploy/fonts/` 里的字体
+（字体路径曾有 `file:///` 双前缀导致**静默失效**，已修 + 自检钉死）。
+降到哪一级日志里都会留 `[warn]`。
 
 版面上**不带任何「入选标记」**（没有 `← 中国队` / `← 世界前15`，卡片上也没有中国队红标）——
 入选口径照旧，想看某场靠什么进来的看 `--check` 的逐场理由。
@@ -315,6 +420,9 @@ Server酱 免费只有 5 条/天且免费版只显示标题，适合当兜底 �
 抓取失败会单独告警，并明确写「这不等于今天没有比赛」。
 上线前先跑 `python3 esports.py --check` 看清楚会发什么（**只抓不发、不写状态**，
 顺带把卡片渲染到 `/tmp/esports_card_check.png` 给你看排版）。
+另外三条流水线也各有演练入口：`--check-results`（战报）/ `--check-daily`（整合版）/
+`--check-announce`（开赛提醒），同样不发消息、不写状态。
+
 口径、已知限制与排查见 `ESPORTS.md`。
 
 用法：把 `deploy/` 整个目录传到服务器，先跑 `bash preflight-check.sh`
@@ -339,12 +447,18 @@ python pack_deploy.py        # 生成 deploy.zip
 的 sha256 前 16 位（外加一行 `card_font.otf`），以后怀疑「服务器上是不是旧版」，
 和仓库里的对一下即可。
 
-**依赖**：核心功能只用 Python 标准库。两个**可选**额外依赖，缺了不影响主流程：
+**依赖**：核心逻辑只用 Python 标准库。卡片相关的都是**可选**依赖 ——
+缺了不会静默失败，只会按上面「三级降级」往下退一级：
 
 | 依赖 | 谁要 | 缺了会怎样 |
 |---|---|---|
-| `Pillow`（`apt install -y python3-pil`） | `esports.py` 画赛程卡片 | 卡片画不出来 → **自动退回纯文本**，赛程照发 |
+| Chromium / Google Chrome | 一级卡片（HTML 1920×1080 截图） | 退到二级（Pillow 出图） |
+| `Pillow`（`apt install -y python3-pil`） | 二级卡片（880 px PNG）；`make_card_font.py` 也要它 | 退到三级（纯文本），**赛程照发** |
 | `qrcode` + `pillow`（`pip install qrcode pillow`） | `qr_make.py`（本地把 NapCat 登录二维码变成图片） | 只有那个一次性脚本用不了，不影响服务器 |
+
+> 装 Chromium 时**别用 snap 版**：国内 ECS 上 snap 的 `connect plugs` 会卡死一小时以上，
+> `--version` 都能 0% CPU 阻塞，`snapd restart` 也救不回来。直接装 Google Chrome 的 deb 包，
+> 再把路径钉进 `config.json` 的 `esports.chrome_bin`（`install-watch.sh` 会自动探测并写进去）。
 
 ### 扫码登录 QQ（不需要 SSH 隧道）
 
