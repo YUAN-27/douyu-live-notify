@@ -1970,7 +1970,7 @@ def render_card_html(picked, now, es):
     return None
 
 
-def build_daily_results_data(rows, now, es):
+def build_daily_results_data(rows, now, es, gen_at=None):
     """全天整合版 V2 的数据对象（喂 daily_results_template.html）。
 
     和总预告 build_daily_data 是同一套版式语言，但每行画的是**已定的比分**：
@@ -1978,6 +1978,12 @@ def build_daily_results_data(rows, now, es):
 
     场次太多（>22 —— 双列 11 行/列正好压在第二档密度的舒适区内）或空场次
     返回 None —— 退回 Pillow 旧卡，绝不硬画。
+
+    `now` 是**赛程日**（窗口起点），用来出 `dayLabel`、`dateLabel` 这一组
+    「这是哪天的战果」标签；`gen_at` 是**真正生成这张卡的时刻**，只用来出页脚的
+    `generatedAt`。两者刻意分开 —— 合一的话页脚会写「LAST UPDATED 10-05 09:30」，
+    而那个时刻是窗口的**起点**（数据其实一直收到次日 09:30），读起来会像是
+    「数据截至昨天早上」。不传 `gen_at` 时退回 `now`。
     """
     es = es or {}
     rs = sorted(rows or [], key=lambda r: int(r.get("ts") or 0))
@@ -2013,7 +2019,7 @@ def build_daily_results_data(rows, now, es):
         })
     end = datetime.fromtimestamp(int(rs[-1].get("ts") or 0), CST)
     return {
-        "generatedAt": now.strftime("%H:%M"),
+        "generatedAt": (gen_at or now).strftime("%H:%M"),
         "dateLabel": start.strftime("%b %d").upper(),
         "endDateLabel": end.strftime("%b %d").upper(),
         "dayLabel": _day_label(now),
@@ -2023,12 +2029,12 @@ def build_daily_results_data(rows, now, es):
     }
 
 
-def render_daily_results_card_html(rows, now, es):
+def render_daily_results_card_html(rows, now, es, gen_at=None):
     """全天整合版 HTML 大图（1920×1080）。出不了返回 None（上层退 880px 旧卡）。"""
     try:
         if not os.path.isfile(DAILY_RESULTS_TEMPLATE_FILE):
             raise HtmlCardError("缺模板 %s" % DAILY_RESULTS_TEMPLATE_FILE)
-        data = build_daily_results_data(rows, now, es)
+        data = build_daily_results_data(rows, now, es, gen_at)
         if data is None:
             raise HtmlCardError("空场次或超过 22 场，版式兜不住")
         with open(DAILY_RESULTS_TEMPLATE_FILE, encoding="utf-8") as f:
@@ -2045,15 +2051,19 @@ def render_daily_results_card_html(rows, now, es):
     return None
 
 
-def render_daily_results_card(rows, now, es):
+def render_daily_results_card(rows, now, es, gen_at=None):
     """**全天整合版**战果卡片。优先 HTML 大图（1920×1080），出不了退 880px
     Pillow 旧卡，再不行返回 None，由上层退回纯文本。
 
     这条是三条流水线里**最后**补上 HTML 层的一条：在它之前，整合版只有
     Pillow 一档，所以用户看到的「昨天的总战果」一直是 880px 老卡。
+    `now` / `gen_at` 的分工见 build_daily_results_data 的说明。
+
+    ⚠️ Pillow 那档**没有**这个区分（它只按 `now` 写「10-05 周一」），所以退回旧卡时
+    页脚不会出现「LAST UPDATED」这一栏 —— 两档的页脚本来就不一样，不是 bug。
     """
     if rows and (es or {}).get("card_html_enabled", True):
-        png = render_daily_results_card_html(rows, now, es)
+        png = render_daily_results_card_html(rows, now, es, gen_at)
         if png:
             return png
     return render_results_card(rows, now, es)
@@ -4018,7 +4028,9 @@ def run_daily(cfg, args):
     card = None
     if es.get("card_enabled", True) and es.get("card_results_enabled", True):
         # 三级降级：HTML 1920×1080 → 880px Pillow 旧卡 → 纯文本。
-        card = render_daily_results_card(shown, label_dt, es)
+        # label_dt 当「赛程日标签」用，真正的生成时刻另传 now —— 否则页脚会把窗口
+        # **起点**（10-05 09:30）当成「最后更新时刻」写出去。
+        card = render_daily_results_card(shown, label_dt, es, gen_at=now)
     body = format_results_caption(rows, label_dt) if card else format_results(rows, label_dt)
     log("[info] 整合版：%d 场，%s"
         % (len(rows), "一行文字 + 一张整合图" if card else "纯文本"))
@@ -5431,9 +5443,24 @@ def selftest():
     t.check("整合版 V2 数据：比分不是「两个数字」→ 用 ? 占位（不画假比分）",
             build_daily_results_data([dict(rdrows[0], score="2:?")], ds, es)
             ["matches"][0]["teamB"]["score"] == "?")
+    t.check("⚑ 整合版 V2 数据：generatedAt 用「实际生成时刻」、dayLabel 用赛程日"
+            "（两者不是一个时间，合一会把窗口起点写成「最后更新」）",
+            build_daily_results_data(
+                rdrows, ds, es,
+                datetime(2026, 10, 6, 9, 40, tzinfo=CST))["generatedAt"] == "09:40"
+            and rdat["generatedAt"] == ds.strftime("%H:%M")
+            and rdat["dayLabel"] == _day_label(ds),
+            rdat["generatedAt"])
+    _src_txt = open(os.path.join(HERE, "esports.py"), encoding="utf-8").read()
     t.check("⚑ run_daily 的卡片入口是 render_daily_results_card（三级降级的头一级）",
-            "render_daily_results_card(shown, label_dt, es)"
-            in open(os.path.join(HERE, "esports.py"), encoding="utf-8").read())
+            "render_daily_results_card(shown, label_dt, es, gen_at=now)"
+            in _src_txt)
+    # ⚠️ 禁用串必须**拼**出来：本自检就写在 esports.py 里，直接写成字面量的话
+    #    它会把自己匹配到（2026-10-06 真踩了 —— 断言因此恒假）。
+    _bad_call = ("render_daily_results_card(shown, label_dt, es, gen_at="
+                 + "label_dt)")
+    t.check("⚑ run_daily 把**真实时刻**（now）传给了 gen_at，不是 label_dt",
+            "gen_at=now)" in _src_txt and _bad_call not in _src_txt)
 
     if find_chrome(es):
         rdpng = render_daily_results_card_html(rdrows, ds, es)
