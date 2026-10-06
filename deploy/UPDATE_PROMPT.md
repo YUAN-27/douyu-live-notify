@@ -94,7 +94,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `cc09f7b5dd2d3695` | 292476 |
+| `esports.py` | `9b6630f61c247b08` | 294527 |
 | `result_template.html`（V2 单场战报模板） | `82638848c4a48a07` | 10494 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
