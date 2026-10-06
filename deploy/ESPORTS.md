@@ -555,7 +555,7 @@ Stake Ranked Episode 4 · Bo3
 `recent` 区块里每场已结束的都有一个，`upcoming` 里正在打的那些**不应该有**：
 
 ```bash
-UA='douyu-live-notify/1.0 (https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com)'
+UA='qq-esports-notify/1.0 (https://github.com/YUAN-27/qq-esports-notify; 1249850641@qq.com)'
 curl -s -A "$UA" 'https://liquipedia.net/counterstrike/api.php?action=parse&page=Liquipedia%3AMatches&prop=text&format=json' \
   | grep -o 'data-finished="finished"' | wc -l
 ```

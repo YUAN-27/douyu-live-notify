@@ -64,7 +64,7 @@ UNICODE_RANGES = [
 
 FONT_URL = ("https://raw.githubusercontent.com/notofonts/noto-cjk/main/"
             "Sans/SubsetOTF/SC/NotoSansSC-Regular.otf")
-UA = "douyu-live-notify/make_card_font (+https://github.com/YUAN-27/douyu-live-notify)"
+UA = "qq-esports-notify/make_card_font (+https://github.com/YUAN-27/qq-esports-notify)"
 
 
 def main():

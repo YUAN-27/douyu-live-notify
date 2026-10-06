@@ -1,4 +1,4 @@
-# NapCatQQ —— 只为 douyu-live-notify 服务的 OneBot 实现
+# NapCatQQ —— 只为 qq-esports-notify 服务的 OneBot 实现
 #
 # ⚠️ 安全红线（务必照抄，不要改成 0.0.0.0）
 #   1. 端口只发布到 127.0.0.1 —— 公网访问不到。就算云安全组配错了也炸不出去。

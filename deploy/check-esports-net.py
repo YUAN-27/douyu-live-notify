@@ -45,8 +45,8 @@ from datetime import datetime, timezone, timedelta
 CST = timezone(timedelta(hours=8))
 
 # User-Agent 里必须带项目名 + 联系方式（Liquipedia 的条款要求）
-UA = ("douyu-live-notify/1.0 "
-      "(+https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com)")
+UA = ("qq-esports-notify/1.0 "
+      "(+https://github.com/YUAN-27/qq-esports-notify; 1249850641@qq.com)")
 
 TIMEOUT = 25
 MATCH_LIMIT_SHOWN = 6          # 样例里最多打印几场

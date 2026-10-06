@@ -410,7 +410,7 @@ ESPORT_DEFAULTS = {
     # 总开关。关掉后本脚本立刻退出，systemd 那边不会当成失败。
     "enabled": True,
     # Liquipedia 要求在 User-Agent 里写联系方式，格式：项目地址 + 邮箱。
-    "ua_contact": "https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com",
+    "ua_contact": "https://github.com/YUAN-27/qq-esports-notify; 1249850641@qq.com",
     "major_keywords": DEFAULT_MAJOR_KEYWORDS,
     "cn_teams": DEFAULT_CN_TEAMS,
     "notable_teams": DEFAULT_NOTABLE_TEAMS,
@@ -514,7 +514,7 @@ def build_url():
 
 def build_ua(es):
     contact = str(es.get("ua_contact") or "").strip()
-    return "douyu-live-notify/%s (+%s)" % (VERSION, contact or "contact-not-set")
+    return "qq-esports-notify/%s (+%s)" % (VERSION, contact or "contact-not-set")
 
 
 def fetch_once(url, ua, timeout=25, accept="application/json"):
@@ -5499,7 +5499,7 @@ def selftest():
     t.check("解析空配置不炸", resolve_config({})["fold_hint"] == 15)
 
     ua = build_ua({"ua_contact": "me@example.com"})
-    t.check("UA 含项目名与联系方式", "douyu-live-notify" in ua and "me@example.com" in ua)
+    t.check("UA 含项目名与联系方式", "qq-esports-notify" in ua and "me@example.com" in ua)
     t.check("UA 缺失联系方式时有兜底", "contact-not-set" in build_ua({}))
     t.check("请求地址只用 api.php，不抓渲染页面",
             LIQUIPEDIA_API.endswith("/api.php") and "action=parse" in build_url())

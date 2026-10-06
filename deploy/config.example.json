@@ -50,7 +50,7 @@
   "_comment_esports_announce": "announce_enabled / announce_lead_minutes：**开赛提醒**（esports.py --announce，由 douyu-esports-announce.timer 每分钟拉起）。比赛快开打时发一张 Match Preview 大图（1920×1080，模板 preview_template.html）。这一轮**零网络请求** —— 开赛时刻不抓页面，是从同赛事前一场的结果**串场级联估算**的（内置 Bo1 80 / Bo3 140 / Bo5 240 分钟 + 中场 30 分钟，只沿同赛事串，不跨赛事传染），估算有 ±误差所以文案写「约 N 分钟后」。提前量由 announce_lead_minutes 控制（默认 5 分钟）：「估算开赛时刻 ≤ 现在+5 分钟」且未提醒过才发；估算漂移超过 10 分钟会补发一次「时间有调整」（每场最多 1 次）；已开打的不再提醒。提醒锁在 state_esports_announce.json（key=队名+开打时刻），同一场只发一次。⚠️ 前提同战果：douyu-esports.timer 必须在跑（预告写清单，提醒才有料）；announce_enabled=false 可整条关掉（timer 照样每分钟空跑一拍，零请求零消息）。",
   "esports": {
     "enabled": true,
-    "ua_contact": "https://github.com/YUAN-27/douyu-live-notify; 1249850641@qq.com",
+    "ua_contact": "https://github.com/YUAN-27/qq-esports-notify; 1249850641@qq.com",
     "major_keywords": [
       "BLAST", "IEM", "ESL Pro League", "Major", "PGL", "Perfect World",
       "Esports World Cup", "DreamHack", "ESL One", "CCT", "ESL Challenger",

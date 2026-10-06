@@ -193,7 +193,7 @@ fi
 #
 # 如果网页仍然被挤：可以往上调到 80~100（更积极地换出匿名页）。
 cat > "$SYSCTL_CONF" <<'EOF'
-# 由 add-swap.sh 写入。配合 douyu-live-notify 的小内存部署场景。
+# 由 add-swap.sh 写入。配合 qq-esports-notify 的小内存部署场景。
 # 说明见脚本内注释：这里刻意不用常见的 10，因为我们要主动换出空闲的 NapCat，
 # 把物理内存留给同机的个人网页。
 vm.swappiness = 60

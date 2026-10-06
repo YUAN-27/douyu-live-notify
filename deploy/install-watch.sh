@@ -47,7 +47,7 @@ if [[ -z "$PY_DIR" ]]; then
   用部署包的话，解开 deploy.zip 后它们本来就在同一层，直接
       cd deploy && sudo bash install-watch.sh
   从 GitHub 直接 clone 的仓库，请进 deploy/ 再跑：
-      cd douyu-live-notify/deploy && sudo bash install-watch.sh
+      cd qq-esports-notify/deploy && sudo bash install-watch.sh
 
 已经找过这些目录，都没有：
       $HERE
