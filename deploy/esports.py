@@ -4066,18 +4066,22 @@ def backfill_abandoned(items, start, end, es, dry=False):
         log("[info] 补漏：页面上这 %d 场仍没有结果，确认是延期/取消，整合版不列它们"
             % len(lost))
         return 0
-    stamp = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    now2 = datetime.now(CST)
+    stamp = now2.strftime("%Y-%m-%d %H:%M:%S")
     for row in rows:
         absorb_result(row["item"], row, stamp)
         row["item"]["backfilled"] = True     # 留痕：这条不是实时战报报过的
     if dry:
-        log("[check] 补漏（演练）：%d 场已改判为已结算，**只改内存未落盘**"
+        # 演练：图上是补齐后的（便于验收），但清单文件一个字节都不动。
+        log("[check] 补漏（演练）：%d 场会改判为已结算并补进整合版，**只改内存未落盘**"
             % len(rows))
     else:
-        save_results_pending(_prune_pending({"items": items}, datetime.now(CST), es))
-    log("[sent] 补漏：%d 场从「延期/取消」改判为已结算，已补进整合版：%s"
-        % (len(rows), "、".join("%s %s" % (" vs ".join(row["teams"][:2]), row["score"])
-                              for row in rows)))
+        save_results_pending(_prune_pending({"items": items}, now2, es))
+        # 注意用 [info] 而不是 [sent] —— 补漏**不往外发消息**，
+        # 它只是把场次补进下面那条整合版汇总里。
+        log("[info] 补漏：%d 场从「延期/取消」改判为已结算，将补进这次的整合版：%s"
+            % (len(rows), "、".join("%s %s" % (" vs ".join(row["teams"][:2]), row["score"])
+                                   for row in rows)))
     if still:
         log("[info] 补漏：另外 %d 场页面上确实没有结果：%s"
             % (len(still), _pairs_label(still)))
@@ -5612,13 +5616,21 @@ def selftest():
                  + "label_dt)")
     t.check("⚑ run_daily 把**真实时刻**（now）传给了 gen_at，不是 label_dt",
             "gen_at=now)" in _src_txt and _bad_call not in _src_txt)
+    # ⚠️ 下面这几个 needle 都必须**拼**出来：本自检就写在 esports.py 里，
+    #    整串写出来的话 needle 会把自己匹配到 —— 正向 `in` 变成恒真、
+    #    反向 `not in` 变成恒假（2026-10-06 已踩三次，见文件里另外两处注解）。
+    _bf_call = ("backfill_abandoned(data[\"items\"], start, end, es, "
+                "dry=check)")
     t.check("⚑ run_daily 出汇总前先跑一次补漏（否则被判延期的场次永远补不回来，"
-            "2026-10-05 就是这么少了 2 场）",
-            "backfill_abandoned(data[\"items\"], start, end, es, dry=check)" in _src_txt)
-    # 演练（--check-daily）必须走 dry=True：图要预览对，但清单文件一个字节都不能动。
+            "2026-10-05 就是这么少了 2 场）", _bf_call in _src_txt)
+    _bf_def = ("def backfill_abandoned(items, start, end, es, "
+               "dry=False)")
     t.check("⚑ --check-daily 的补漏只改内存：dry=check → 演练时不落盘",
-            "dry=check" in _src_txt and "def backfill_abandoned(items, start, end, es, "
-            "dry=False)" in _src_txt)
+            _bf_def in _src_txt and _bf_call in _src_txt)
+    # 补漏不往外发消息，日志里就不能出现 [sent] —— 否则排查时会被当成「已经发出去了」。
+    _bad_sent = "[sent]" + " 补漏"
+    t.check("⚑ 补漏的日志不许标 [sent]（它只改清单，真正发出去的是那条整合版汇总）",
+            _bad_sent not in _src_txt)
 
     if find_chrome(es):
         rdpng = render_daily_results_card_html(rdrows, ds, es)
