@@ -19,6 +19,15 @@
 > ⚠️ **本次改动了消息版式**（胜方绿名 / 负方红名、单场战报带逐图比分、新增每日整合版），
 > 并且**改了配置键默认值**（`results_max_age_hours` 24→36）。服务器上的 `config.json`
 > 如果显式写过这一项，要一起改，否则整合版会缺场次。
+>
+> ⚠️ **最新一次的包还要多做一件事**：全天整合版**第一次**拿到了 1920×1080 的
+> HTML 大图（模板 `daily_results_template.html` 是新增文件）。这次更新**必须把
+> `esports.py` 和 `daily_results_template.html` 一起装上去** —— 只更新脚本不装模板，
+> 整合版会安静退回 880×650 的 Pillow 旧卡（功能正常、版式没变），
+> 正是用户这次报的那个问题。装完可以这样验：
+> `python3 esports.py --check-daily` 看日志里有没有
+> `[info] 整合版战果大图（HTML 1920×1080）`；如果是
+> `[info] HTML 整合版战果出不了（缺模板 …）` 就说明模板没装上。
 
 ---
 
@@ -33,6 +42,8 @@
 | **（本次）** | **战果改成两条通道 + 队名按胜负上色** | ① **每场一条**「单场战报」（胜方绿名 / 负方红名，卡片里逐图一行，比分按该图胜负上色）；② 新增 `douyu-esports-daily.{service,timer}`，**次日 09:40** 发上一个赛程日的**全天整合版**（一场一行、不带逐图，**不联网**）。逐图比分来自 Liquipedia **赛事页**（页面路径是链接里自带的，不用维护别名表），抓不到就少画几行、不影响发送。**⚠️ 卡片字体多带了「地」「报」两个字，`card_font.otf` 必须一起更新**，否则卡片会静默退回纯文本 |
 | `e3788b3` | **单场战报带逐图选手数据**（csdb.gg）+ 卡片重排版 | 战报卡片下部多两列 5v5 选手数据（K-D/ADR/KAST/Rating，取自 csdb.gg 单场页）；拿不到选手数据时自动少画，不影响发送。新增配置键 `card_players_enabled`（默认开）/ `card_players_per_team`（默认 3） |
 | `4f24807` | 队标优先取 **darkmode** 变体 | 亮/暗双图队伍（Vitality/G2/NAVI/Spirit…）在深色卡片上恢复彩色版（Vitality 黑蜜蜂→黄蜜蜂）；单图队伍不受影响 |
+| `b2527f8` / `b9f237a` | 仓库改名为 `qq-esports-notify`；README 定位改为「QQ 群赛事推送」主线 | **只是仓库名与文案**，服务器安装路径 `/opt/douyu-live-notify` **不动**（unit 文件里全是这个路径）；模板与 UA 里的署名换成新名 |
+| **（本次）** `4bdb153` | **全天整合版补上 V2 大图** | 之前**只有这一条流水线没有 HTML 层**，群里收到的「昨天的总战果」一直是 880×650 的 Pillow 旧卡（用户 2026-10-06 反馈「还不是 v2 版」）。现在补齐：**新增 1 个文件 `daily_results_template.html`**，整合版出 1920×1080 深色大图（胜方绿底 chip / 跨午夜标「次日」），并和其余三条一样走三级降级 HTML → 880px Pillow → 纯文本。**这个模板不装包 = 整合版继续发旧卡**，所以 `install-watch.sh` 和打包脚本的必需清单都加了它 |
 | **（本次）** | **卡片全部换成 V2 大图（1920×1080 HTML 渲染）** | 战报卡和总预告卡变成用户拍板的深色大图版式。**新增 5 个文件**：`result_template.html`、`daily_template.html`、`fonts/`（3 个 ttf）。渲染优先走 Chromium 截图，没装 Chromium / 渲染失败**自动退回 880px 旧卡**，再不行退纯文本 —— 消息永远照发。**服务器要装浏览器 + 中文字体**（见第 2.5 步），不装就一直是旧 880px 卡 |
 | **（本次）** | **新增开赛提醒（STARTING SOON）** | 比赛快开打时推一张 Match Preview 大图（1920×1080）。**新增 3 个文件**：`preview_template.html`、`douyu-esports-announce.{service,timer}`（只装不启用）。**零网络请求** —— 开赛时刻是同赛事前一场结果串场级联估算的（Bo1 80 / Bo3 140 / Bo5 240 分钟 + 中场 30 分钟），timer 每分钟看一眼清单，估算时刻落入未来 5 分钟窗口且没提醒过才发；提醒锁在 `state_esports_announce.json`，同一场只发一次，估算漂移超 10 分钟补发一次「时间有调整」。前提：`douyu-esports.timer` 在跑（预告写清单，提醒才有料） |
 
@@ -69,8 +80,10 @@
 ```bash
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
-sha256sum watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html card_font.otf make_card_font.py fonts/*.ttf | cut -c1-16
-wc -c watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html card_font.otf make_card_font.py fonts/*.ttf
+sha256sum watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html \
+  daily_results_template.html preview_template.html card_font.otf make_card_font.py fonts/*.ttf | cut -c1-16
+wc -c watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html \
+  daily_results_template.html preview_template.html card_font.otf make_card_font.py fonts/*.ttf
 sha256sum ../deploy.zip | cut -c1-16
 ```
 
@@ -81,17 +94,29 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `ad142bcd05d58df7` | 28399 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `372dc1a24b184170` | 284100 |
-| `result_template.html`（V2 战报模板） | `eb38facb61241cb1` | 10494 |
-| `daily_template.html`（V2 总预告模板） | `716330d08df4242e` | 8784 |
+| `esports.py` | `cc09f7b5dd2d3695` | 292476 |
+| `result_template.html`（V2 单场战报模板） | `82638848c4a48a07` | 10494 |
+| `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
+| `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
-| `make_card_font.py`（生成字体的脚本） | `f93d2269ef85a165` | 5403 |
+| `make_card_font.py`（生成字体的脚本） | `b692eada86ff9cf1` | 5403 |
 
-`deploy.zip` 整包：`c32b904896c01380`（492.9 KB，47 个文件）。本版新增**开赛提醒**（`--announce`：Match Preview 大图 + 串场级联估算 + 提醒锁，零网络请求；新增 `preview_template.html` 和 announce 两单元）；上一版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、find_chrome 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选、总预告 HTML 上限 30→22 场、生僻字断言按 V2 行为拆分、自检含真渲染 PNG 实际尺寸校验。
+本版（`4bdb153`）新增 **V2 全天整合版模板** `daily_results_template.html`，并同步
+`esports.py`（新增 `build_daily_results_data` / `render_daily_results_card_html` /
+`render_daily_results_card`，`run_daily` 改走三级降级）与 `result_template.html` /
+`daily_template.html`（署名随仓库改名）。**上一版**是开赛提醒（`--announce`）；
+再上一版修复：模板字体 URI 双 `file:///` 前缀（曾致随包字体静默失效）、
+`find_chrome` 补 `/snap/bin` 与 `/usr/bin` 绝对路径候选、总预告 HTML 上限 30→22 场、
+生僻字断言按 V2 行为拆分、自检含真渲染 PNG 实际尺寸校验。
+
+> **整包指纹故意不写死**：`deploy.zip` 里**包含本文件**，改一次就变一次，
+> 写在这里必然对不上。要确认两台机器拿到的是同一个包，
+> 直接在两边各跑一次 `sha256sum deploy.zip` 对比即可。
+> 判断「是不是新版」请看上面的**逐文件指纹**（那些是稳定的）。
 
 **任何一项不符 → 立刻停下**，把实际输出发回来，不要继续装。
 （字体对不上不致命 —— 卡片会自动退回纯文本，但那就白改这一版了。）
