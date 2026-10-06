@@ -259,11 +259,14 @@ python3 watchdog.py --selftest; echo "退出码=$?"
 python3 esports.py --selftest; echo "退出码=$?"
 ```
 
-- `selftest.py`：这一版在**仓库/包目录**里跑是 **100 项**，**期望 0 项失败**、退出码 0。
-  ⚠️ 在**装好的机器上**（`/opt/douyu-live-notify`，没有 `deploy/` 子目录）项数会**少 8 项**：
-  其中有 3 条查定时器时区、5 条查 `.gitignore` / `pack_deploy.py`（这两个文件只在仓库里），
-  它们会打 `[skip]` 说明并**跳过**，不报红。所以「项数不是 100」本身不代表有问题 ——
-  要看的仍然是 **0 项失败**。（要跑满 100 项就在解开 `deploy.zip` 的目录里跑。）
+- `selftest.py`：**期望 0 项失败**、退出码 0。项数取决于跑在哪儿（**两种都对**）：
+  - **装好的机器 / 解开 deploy.zip 的目录**（`/opt/douyu-live-notify`，
+    没有 `deploy/` 子目录）→ **92 项**；
+  - **git 仓库根目录**（`selftest.py` 与 `deploy/` 同级）→ **100 项**。
+  差的 8 项查的是仓库里才有的东西：3 条扫 `deploy/*.timer` 验证时区、
+  5 条查 `.gitignore` 与 `pack_deploy.py`。在装好的机器上它们**无对象可查**，
+  会打 `[skip]` 并写明原因（**这是本版新加的**：这 8 条以前是无条件执行的，
+  在服务器上必然报红 —— 你可能会在旧日志里看到那种 FAIL，别看错）。
 - `watchdog.py --selftest`：**期望 0 项失败**（项数随版本变，不用数）。
 - `esports.py --selftest`：**期望 0 项失败**、退出码 0。它**不联网**（队标断言用本地
   fixture），跑得很快。**项数会随环境浮动，都是正常的**：
