@@ -3781,6 +3781,9 @@ CITO_TEAM_ALIASES = {
     "natus vincere junior": "NAVI Junior",
     "rebels gaming": "RBLS",
     "whitebit team": "WBT",
+    # 2026-10-09 上线首日实测补的一条：Liquipedia 写 `1w Team`，Cito/HLTV 写 `1win`。
+    # 变体集合求交下 `1w` 与 `1win` 不交 → 整场拿不到选段（线上日志实锤）。
+    "1w team": "1win",
 }
 
 # ⚠️ 前缀与后缀必须**组合**剥离：`FC Famalicão Esports` 要**同时**去掉 `fc ` 和
@@ -7044,13 +7047,19 @@ def selftest():
                  & cito_name_variants("Spirit", _rev))
             and bool(cito_name_variants("FaZe Clan", _rev)
                      & cito_name_variants("FaZe", _rev)))
-    t.check("Cito：无法机械推导的别名表生效（3 条）",
+    t.check("Cito：无法机械推导的别名表生效（4 条）",
             bool(cito_name_variants("Natus Vincere Junior", _rev)
                  & cito_name_variants("NAVI Junior", _rev))
             and bool(cito_name_variants("Rebels Gaming", _rev)
                      & cito_name_variants("RBLS", _rev))
             and bool(cito_name_variants("WhiteBIT Team", _rev)
-                     & cito_name_variants("WBT", _rev)))
+                     & cito_name_variants("WBT", _rev))
+            and bool(cito_name_variants("1w Team", _rev)
+                     & cito_name_variants("1win", _rev)))
+    # 上线首日线上实锤：Liquipedia `1w Team` 对 Cito `1win`，整场拿不到选段。
+    t.check("Cito：1w Team ↔ 1win 整对能配上（2026-10-09 线上漏配）",
+            cito_pair_match(["1w Team", "Aurora Gaming"],
+                            ["1win", "Aurora"], _rev) is True)
     # 这条是「为什么不能用 _team_same（子串包含）」的证据：主队与青训队**绝不许**互配。
     t.check("Cito：NAVI 与 NAVI Junior 不算同一队（子串判据会张冠李戴）",
             not (cito_name_variants("NAVI", _rev)

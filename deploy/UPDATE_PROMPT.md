@@ -99,7 +99,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `dbdd8e573740799f` | 405531 |
+| `esports.py` | `9d5fb033d8413e53` | 406175 |
 | `result_template.html`（V2 单场战报模板） | `b6e87d77330ba710` | 10493 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
@@ -303,11 +303,11 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **468** |
-  | 少了 `make_card_font.py` | 466（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **469** |
+  | 少了 `make_card_font.py` | 467（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
-  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **465**（少 3 条，打 `[skip]`） |
+  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **466**（少 3 条，打 `[skip]`） |
 
   ⚠️ 最后那一行是新加的：`config.example.json` 和 `douyu-esports-daily.service`
   只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。

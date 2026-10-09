@@ -1,6 +1,6 @@
 # 选手段数据源 · Cito API 接入设计
 
-> **状态：设计已验证（2026-10-09）—— 匹配率实测通过（15/15 = 100%），可以实施，尚未写代码。**
+> **状态：已实施并部署（2026-10-09）—— 匹配率实测 15/15 = 100%；代码已落地，`cito_enabled` 默认 `false`（服务器上已显式开启）。**
 > 本文回答「为什么选 Cito、怎么接、哪里会翻车」，末尾是照做清单与回滚步骤。
 > 单场战报的版式与三级降级见 `deploy/ESPORTS.md` §3.2；原 csdb.gg 抓取层已于
 > 同日（2026-10-09）整体拆除，展示层原地保留（见 `ESPORTS.md` §9 的数据源复核表）。
@@ -198,7 +198,9 @@ cs2-match-2399375  endsAt=2026-10-09T08:42:49Z  stats.lastSyncedAt=2026-10-09T08
    如 `Team Spirit` → `Spirit`、`FaZe Clan` → `FaZe`、`Sangal Esports` → `Sangal`。
    （其实 1+2 已能覆盖大部分，反向别名是双保险。）
 4. **少量 Cito 专属别名**（无法机械推导，只能列出来）：
-   `Natus Vincere Junior` → `NAVI Junior`；`Rebels Gaming` → `RBLS`；`WhiteBIT Team` → `WBT`。
+   `Natus Vincere Junior` → `NAVI Junior`；`Rebels Gaming` → `RBLS`；`WhiteBIT Team` → `WBT`；
+   `1w Team` → `1win`（**上线首日实测补的**：Liquipedia 写 `1w Team`、Cito 写 `1win`，
+   变体集合求交下 `1w` 与 `1win` 不交 → 整场拿不到选段，线上日志实锤）。
    这张表与 `hltv_aliases` 同性质，**规模小、只在「上镜」的队上维护**。
 
 **判据**（三条同时成立）：
@@ -354,7 +356,7 @@ rows_b = [r for r in prows if _team_same(r["team"], teams[1])]
 
 ## 9. 自检清单（离线，绝不联网）
 
-- [ ] **队名归一**：组合剥离（`FC Famalicão Esports` ↔ `Famalicão`）/ 音标 / 反向 `hltv_aliases` / 3 条 Cito 别名
+- [ ] **队名归一**：组合剥离（`FC Famalicão Esports` ↔ `Famalicão`）/ 音标 / 反向 `hltv_aliases` / 4 条 Cito 别名
 - [ ] **匹配判据**：同名对命中 / **顺序无关** / 时间超容差不命中 / 多义取最近 / **`NAVI` 不匹配 `NAVI Junior`**
 - [ ] **`mapId` → 图名**：`-map-N` 对 `mapNumber`；**未打的图被过滤掉**
 - [ ] **`kast` ×100**（`0.652` → `65.2`）
@@ -392,7 +394,7 @@ rows_b = [r for r in prows if _team_same(r["team"], teams[1])]
 |---|---|---|---|
 | 1 | ~~真实匹配率~~ | — | ✅ 已验 100%（§4.1） |
 | 2 | **Bo5 是否给满 50 行** | 样本里没有 Bo5 打完的场次 | 上线后看日志；按 §2.3 推断 = 10 × 已打图数 |
-| 3 | 队名别名表的**全量**覆盖率 | 只覆盖近 40h 的 15 场 | 上线后按 `[info]` 漏配日志逐步补表 |
+| 3 | 队名别名表的**全量**覆盖率 | 只覆盖近 40h 的 15 场 | 上线后按 `[info]` 漏配日志逐步补表。**首日就补了 1 条**：`1w Team` → `1win`（线上实锤） |
 | 4 | 免费额度的真实消耗曲线 | 只估了量级（~200/月） | 上线后看 Cito dashboard 用量 |
 | 5 | `search?q=` 对中文/变音队名的召回 | 只试了 5 个队 | 只在兜底路径用，失败即降级，不阻塞 |
 
