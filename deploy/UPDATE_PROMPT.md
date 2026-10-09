@@ -40,12 +40,13 @@
 | `e87d6f9` / `721dad6` | 占位块改用页面短名；文档同步 | 队标拿不到时，灰块里显示的是页面自带的短名（如 `Spirit`），不再是三个 `TE` |
 | `08cbb23`（上一次） | 新增**战果公布**：预告过的比赛打完后补一条比分 | 预告后还会收到战果消息；**新增两个单元** `douyu-esports-results.{service,timer}`（只装不启用）。零新增数据源 —— 还是那一个页面、同一份解析器 |
 | **（本次）** | **战果改成两条通道 + 队名按胜负上色** | ① **每场一条**「单场战报」（胜方绿名 / 负方红名，卡片里逐图一行，比分按该图胜负上色）；② 新增 `douyu-esports-daily.{service,timer}`，**次日 09:40** 发上一个赛程日的**全天整合版**（一场一行、不带逐图，**不联网**）。逐图比分来自 Liquipedia **赛事页**（页面路径是链接里自带的，不用维护别名表），抓不到就少画几行、不影响发送。**⚠️ 卡片字体多带了「地」「报」两个字，`card_font.otf` 必须一起更新**，否则卡片会静默退回纯文本 |
-| `e3788b3` | **单场战报带逐图选手数据**（csdb.gg）+ 卡片重排版 | 战报卡片下部多两列 5v5 选手数据（K-D/ADR/KAST/Rating，取自 csdb.gg 单场页）；拿不到选手数据时自动少画，不影响发送。新增配置键 `card_players_enabled`（默认开）/ `card_players_per_team`（默认 3） |
+| `e3788b3` | **单场战报带逐图选手数据**（csdb.gg）+ 卡片重排版 | 战报卡片下部多两列 5v5 选手数据（K-D/ADR/KAST/Rating，取自 csdb.gg 单场页）；拿不到选手数据时自动少画，不影响发送。新增配置键 `card_players_enabled`（默认开）/ `card_players_per_team`（默认 3）。**⚠️ 该数据源 2026-10-09 失效、抓取层已拆出（见下一行）** |
 | `4f24807` | 队标优先取 **darkmode** 变体 | 亮/暗双图队伍（Vitality/G2/NAVI/Spirit…）在深色卡片上恢复彩色版（Vitality 黑蜜蜂→黄蜜蜂）；单图队伍不受影响 |
 | `b2527f8` / `b9f237a` | 仓库改名为 `qq-esports-notify`；README 定位改为「QQ 群赛事推送」主线 | **只是仓库名与文案**，服务器安装路径 `/opt/douyu-live-notify` **不动**（unit 文件里全是这个路径）；模板与 UA 里的署名换成新名 |
 | **（本次）** `4bdb153` | **全天整合版补上 V2 大图** | 之前**只有这一条流水线没有 HTML 层**，群里收到的「昨天的总战果」一直是 880×650 的 Pillow 旧卡（用户 2026-10-06 反馈「还不是 v2 版」）。现在补齐：**新增 1 个文件 `daily_results_template.html`**，整合版出 1920×1080 深色大图（胜方绿底 chip / 跨午夜标「次日」），并和其余三条一样走三级降级 HTML → 880px Pillow → 纯文本。**这个模板不装包 = 整合版继续发旧卡**，所以 `install-watch.sh` 和打包脚本的必需清单都加了它 |
 | **（本次）** | **卡片全部换成 V2 大图（1920×1080 HTML 渲染）** | 战报卡和总预告卡变成用户拍板的深色大图版式。**新增 5 个文件**：`result_template.html`、`daily_template.html`、`fonts/`（3 个 ttf）。渲染优先走 Chromium 截图，没装 Chromium / 渲染失败**自动退回 880px 旧卡**，再不行退纯文本 —— 消息永远照发。**服务器要装浏览器 + 中文字体**（见第 2.5 步），不装就一直是旧 880px 卡 |
 | **（本次）** | **新增开赛提醒（STARTING SOON）** | 比赛快开打时推一张 Match Preview 大图（1920×1080）。**新增 3 个文件**：`preview_template.html`、`douyu-esports-announce.{service,timer}`（只装不启用）。**零网络请求** —— 开赛时刻是同赛事前一场结果串场级联估算的（Bo1 80 / Bo3 140 / Bo5 240 分钟 + 中场 30 分钟），timer 每分钟看一眼清单，估算时刻落入未来 5 分钟窗口且没提醒过才发；提醒锁在 `state_esports_announce.json`，同一场只发一次，估算漂移超 10 分钟补发一次「时间有调整」。前提：`douyu-esports.timer` 在跑（预告写清单，提醒才有料） |
+| **（本次）** `d069699` 之后的清理 | **拆出选手数据抓取层**（csdb.gg 已失效） | csdb.gg 改成 Next.js 客户端渲染后，原 `fetch_csdb` / `parse_csdb_matches` / `locate_csdb_match` / `parse_csdb_players` / `attach_players` 五个函数 + `CSDB_*` 常量 + `--results` 里的抓取调用点**全部删除**。**展示层原地保留**：`result_template.html` 选段、`build_result_match()` 的 `players`/`mvp` 字段、`_aggregate_players()`、`_draw_player_block()`、`_team_same()` —— 将来接上新数据源只需把逐图选手数据填进 `row["players"]`，模板一行不改。模板页脚把「Liquipedia · csdb.gg」改回「Liquipedia」。配置键 `card_players_enabled` 暂**无消费者**（保留备用）、`card_players_per_team` 展示层仍读。**行为变化：单场战报不再有选段（此前也基本抓不到，等于把空转拆掉），其余一切照旧、零新增网络请求** |
 
 下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 

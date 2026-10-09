@@ -193,27 +193,30 @@ VERSION = "1.0.0"
 LIQUIPEDIA_API = "https://liquipedia.net/counterstrike/api.php"
 
 # --------------------------------------------------------------------------
-# 选手数据源（csdb.gg，可选能力）
+# 选手数据（展示层保留，抓取层已拆出）
 # --------------------------------------------------------------------------
-# Liquipedia **没有**选手数据（rating / ADR / KAST / K-D）。逐图比分能从它自己的
-# 赛事页拿到，但「选手打得怎么样」它一概不记（2026-10-05 用真实页名验过 4 个赛事页，
-# MVP/Rating/ADR/KAST 全零命中）。
+# 单场战报 V2 有**选手段**（K-D / ADR / KAST / Rating，含 MVP），这一段是纯渲染
+# 能力：模板 `result_template.html`、`build_result_match()` 的 `players` / `mvp`
+# 字段、`_aggregate_players()` 聚合、`_draw_player_block()` 的 Pillow 版式。
 #
-# csdb.gg 有逐场逐图逐人的选手数据（服务端渲染，普通 urllib 就能拿），数据由
-# PandaScore 供。定位方式：它的 `/matches/` 列表页按日期列出最近约 2 天的所有比赛，
-# 一线队（NAVI/FURIA/Vitality…）也在里面，每条带一个 `/match/<日期>-<uuid>/` 或
-# `/match/<队名-slug>-<日期>/` 链接。因为我们的战果结算窗口 ≤ 3 小时，比赛打完时
-# 一定还在这个「最近 2 天」范围内 —— 所以**按「队名 + 日期」在列表页里匹配**即可
-# 定位到单场页，**不需要维护「Liquipedia 赛事 → csdb 赛事」的映射表**。
+# ⚠️ **当前没有可用的数据源**（2026-10-09 拆掉了最后一条抓取链路）：
+#   · Liquipedia **不存**选手数据 —— 逐图比分能从它自己的赛事页拿到，但
+#     「选手打得怎么样」它一概不记（2026-10-05 用真实页名验过 4 个赛事页，
+#     MVP/Rating/ADR/KAST 全零命中）。
+#   · csdb.gg **已失效** —— 原实现（`fetch_csdb` / `parse_csdb_players` 等）在
+#     2026-10-09 实测发现它改成 Next.js 客户端渲染：单场页只剩约 60 KB 骨架，
+#     `Player K D A` / `Rating` 零命中，RSC payload 里也没有数据，解析器实跑
+#     返回 0 张图。它的 `/api/` 被 robots.txt 禁止；探测中还吃到 429。
+#   · HLTV（rating 的唯一权威来源）**全站 403**（Cloudflare），任何 UA 都过不去。
+#   · PandaScore 官方 API 免费档（Fixtures Only，1000 req/hr）**不含选手统计**，
+#     要 K/D + Rating 必须上 Historical 档（400€/月/每个游戏）—— 2026-10-09 评估后
+#     放弃。
 #
-# ⚠️ robots.txt：`Allow: /` 但 `Disallow: /api/`、`Disallow: /stats/match/`。
-#     所以我们只抓 `/matches/` 列表页和 `/match/` 详情页，**不碰它的 API**。
-CSDB_BASE = "https://csdb.gg"
-CSDB_MATCHES_URL = CSDB_BASE + "/matches/"
-# 抓 csdb 要用**浏览器 UA**（实测桌面 UA 才能过它的 Vercel WAF；Liquipedia 那套
-# 「项目名 + 联系方式」的 UA 对它反而可能被拦）。别复用 build_ua()。
-CSDB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+# 所以现在：**渲染层原地保留当接口，抓取层为空**。战果行上不会有 `players` 键，
+# `build_result_match()` 就返回空选段、模板自动走「居中无统计」形态 —— 这是刻意
+# 设计好的降级路径，不是故障。将来若接上可用数据源，只需新写一个「把逐图选手数据
+# 填进 `row["players"]`」的函数（结构见 `_aggregate_players()` 的 docstring），
+# 展示层一行都不用动。
 
 # --------------------------------------------------------------------------
 # 图片卡片（可选能力）
@@ -483,12 +486,14 @@ ESPORT_DEFAULTS = {
     # 带上它就要多抓一次「赛事页」（parse_event_maps），代价见 ESPORTS.md §3.2；
     # 关掉 / 抓不到 → 卡片自动只画对阵行，不会因此不发。
     "card_results_maps_enabled": True,
-    # 单场战报里要不要带**选手数据**（rating / ADR / KAST / K-D，来自 csdb.gg）。
-    # 带上它要额外抓 csdb 的 `/matches/` 列表页 + 每场的 `/match/` 详情页，
-    # 是**第二个数据源**、每次结算要多 2 类请求。抓不到 / 定位失败 → 只是卡片
-    # 少一段选手段，**绝不影响发送**。
+    # ⚠️ 单场战报的**选手段**（rating / ADR / KAST / K-D）**当前无可用数据源**，
+    # 见文件顶部「选手数据」注释块。渲染层原地保留，但抓取层已拆掉 —— 所以这个
+    # 键现在**没有消费者**，战果行上永远不会有 `players` 键，卡片会自动走
+    # 「居中无统计」形态。留着它是为了将来接上新源时按原语义（开关选手段）复用，
+    # 届时 `attach_players()` 的等价实现读这个键即可。
     "card_players_enabled": True,
     # 每张图、每队最多列几名选手（按 rating 降序）。5 = 全队都列。
+    # 展示层仍在读它（`_render_result_card_inner`）；数据源缺失时自然无效果。
     "card_players_per_team": 3,
     # ---- 全天整合版 ----
     # 「每场一条」发完之后，再在次日早上补一条**当天全部战果**的汇总。
@@ -1934,7 +1939,20 @@ def _html_logo(url, es, budget):
 
 
 def _aggregate_players(row):
-    """把 csdb 的逐图选手数据聚成整场：K/D 累加，ADR/KAST/Rating 取平均。
+    """把「逐图选手原始结构」聚成整场：K/D 累加，ADR/KAST/Rating 取平均。
+
+    ⚠️ 这是**展示层**的转换器，输入契约是 `row["players"]` 的形状（将来接新数据源
+    时按这个填即可）：
+
+        row["players"] = [
+            {"map": "Dust2", "players": [
+                {"name": "makazze", "team": "NAVI", "k": 23, "d": 15, "a": 6,
+                 "pm": 8, "adr": 104.6, "kast": 78, "rating": 1.96}, …]},
+            …  # 每张图一项；players 为空列表的图会被跳过
+        ]
+
+    `pm`（正负差）可缺省，聚合后不用；`k`/`d` 缺省按 0、`adr`/`kast`/`rating`
+    缺省按 0 处理，所以结构不全也不会炸。
 
     返回 (按 rating 降序的行, 有数据的图数)。只聚合真有数据的图，
     绝不复制填充 —— 和「不伪造数据」的总原则一致。
@@ -1983,7 +2001,7 @@ def build_result_match(row, es):
                      "name": m.get("map") or "Map %d" % (i + 1),
                      "teamA": x, "teamB": y})
     prows, n_maps = _aggregate_players(row)
-    # 分列用 _team_same（双向包含）：csdb 给缩写、Liquipedia 给全名都对得上；
+    # 分列用 _team_same（双向包含），容忍「全名 vs 缩写」的写法差异；
     # 归不进任何一队的宁可整列空着，也绝不错分到对面
     rows_a = [r for r in prows if _team_same(r["team"], teams[0])]
     rows_b = [r for r in prows if _team_same(r["team"], teams[1])]
@@ -2882,172 +2900,18 @@ def attach_maps(rows, es):
 # ==========================================================================
 # 选手数据（csdb.gg）
 # ==========================================================================
-
-def fetch_csdb(es, url):
-    """抓 csdb 一页，返回 HTML 文本；失败返回 None。**永不抛错。**
-
-    和 Liquipedia 是两套抓法：csdb 要**浏览器 UA**（过 Vercel WAF）、
-    不走 Liquipedia 的条款闸门（那是 action=parse 的 1 次/30 秒限制，与 csdb 无关）。
-    """
-    try:
-        r = fetch_once(url, CSDB_UA,
-                       timeout=max(5, int((es or {}).get("http_timeout") or 25)),
-                       accept="text/html")
-        if r["ok"]:
-            return r["text"]
-        log("[warn] csdb %s 抓取失败：%s（本场不带选手数据）" % (url, r["error"]))
-    except Exception as exc:  # noqa: BLE001
-        log("[warn] csdb %s 抓取出错：%s: %s（本场不带选手数据）"
-            % (url, type(exc).__name__, exc))
-    return None
-
-
-def parse_csdb_matches(html_text):
-    """解析 csdb `/matches/` 列表页，返回 [(日期 str, url, 文本块), …]。
-
-    列表页里一场比赛 = 一个 `/match/...` 链接 + 周围一段文本（队名、比分、日期）。
-    返回按出现顺序排的三元组，供 locate 阶段按「队名 + 日期」匹配。
-    """
-    out = []
-    if not html_text:
-        return out
-    # 每个 /match/ 链接，抓它前后一段文本作为「这场是谁打的」判断依据
-    for m in re.finditer(r'href="(/match/[^"]+)"', html_text):
-        url = m.group(1)
-        if "/stats/" in url:
-            continue
-        seg = html_text[max(0, m.start() - 800): m.start() + 400]
-        # 日期：优先从 URL 里拿（/match/<date>-<uuid>/ 或 /match/...-<date>/）
-        dm = re.search(r"(\d{4}-\d{2}-\d{2})", url)
-        date = dm.group(1) if dm else ""
-        out.append((date, url, seg))
-    return out
-
-
-def locate_csdb_match(entries, teams, ts):
-    """在 parse_csdb_matches 的结果里定位「这两支队、这个时间」的那一场。
-
-    返回单场页 URL，或 None（没找到）。匹配策略：
-      1. 先把 ts 转成 `YYYY-MM-DD`，只保留日期相同（或 ±1 天，容忍跨午夜）的候选。
-      2. 候选里挑「文本块里两队名都出现」的（大小写不敏感）。
-      3. 队名用 Liquipedia 全名（如 `Natus Vincere`），但 csdb 页面里常写缩写
-         （`NAVI`）—— 所以再退回「至少一队命中 + 日期命中」的宽松匹配。
-    """
-    ts_l = [t.strip().lower() for t in (teams or [])]
-    while len(ts_l) < 2:
-        ts_l.append("")
-    t0, t1 = ts_l
-    d = datetime.fromtimestamp(int(ts or 0), CST).strftime("%Y-%m-%d")
-    # 日期窗口：当天优先，其次 ±1 天（跨午夜）
-    candidates = [e for e in entries if e[0] == d]
-    if not candidates:
-        prev = (datetime.fromtimestamp(int(ts or 0), CST)
-                - timedelta(days=1)).strftime("%Y-%m-%d")
-        nxt = (datetime.fromtimestamp(int(ts or 0), CST)
-               + timedelta(days=1)).strftime("%Y-%m-%d")
-        candidates = [e for e in entries if e[0] in (prev, nxt)]
-
-    # 第一轮：两队名都命中
-    for date, url, seg in candidates:
-        low = seg.lower()
-        if t0 and t1 and t0 in low and t1 in low:
-            return CSDB_BASE + url
-    # 第二轮：至少一队命中（缩写在页面里的情况）
-    for date, url, seg in candidates:
-        low = seg.lower()
-        if (t0 and t0 in low) or (t1 and t1 in low):
-            return CSDB_BASE + url
-    return None
-
-
-def parse_csdb_players(html_text):
-    """解析 csdb 单场页，返回 [ {map, score:(l,r), players:[{name, team, k, d,
-    a, pm, adr, kast, rating}, …]}, … ]。
-
-    每张图一张表，表头 `Player K D A +/− ADR KAST Rating`，后跟双方 10 名选手。
-    表头在 HTML 里是 React 序列化字符串（`\"Player\",\"K\"...`），所以把 script 去掉后
-    靠「Player K D A」这个纯文本锚点切块，再用正则抓「昵称 + 队名 + 6 个数」。
-
-    地图名与表格的对应关系：详情区按 Dust2→Nuke 排，但「Map Results」区块里
-    给的是真实编号（Nuke=Map1、Dust2=Map2）。所以这里**先按 Map Results 的编号
-    抓地图名列表**，再按顺序配对。拿不到地图名就写 "Map N"。
-    """
-    if not html_text:
-        return []
-    # 去 script/style/svg，转纯文本，保留顺序
-    txt = re.sub(r"<svg.*?</svg>", " ", html_text, flags=re.S)
-    txt = re.sub(r"<script.*?</script>", " ", txt, flags=re.S)
-    txt = re.sub(r"<style.*?</style>", " ", txt, flags=re.S)
-    txt = re.sub(r"<[^>]+>", " ", txt)
-    txt = txt.replace("+/−", "+-").replace("−", "-")
-    txt = re.sub(r"&[a-z]+;", " ", txt)
-    txt = re.sub(r"\s{2,}", " ", txt)
-
-    # 地图名（按 Map Results 的真实顺序）：`<map名> <队A> <分> – <分> <队B>`
-    mapnames = re.findall(
-        r"(Dust2|Dust 2|Nuke|Ancient|Mirage|Inferno|Anubis|Overpass|Vertigo)\s+"
-        r"[A-Za-z .]+\s+\d+\s*[–-]\s*\d+\s+[A-Za-z .]+", txt)
-    mapnames = [m.replace("Dust 2", "Dust2") for m in mapnames]
-
-    player_re = re.compile(
-        r"([A-Za-z0-9_']+)\s+([A-Za-z .]+)\s+"
-        r"(\d+)\s+(\d+)\s+(\d+)\s+([+-])\s?(\d+)\s+([\d.]+)\s+(\d+)%\s+([\d.]+)")
-
-    parts = txt.split("Player K D A")
-    maps = []
-    for i, part in enumerate(parts[1:]):
-        # 剥掉表头残留（"+- ADR KAST Rating" 之类），只留选手行
-        body = re.sub(r"^[^A-Za-z0-9_']*[+-]?\s*ADR\s+KAST\s+Rating\s*", "", part)
-        rows = player_re.findall(body)
-        if not rows:
-            continue
-        players = []
-        for name, team, k, d, a, sign, pm, adr, kast, rating in rows:
-            players.append({
-                "name": name, "team": team.strip(),
-                "k": int(k), "d": int(d), "a": int(a),
-                "pm": (1 if sign == "+" else -1) * int(pm),
-                "adr": float(adr), "kast": int(kast), "rating": float(rating),
-            })
-        maps.append({
-            "map": mapnames[i] if i < len(mapnames) else "Map %d" % (i + 1),
-            "players": players,
-        })
-    return maps
-
-
-def attach_players(rows, es):
-    """给战果行补上选手数据（来自 csdb.gg）。返回 (抓了几个单场页, 补上了几行)。
-
-    设计要点（和 attach_maps 同构，都是「锦上添花」）：
-      · 只抓**这一轮真的要发**的行；列表页整轮只抓一次（按日期缓存）。
-      · 任何一个环节失败都只是「卡片少一段选手段」，**绝不影响发送**。
-      · 由 `card_players_enabled` 控制开关。
-    """
-    es = es or {}
-    if not rows or not es.get("card_players_enabled", True):
-        return 0, 0
-
-    # 1) 抓一次 /matches/ 列表页（整轮共享），失败则全部放弃
-    html = fetch_csdb(es, CSDB_MATCHES_URL)
-    if html is None:
-        return 0, 0
-    entries = parse_csdb_matches(html)
-
-    fetched = hit = 0
-    for r in rows:
-        url = locate_csdb_match(entries, r.get("teams"), r.get("ts"))
-        if not url:
-            continue
-        page = fetch_csdb(es, url)
-        if page is None:
-            continue
-        fetched += 1
-        maps = parse_csdb_players(page)
-        if maps:
-            r["players"] = maps
-            hit += 1
-    return fetched, hit
+# ⚠️ 2026-10-09：**本段整体删除**。原实现是 fetch_csdb / parse_csdb_matches /
+#    locate_csdb_match / parse_csdb_players / attach_players 五个函数，负责从
+#    csdb.gg 抓逐图选手数据（K/D/ADR/KAST/Rating）。csdb.gg 改成 Next.js 客户端
+#    渲染后这条链路已失效（详见文件顶部「选手数据」注释块的实测记录），抓取层
+#    整体拆掉、不再有任何网络请求。
+#
+# 保留的是**展示层**（与抓取无关，纯离线）：
+#   · `_aggregate_players()` —— 把「逐图选手原始结构」聚成整场行（模板要的形状）
+#   · `build_result_match()` 里的 `players` / `mvp` / `mvp_basis` 字段
+#   · `result_template.html` 的选段渲染 + `_draw_player_block()` 的 Pillow 版式
+# 将来接上新数据源时，只要按 `_aggregate_players()` docstring 里的结构把数据填进
+# `row["players"]`，展示层无需改动。
 
 
 def format_result_caption(row, now):
@@ -3471,8 +3335,9 @@ def _render_result_card_inner(row, now, es):
 def _team_same(a, b):
     """两队名是否指同一队（双向包含、大小写不敏感）。
 
-    Liquipedia 给全名（Natus Vincere），csdb 偶尔给缩写（NAVI）——
+    选手数据的队名常以缩写出现（NAVI），而赛程页给的是全名（Natus Vincere）——
     精确等号会让选手段整列分不到人、卡片缺半边，所以用包含匹配兜住。
+    这个函数是**展示层**的（给选手分列用），与数据源无关、无需改。
     """
     a, b = (a or "").strip().lower(), (b or "").strip().lower()
     return bool(a) and bool(b) and (a == b or a in b or b in a)
@@ -3484,7 +3349,7 @@ def _draw_player_block(d, pmap, teams, winner, per_team, top, pad, w):
     布局（每列从左到右）：选手名（左对齐）→ K-D → ADR → 评分色块（右端贴齐）。
     列位置用**正向固定偏移**而不是从右往左挤 —— 后者会让评分色块压住 K-D。
     胜负色跟队名一致（胜绿负红）；评分用同色圆角色块 + 白字，视觉权重最高。
-    队名分组用 _team_same（双向包含）：Liquipedia 全名 vs csdb 缩写也认得。
+    队名分组用 _team_same（双向包含），容忍全名 / 缩写混写。
     """
     players = list(pmap.get("players") or [])
     t0 = (teams[0] or "").strip()
@@ -3938,13 +3803,10 @@ def run_results(cfg, args):
     else:
         log("[info] 逐图比分已关闭（card_results_maps_enabled=false），只发系列比分")
 
-    # ---- 选手数据：第二个数据源（csdb.gg），同样可选、抓不到绝不误事 ----
-    if es.get("card_players_enabled", True):
-        got_pages, got_rows = attach_players(rows, es)
-        log("[info] 选手数据：抓了 %d 个单场页，%d/%d 场补上了选手数据"
-            % (got_pages, got_rows, len(rows)))
-    else:
-        log("[info] 选手数据已关闭（card_players_enabled=false），战报不含选手段")
+    # ---- 选手数据：**当前无可用数据源，抓取层已拆出（2026-10-09）** ----
+    # 曾用 csdb.gg（已改成客户端渲染而失效）与 Liquipedia（不存选手数据），
+    # 详见文件顶部「选手数据」注释块。展示层原地保留，等接上新源即可生效。
+    log("[info] 选手数据：当前无可用数据源，战报不含选手段（展示层已保留）")
 
     log("[info] 本轮结算 %d 场（还有 %d 场在打），**一场一条消息**"
         % (len(rows), len(waiting)))
@@ -6568,74 +6430,18 @@ def selftest():
     t.check("请求地址只用 api.php，不抓渲染页面",
             LIQUIPEDIA_API.endswith("/api.php") and "action=parse" in build_url())
 
-    # ---- csdb 选手数据（战果卡片选手段的来源，纯函数离线可测）----
-    print("\n-- csdb 选手数据 --")
-    listing = (
-        '<div><a href="/match/2026-10-05-abc/">NAVI vs Aurora Gaming</a></div>'
-        '<div><a href="/stats/match/2026-10-05-s/">stats</a></div>'
-        '<div><a href="/match/team-x-2026-10-04-def/">X</a></div>'
-    )
-    entries = parse_csdb_matches(listing)
-    t.check("csdb 列表：/stats/ 链接被跳过", len(entries) == 2,
-            "实际 %d" % len(entries))
-    t.check("csdb 列表：日期从 URL 里提取",
-            entries and entries[0][0] == "2026-10-05", entries[:1])
-    t.check("csdb 列表：文本段保留（供队名匹配）",
-            bool(entries) and "navi" in entries[0][2].lower())
-    t.check("csdb 列表：空输入不炸", parse_csdb_matches("") == [])
-
-    ts_day = datetime(2026, 10, 5, 15, 0, tzinfo=CST).timestamp()
-    hit = locate_csdb_match(entries, ["NAVI", "Aurora Gaming"], ts_day)
-    t.check("csdb 定位：两队全名都命中 -> 返回完整 URL",
-            hit == CSDB_BASE + "/match/2026-10-05-abc/", hit)
-    hit = locate_csdb_match(entries, ["Natus Vincere", "Aurora Gaming"], ts_day)
-    t.check("csdb 定位：只有缩写出现也命中（第二轮宽松匹配）",
-            hit == CSDB_BASE + "/match/2026-10-05-abc/", hit)
-    ts_next = datetime(2026, 10, 6, 0, 30, tzinfo=CST).timestamp()
-    hit = locate_csdb_match(entries, ["NAVI"], ts_next)
-    t.check("csdb 定位：跨午夜场次归档在前一天 -> prev 窗口兜住",
-            hit == CSDB_BASE + "/match/2026-10-05-abc/", hit)
-    ts_far = datetime(2026, 10, 8, 12, 0, tzinfo=CST).timestamp()
-    t.check("csdb 定位：差 2 天以上不硬凑",
-            locate_csdb_match(entries, ["NAVI"], ts_far) is None)
-    t.check("csdb 定位：完全不沾 -> None",
-            locate_csdb_match(entries, ["Fnatic"], ts_day) is None)
-    t.check("csdb 定位：空输入不炸", locate_csdb_match([], [], ts_day) is None)
-
-    csdb_page = (
-        "<p>Nuke NAVI 13 – 9 Aurora</p>"
-        "<table><tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr>"
-        "<tr><td>makazze Natus Vincere 23 15 6 + 8 104.6 78% 1.96</td></tr>"
-        "<tr><td>jottAAA Aurora Gaming 20 18 9 + 2 109.8 74% 1.41</td></tr></table>"
-        "<p>Dust2 Aurora 10 – 13 NAVI</p>"
-        "<table><tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr>"
-        "<tr><td>XANTARES Aurora Gaming 23 16 1 - 4 100.5 68% 1.53</td></tr>"
-        "<tr><td>Player K D A</td><td>+- ADR KAST Rating</td></tr></table>"
-    )
-    pmaps = parse_csdb_players(csdb_page)
-    t.check("csdb 选手：切出 2 张图（空表的那张被跳过）", len(pmaps) == 2,
-            "实际 %d" % len(pmaps))
-    if len(pmaps) == 2:
-        p0 = pmaps[0]["players"]
-        t.check("csdb 选手：地图名取 Map Results 的真实顺序",
-                pmaps[0]["map"] == "Nuke" and pmaps[1]["map"] == "Dust2",
-                [m["map"] for m in pmaps])
-        t.check("csdb 选手：名字不被表头污染（ADR KAST Rating 剥干净）",
-                p0 and p0[0]["name"] == "makazze",
-                p0[0]["name"] if p0 else "空")
-        t.check("csdb 选手：+/− 号进 pm 字段",
-                p0[0]["pm"] == 8 and pmaps[1]["players"][0]["pm"] == -4,
-                "%s/%s" % (p0[0]["pm"], pmaps[1]["players"][0]["pm"]))
-        t.check("csdb 选手：数值字段类型正确",
-                p0[0]["k"] == 23 and p0[0]["adr"] == 104.6
-                and p0[0]["kast"] == 78 and p0[0]["rating"] == 1.96)
-        t.check("csdb 选手：每图 10 行以内（双方各 5 才画得下）",
-                all(len(m["players"]) <= 10 for m in pmaps))
-    t.check("csdb 选手：没有 Map Results 时兜底 Map N",
-            parse_csdb_players(
-                "<p>Player K D A</p><p>zz Team 1 2 3 + 4 5.6 70% 1.11</p>"
-            )[0]["map"] == "Map 1")
-    t.check("csdb 选手：空输入不炸", parse_csdb_players("") == [])
+    # ---- 选手数据：**抓取层已拆出（2026-10-09），这里只测保留的展示层** ----
+    # 原来的 csdb 断言（parse_csdb_matches / locate_csdb_match / parse_csdb_players
+    # 共约 20 条）随抓取层一起删除。展示层的自检在下面「V2 数据」一节 —— 用一段
+    # 内嵌的逐图选手原始结构喂 build_result_match()，验证聚合 / MVP / 模板渲染，
+    # 那段**不依赖任何抓取函数**，所以原样保留。
+    print("\n-- 选手数据（展示层；抓取层已拆出，无可用数据源）--")
+    t.check("选手数据：抓取层函数已全部移除（防止残留半截链路）",
+            not any(hasattr(sys.modules[__name__], n) for n in
+                    ("fetch_csdb", "parse_csdb_matches", "locate_csdb_match",
+                     "parse_csdb_players", "attach_players")))
+    t.check("选手数据：无 CSDB_* 常量残留（不再有任何 csdb 抓取配置）",
+            not any(n.startswith("CSDB_") for n in dir(sys.modules[__name__])))
 
     t.check("队名匹配：子串/青训队名命中，首字母缩写不硬凑，空串不命中",
             _team_same("Natus Vincere", "NAVI") is False   # 缩写救不了：宁可空列不错分
