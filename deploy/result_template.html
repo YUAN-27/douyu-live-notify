@@ -85,7 +85,7 @@ body { background:#08090C; color:#F1F3F5;
 .mvp .st { display:flex; gap:0; align-items:center; flex:none; }
 .mvp .cell { padding:0 40px; text-align:center; border-left:1px solid #272D36; }
 .mvp .cell .v { font-size:44px; font-weight:600; line-height:1.1; }
-.mvp .cell .v.big { font-size:60px; color:#00D66B; }
+.mvp .cell .v.big { font-size:60px; }
 .mvp .cell .k { font-size:13px; letter-spacing:3px; color:#7D8796; margin-top:8px; }
 
 /* ---- FULL STATS ---- */
@@ -103,7 +103,12 @@ body { background:#08090C; color:#F1F3F5;
 .stats td:first-child { text-align:left; font-weight:600; color:#F1F3F5;
   white-space:nowrap; overflow:hidden; }
 .stats td.c { font-weight:600; }
-.stats td.best { color:#00D66B; }
+/* ---- RTG 配色：>1.00 绿 / <1.00 红 / ==1.00 白 ----
+   判据用**显示用的两位小数**（JS 侧 rtgCls 先 toFixed(2) 再比较），
+   免得 1.004 显示成 "1.00" 却染成绿色。 */
+.rtg-hi, .stats td.rtg-hi, .mvp .cell .v.rtg-hi { color:#00D66B; }
+.rtg-lo, .stats td.rtg-lo, .mvp .cell .v.rtg-lo { color:#FF5C5C; }
+.rtg-eq, .stats td.rtg-eq, .mvp .cell .v.rtg-eq { color:#F1F3F5; }
 .stats td .sub { color:#7D8796; font-size:13px; margin-left:10px; }
 
 /* 没有选手数据时：内容整体垂直居中，页脚仍贴底（整卡保持 1920×1080） */
@@ -122,6 +127,15 @@ const match = __MATCH__;
 
 function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
 function short(t){ return t.short || t.name; }
+
+// RTG 配色：严格 >1.00 绿、<1.00 红、==1.00 白。
+// 先四舍五入到两位再判 —— 显示的就是这两位数，配色必须和显示一致。
+function rtgCls(x){
+  const v = Number(Number(x ?? 0).toFixed(2));
+  if (v > 1) return "rtg-hi";
+  if (v < 1) return "rtg-lo";
+  return "rtg-eq";
+}
 
 function render(m){
   const app = document.getElementById("app");
@@ -172,17 +186,16 @@ function render(m){
       <div class="cell"><div class="v">${v.k}-${v.d}</div><div class="k">K-D</div></div>
       <div class="cell"><div class="v">${v.adr.toFixed(1)}</div><div class="k">ADR</div></div>
       <div class="cell"><div class="v">${Math.round(v.kast)}%</div><div class="k">KAST</div></div>
-      <div class="cell"><div class="v big">${v.rating.toFixed(2)}</div><div class="k">RATING</div></div>
+      <div class="cell"><div class="v big ${rtgCls(v.rating)}">${v.rating.toFixed(2)}</div><div class="k">RATING</div></div>
     </div>
   </div>` : "";
 
   // ---- full stats ----
   function col(t, rows){
-    const best = Math.max(...rows.map(r=>r.rating));
     const tr = rows.map(r =>
       `<tr><td>${esc(r.name)}</td><td class="c">${r.k}-${r.d}</td>
        <td>${r.adr.toFixed(1)}</td><td>${Math.round(r.kast)}%</td>
-       <td class="${r.rating>=best?"best":""}">${r.rating.toFixed(2)}</td></tr>`).join("");
+       <td class="${rtgCls(r.rating)}">${r.rating.toFixed(2)}</td></tr>`).join("");
     return `<div class="col">
       <div class="th"><span class="tn">${esc(t.name)}</span><span class="ts">${aWin&&t===b||bWin&&t===a?"LOSER":"WINNER"}</span></div>
       <table><tr><th>PLAYER</th><th>K-D</th><th>ADR</th><th>KAST</th><th>RTG</th></tr>${tr}</table>

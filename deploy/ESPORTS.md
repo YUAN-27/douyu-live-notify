@@ -384,7 +384,7 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 
 | 层 | 状态 | 具体 |
 |---|---|---|
-| **渲染层** | ✅ 原地保留（未改动） | `result_template.html` 的选段（MVP 卡 + 双方统计表）、`build_result_match()` 的 `players` / `mvp` / `mvp_basis` 字段、`_aggregate_players()` 聚合、`_draw_player_block()` 的 Pillow 版式、`_team_same()` 分列 |
+| **渲染层** | ✅ 原地保留（2026-10-09 仅改了 RTG 配色） | `result_template.html` 的选段（MVP 卡 + 双方统计表）、`build_result_match()` 的 `players` / `mvp` / `mvp_basis` 字段、`_aggregate_players()` 聚合、`_draw_player_block()` 的 Pillow 版式、`_team_same()` 分列。**唯一的改动**：V2 模板的 **RTG 列**从「只把本队最高分染绿」改成按 **1.00** 分三档（>1.00 绿 / <1.00 红 / ==1.00 白，判据先四舍五入到两位），MVP 大号 RATING 同一判据；`esports.py` 加了 5 条自检钉住。880px 降级卡的评分是**色块**（`col` = 胜绿负红、白字），语义不同，**刻意没跟着改** |
 | **抓取层（旧）** | ❌ 已删除 | `CSDB_*` 常量、`fetch_csdb` / `parse_csdb_matches` / `locate_csdb_match` / `parse_csdb_players` / `attach_players` 五个函数 —— 随 csdb.gg 失效一起拆掉 |
 | **抓取层（新）** | ✅ 2026-10-09 接入 | `CITO_*` 常量 + `cito_norm` / `cito_name_variants` / `cito_pair_match` / `cito_pick_candidate` / `cito_played_maps` / `cito_rows_to_players` / `cito_get` / `cito_usage_check` / `cito_usage_add` / `attach_cito_players`；唯一调用点在 `--results`（**锁外**） |
 
@@ -1156,7 +1156,7 @@ cd /opt/douyu-live-notify && python3 esports.py --check
 ## 8. 自检
 
 ```bash
-python3 esports.py --selftest    # 满配 468 项（装了 Pillow + make_card_font.py）：解析器 /
+python3 esports.py --selftest    # 满配 474 项（装了 Pillow + make_card_font.py）：解析器 /
                                  # 四条筛选 / 跨夜窗口 / 正文版式 / 图片卡片 / 战果结算 /
                                  # 单场战报 / 选手数据（展示层 + **Cito 抓取层**）/
                                  # 全天整合版 / 条款节流 / 群内命令交互 /
@@ -1172,7 +1172,7 @@ python3 esports.py --selftest    # 满配 468 项（装了 Pillow + make_card_fo
 > |---|---|
 > | 少了 `make_card_font.py` | 少「两张字符表是否一致」那几条 |
 > | 没装 Pillow | 四张卡片的渲染断言换成降级断言 |
-> | 在「装好的机器」上（无 `deploy/`、无 `config.example.json`、无 `*.service`） | 少 3 条（本机 468 → 服务器 465） |
+> | 在「装好的机器」上（无 `deploy/`、无 `config.example.json`、无 `*.service`） | 少 3 条（本机 474 → 服务器 471） |
 >
 > **别照着这里的数字改断言** —— 以实际输出末行「结果：N 项通过，0 项失败」为准。
 > 断言的增删是常态（接入 Cito 净增了 45 条；更早拆 csdb 抓取层净减约 16 条）。

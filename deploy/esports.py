@@ -6304,6 +6304,37 @@ def selftest():
                 _ph in _tpl_txt and not any(o in _tpl_txt for o in _others))
         t.check("模板 %s：署名已随仓库改名更新（大小写都不留 douyu）" % _tpl_name,
                 "douyu" not in _tpl_txt.lower())
+    # ---- 战报卡 RTG 配色：>1.00 绿 / <1.00 红 / ==1.00 白（2026-10-09 用户要求）----
+    # 分四块断言，任何一块被改回去都会 FAIL：
+    #   ① 三个类名在（CSS 与 JS 共用同一套命名）；
+    #   ② 颜色和类一一对应（绿 #00D66B / 红 #FF5C5C / 白 #F1F3F5）；
+    #   ③ 旧的「只把本队最高分染绿」写法彻底移除；
+    #   ④ MVP 的 RATING 大号数字也走同一判据（不是写死绿色）。
+    # 这是**独立文件**（模板），不是读 esports.py 自己 → 不存在自指问题。
+    with open(os.path.join(HERE, "result_template.html"), encoding="utf-8") as _rtf:
+        _rt = _rtf.read()
+    _rtg_missing = [c for c in ("rtg-hi", "rtg-lo", "rtg-eq") if c not in _rt]
+    t.check("⚑ 战报卡 RTG：三档类名都在（rtg-hi / rtg-lo / rtg-eq）", not _rtg_missing,
+            _rtg_missing)
+    t.check("⚑ 战报卡 RTG：绿 #00D66B / 红 #FF5C5C / 白 #F1F3F5 与三个类一一对应",
+            bool(re.search(r"\.rtg-hi[^{]*\{[^}]*color:\s*#00D66B", _rt))
+            and bool(re.search(r"\.rtg-lo[^{]*\{[^}]*color:\s*#FF5C5C", _rt))
+            and bool(re.search(r"\.rtg-eq[^{]*\{[^}]*color:\s*#F1F3F5", _rt)))
+    t.check("⚑ 战报卡 RTG：旧的「只把最高分染绿」写法已移除（不留 best 类/变量）",
+            "td.best" not in _rt and ">=best?" not in _rt)
+    _big = _rt.split(".mvp .cell .v.big", 1)
+    _big_rule = _big[1].split("}")[0] if len(_big) > 1 else ""
+    t.check("⚑ 战报卡 RTG：MVP 的 RATING 与明细表走同一判据（大号数字没写死绿色）",
+            "rtgCls(v.rating)" in _rt and "rtgCls(r.rating)" in _rt
+            and _big_rule != "" and "color:" not in _big_rule, _big_rule)
+    # 判据函数**整体**要求落在 rtgCls 函数体里：先 toFixed(2) 再比、三个档位各有 return。
+    # 少了 toFixed(2) → 1.004 显示成 "1.00" 却被判成 >1 染绿（2026-10-09 变异测试 M-RTG5 抓出来的）。
+    _rtg_fn = re.search(r"function rtgCls\(x\)\{[\s\S]*?\n\}", _rt)
+    _rtg_src = _rtg_fn.group(0) if _rtg_fn else ""
+    t.check("⚑ 战报卡 RTG：rtgCls 先四舍五入到两位、再按 >1 / <1 / else 三档返回",
+            "toFixed(2)" in _rtg_src and "> 1" in _rtg_src and "< 1" in _rtg_src
+            and all(c in _rtg_src for c in ("rtg-hi", "rtg-lo", "rtg-eq")),
+            _rtg_src or "(没抽到 rtgCls)")
     t.check("随包字体三件套都在 HTML_FONT_DIR（缺了 @font-face 404 → 系统字体）",
             all(os.path.isfile(os.path.join(HTML_FONT_DIR, _fn)) for _fn in
                 ("BebasNeue-Regular.ttf", "IBMPlexMono-Regular.ttf",
