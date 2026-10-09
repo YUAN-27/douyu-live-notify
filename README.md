@@ -307,6 +307,7 @@ qq-esports-notify/
     ├── douyu-watch.tmpfiles                    日志与状态目录兜底（装到 /etc/tmpfiles.d/）
     ├── DEPLOY.md                 完整部署手册（先看这个）
     ├── ESPORTS.md                赛事推送主文档：口径、窗口、数据源、排查
+    ├── CMD_INTERACT.md           群内命令交互（@ 机器人 / `/赛事`）设计文档（**尚未实现**）
     ├── WATCHDOG.md               看门狗设计说明 + 「怎么验证它真的会叫」
     ├── SCAN_QR_WITHOUT_SSH.md    扫码登录的替代做法（不必开 SSH 隧道）
     ├── AGENT_PROMPT.md           想让 AI agent 帮你部署？把这份提示词丢给它
