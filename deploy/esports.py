@@ -138,6 +138,7 @@ parse_matches() 与 deploy/check-esports-net.py 里的那份是**同一份实现
 import argparse
 import ast
 import base64
+import calendar
 import contextlib
 import hashlib
 import html as html_mod
@@ -497,14 +498,12 @@ ESPORT_DEFAULTS = {
     # 带上它就要多抓一次「赛事页」（parse_event_maps），代价见 ESPORTS.md §3.2；
     # 关掉 / 抓不到 → 卡片自动只画对阵行，不会因此不发。
     "card_results_maps_enabled": True,
-    # ⚠️ 单场战报的**选手段**（rating / ADR / KAST / K-D）**当前无可用数据源**，
-    # 见文件顶部「选手数据」注释块。渲染层原地保留，但抓取层已拆掉 —— 所以这个
-    # 键现在**没有消费者**，战果行上永远不会有 `players` 键，卡片会自动走
-    # 「居中无统计」形态。留着它是为了将来接上新源时按原语义（开关选手段）复用，
-    # 届时 `attach_players()` 的等价实现读这个键即可。
+    # 单场战报的**选手段**（rating / ADR / KAST / K-D）。
+    # 2026-10-09 起数据源 = **Cito API**（见 deploy/CITO_PLAYERS.md）。
+    # ⚠️ 这里只是「画不画」；**要不要去抓**由 `cito_enabled` 决定（那个才是总线开关，
+    #    默认 false）。两个都开着才会有选段：`cito_enabled=false` 时连请求都不发。
     "card_players_enabled": True,
     # 每张图、每队最多列几名选手（按 rating 降序）。5 = 全队都列。
-    # 展示层仍在读它（`_render_result_card_inner`）；数据源缺失时自然无效果。
     "card_players_per_team": 3,
     # ---- 全天整合版 ----
     # 「每场一条」发完之后，再在次日早上补一条**当天全部战果**的汇总。
@@ -570,6 +569,18 @@ ESPORT_DEFAULTS = {
     # 一条命令最多尝试几次（含首次）。失败时水位线**不推进**（先发后落，宁可重复
     # 也不丢），但必须有上限 —— 否则 Liquipedia 一直挂着就会变成每几秒一次的高频重试。
     "cmd_max_attempts": 3,
+    # ---- 选手数据（Cito API）----
+    # 见 deploy/CITO_PLAYERS.md。单场战报的选手段（每张图的 K-D / ADR / KAST / Rating）。
+    # ⚠️ **默认 false**：关着的时候一次网络请求都不发，行为与「没有这个功能」完全一致。
+    #    回滚 = 把这里改成 false 就行，代码留着不影响任何一条流水线。
+    "cito_enabled": False,
+    # Cito 的免费 key（`cito_...`）。**认证头是 `x-api-key`**（不是 Parse.bot 那种
+    # `X-API-Key`）。key 写在服务器上的 config.json 里，不进仓库、不进部署包
+    # （check-secrets 会扫）。
+    "cito_api_key": "",
+    # 「两队名 + 时间」配对的容差（小时）。实测 15 场里 14 场时间**完全一致**、
+    # 1 场差 5 分钟（Liquipedia 报计划时刻、Cito 报实际时刻），所以 6 小时非常宽裕。
+    "cito_match_tolerance_hours": 6,
 }
 
 # 网络层抖动可以重试；4xx 重试没有意义（UA 不合格、被封、页面没了，再试还是一样）。
@@ -2940,8 +2951,8 @@ def attach_maps(rows, es):
 #   · `_aggregate_players()` —— 把「逐图选手原始结构」聚成整场行（模板要的形状）
 #   · `build_result_match()` 里的 `players` / `mvp` / `mvp_basis` 字段
 #   · `result_template.html` 的选段渲染 + `_draw_player_block()` 的 Pillow 版式
-# 将来接上新数据源时，只要按 `_aggregate_players()` docstring 里的结构把数据填进
-# `row["players"]`，展示层无需改动。
+# 新数据源已经接上 —— 见本文件后面「选手数据（Cito API）」整节：只要按
+# `_aggregate_players()` docstring 里的结构把数据填进 `row["players"]`，展示层一行都不用改。
 
 
 def format_result_caption(row, now):
@@ -3742,6 +3753,395 @@ def run_once(cfg, args):
     return 1
 
 
+# ==========================================================================
+# 选手数据（Cito API）—— 2026-10-09 接入
+# ==========================================================================
+# 设计文档 = `deploy/CITO_PLAYERS.md`（**唯一权威**：选型链、实测数据、坑、自检清单）。
+# 这里只写实现，为什么这么做全在文档里。
+#
+# 为什么是 Cito：csdb.gg 改成客户端渲染后失效、Liquipedia 根本不存选手数据、
+# HLTV 全站 403、Parse.bot 认证后单场 stats 实测 0/8、PandaScore 免费档没有选手统计。
+# 实测只有 Cito 同时给出 K/D/A + ADR + KAST + Rating，**且比赛刚结束就有**。
+#
+# 数据通路：只在 `--results` 的最后加一步（逐图比分之后）：
+#   队名对 + 时间 → 定位 matchId → `player-stats` → 按图分组填 `row["players"]`
+#   → 展示层（`_aggregate_players` / 模板 / `_draw_player_block`）**一行都不用改**。
+#
+# 三条纪律（对应设计文档 §6，每条都有自检断言钉着）：
+#   ① **默认关闭**（`cito_enabled` 默认 false）→ 关着时一次网络请求都不发；
+#   ② 任何一步失败都只是**少画一段选段**，绝不阻塞战报、绝不在群里发错误；
+#   ③ 本模块的请求**全部在状态锁之外**（铁律 ③：绝不在持有状态锁时联网）。
+
+CITO_API = "https://api.citoapi.com/api/v1"
+
+# 队名归一：这三条**无法机械推导**（Cito 用短名，Liquipedia 用全名），只能列出来
+# ——与 `hltv_aliases` 同性质，规模很小，只在「上镜」的队上维护。
+# 左边是 Liquipedia 写法的小写形式，右边是 Cito 的写法。
+CITO_TEAM_ALIASES = {
+    "natus vincere junior": "NAVI Junior",
+    "rebels gaming": "RBLS",
+    "whitebit team": "WBT",
+}
+
+# ⚠️ 前缀与后缀必须**组合**剥离：`FC Famalicão Esports` 要**同时**去掉 `fc ` 和
+#    ` esports` 才能得到 Cito 的 `Famalicão`。只剥一层就永远配不上 ——
+#    这是实测时「命中率 43.8%」的头号原因（详见设计文档 §4.2）。
+CITO_NAME_PREFIX = ("team ", "fc ", "the ")
+CITO_NAME_SUFFIX = (" esports", " gaming", " clan", " team", " organization", " org")
+
+# 用量记账（月度计数）。**进不了仓库也进不了部署包**（`state_*` 两条守卫都挡它）。
+CITO_USAGE_FILE = os.path.join(HERE, "state_cito_usage.json")
+# 免费档 500 次/月，留 50 次余量。实测我们约 200 次/月（≈2.4 场/天 × 2 次），
+# 这个数字只是**兜底防线**，不是日常约束。
+CITO_MONTHLY_BUDGET = 450
+
+
+def cito_norm(s):
+    """队名归一：小写 + 只留字母数字。
+
+    顺带把 `Famalicão` 的 `ã`、`ç` 去掉 → `famalico`，正好和 Cito 的 slug 一致。
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(s or "").strip().lower())
+
+
+def cito_hltv_reverse(hltv_aliases=None):
+    """把 `hltv_aliases`（HLTV 写法 → Liquipedia 写法）反过来用。
+
+    为什么方向正好对：**Cito 的队名与 HLTV 同源**（`Spirit` / `FaZe` / `Sangal`），
+    而我们要对齐的是 Liquipedia 写法。传进来的 `hltv_aliases` 优先，没传就用默认表。
+    """
+    src = hltv_aliases if isinstance(hltv_aliases, dict) else (
+        ESPORT_DEFAULTS.get("hltv_aliases") or {})
+    out = {}
+    for k, v in src.items():
+        if k and v:
+            out[str(v).strip().lower()] = str(k).strip()
+    return out
+
+
+def cito_name_variants(name, rev_aliases=None):
+    """队名 → 变体集合（用于「两队名是不是同一队」的**集合求交**）。
+
+    变体来源：原文 / Cito 别名表 / 反向 `hltv_aliases` / 前缀后缀**组合**剥离。
+
+    ⚠️ 判据必须用**集合求交**，不能用子串包含（`_team_same` 那种）：
+    `NAVI` 是 `NAVI Junior` 的子串，子串判据会把主队和青训队张冠李戴。
+    """
+    base = str(name or "").strip()
+    cands = [base]
+    al = CITO_TEAM_ALIASES.get(base.lower())
+    if al:
+        cands.append(al)
+    hv = (rev_aliases or {}).get(base.lower())
+    if hv:
+        cands.append(hv)
+
+    out = set()
+    for v in cands:
+        low = v.lower()
+        for p in ("",) + CITO_NAME_PREFIX:
+            if p and not low.startswith(p):
+                continue
+            mid = v[len(p):] if p else v
+            for s in ("",) + CITO_NAME_SUFFIX:
+                if s and not mid.lower().endswith(s):
+                    continue
+                core = mid[:len(mid) - len(s)] if s else mid
+                n = cito_norm(core)
+                if n:
+                    out.add(n)
+    return out
+
+
+def cito_pair_match(lp_teams, cand_teams, rev_aliases=None):
+    """两对队名是否指**同一场对阵**（忽略左右顺序）。"""
+    a, b = (list(lp_teams or []) + ["", ""])[:2]
+    c, d = (list(cand_teams or []) + ["", ""])[:2]
+    va = cito_name_variants(a, rev_aliases)
+    vb = cito_name_variants(b, rev_aliases)
+    vc = cito_name_variants(c, rev_aliases)
+    vd = cito_name_variants(d, rev_aliases)
+    if not va or not vb or not vc or not vd:
+        return False
+    return bool((va & vc and vb & vd) or (va & vd and vb & vc))
+
+
+def cito_pick_candidate(lp_teams, ts, cands, tol_hours=6, rev_aliases=None):
+    """在对阵相同的时间邻近候选里挑**时间最近**的一场。
+
+    返回 `(候选, 时间差秒, 是否左右对调)`：
+      · 候选为 `None` 表示配不上；时间差仍会返回（给日志用，便于排查是「队名对不上」
+        还是「时间超容差」）。
+      · `对调` = 候选的 team1 其实是我方第二支队 —— 后面按 `teamId` 分左右时要翻转。
+    """
+    best, best_dt, best_swap = None, None, False
+    for c in cands or []:
+        if not isinstance(c, dict):
+            continue
+        ct = [c.get("team1Name") or "", c.get("team2Name") or ""]
+        if not cito_pair_match(lp_teams, ct, rev_aliases):
+            continue
+        dt = abs(int(c.get("ts") or 0) - int(ts or 0))
+        if best is None or dt < best_dt:
+            # 对调判定：候选的第一支队与我方第一支队是不是同一支。
+            swapped = not bool(cito_name_variants((list(lp_teams or []) + [""])[0],
+                                                  rev_aliases)
+                               & cito_name_variants(ct[0], rev_aliases))
+            best, best_dt, best_swap = c, dt, swapped
+    if best is None:
+        return None, None, False
+    try:
+        tol = max(0.0, float(tol_hours or 0))
+    except (TypeError, ValueError):
+        tol = 6.0
+    if best_dt > tol * 3600:
+        return None, best_dt, best_swap
+    return best, best_dt, best_swap
+
+
+def cito_played_maps(item):
+    """从 `recent` / `matches/{id}` 的 `maps[]` 里取出**真正打过**的图：`{图号: 图名}`。
+
+    ⚠️ `maps[]` **包含没打过的图**。实测一场 2:0 的 Bo3 里第 3 张图是
+    `status="map_not_played"` / `resultType="not_played"` / `statsEligible=false` ——
+    不过滤的话卡片会画出一张空的第 3 图（没比分、没选手）。
+    这也是「Bo3 只回 20 行」的真正原因：**不是接口有 20 行上限，是那场只打了两张图**。
+    """
+    out = {}
+    for m in (item or {}).get("maps") or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("resultType") == "not_played" or m.get("status") == "map_not_played":
+            continue
+        if m.get("statsEligible") is False:
+            continue
+        try:
+            n = int(m.get("mapNumber"))
+        except (TypeError, ValueError):
+            continue
+        out[n] = str(m.get("mapName") or "").strip()
+    return out
+
+
+def cito_rows_to_players(rows, played, lp_teams, cand, swap=False, rev_aliases=None):
+    """`player-stats` 行 → `row["players"]` 契约（见 `_aggregate_players` docstring）。
+
+    ⚠️ 两件必须做对的事：
+      1. **队名改写成 Liquipedia 的写法**。展示层用 `_team_same()`（双向子串包含）
+         把选手分成左右两列，而 Cito 的短写名过不了那一关
+         （`RBLS` vs `Rebels Gaming`、`NAVI Junior` vs `Natus Vincere Junior`、
+         `WBT` vs `WhiteBIT Team`）—— 不改写这些队的选手段会**整列空着**。
+      2. **`kast` × 100**：Cito 给的是 0~1 的比例（`0.652`），展示层要的是百分比数字。
+    """
+    a, b = (list(lp_teams or []) + ["", ""])[:2]
+    c1id = str((cand or {}).get("team1Id") or "")
+    c1name = str((cand or {}).get("team1Name") or "")
+
+    def _side(r):
+        tid = str(r.get("teamId") or "")
+        if c1id and tid:
+            on_team1 = (tid == c1id)
+        else:
+            # 没给 id 时退回队名变体判定（宁可判错也不整列空着，且不会误分到对面
+            # 的概率很高 —— 变体集合是求交，不是子串）。
+            on_team1 = bool(cito_name_variants(r.get("teamName"), rev_aliases)
+                            & cito_name_variants(c1name, rev_aliases))
+        side = 0 if on_team1 else 1
+        return (1 - side) if swap else side
+
+    t1id_map = {}
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        mid = str(r.get("mapId") or "")
+        n = None
+        if "-map-" in mid:
+            tail = mid.rsplit("-map-", 1)[1]
+            if tail.isdigit():
+                n = int(tail)
+        if n is None or n not in played:      # 未打的图直接丢（见 cito_played_maps）
+            continue
+        side = _side(r)
+        t1id_map.setdefault(n, []).append({
+            "name": str(r.get("playerName") or "").strip(),
+            "team": (b if side else a),
+            "k": int(r.get("kills") or 0),
+            "d": int(r.get("deaths") or 0),
+            "a": int(r.get("assists") or 0),
+            "pm": int(r.get("plusMinus") or 0),
+            "adr": float(r.get("adr") or 0),
+            "kast": round(100.0 * float(r.get("kast") or 0), 1),
+            "rating": float(r.get("rating") or 0),
+        })
+    return [{"map": played.get(n) or ("Map %d" % n), "players": t1id_map[n]}
+            for n in sorted(t1id_map)]
+
+
+def _iso_to_epoch(s):
+    """Cito 的 ISO 8601 UTC（`2026-10-09T07:00:00.000Z`）→ epoch 秒。解析不了返回 0。"""
+    try:
+        return int(calendar.timegm(time.strptime(str(s)[:19], "%Y-%m-%dT%H:%M:%S")))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def cito_get(es, path, params=None, timeout=None):
+    """一次 Cito GET。返回 `(ok, data, err)`，**永不抛异常**。
+
+    认证头是 **`x-api-key`**（不是 `X-API-Key`）。超限时 Cito 会**直接拒绝请求**
+    （不是静默降级），所以这里把任何失败都归一成 `ok=False`，交给上层降级。
+    """
+    key = str((es or {}).get("cito_api_key") or "").strip()
+    if not key:
+        return False, None, "没有配 cito_api_key"
+    url = CITO_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    try:
+        to = int(timeout or (es or {}).get("http_timeout") or 25)
+    except (TypeError, ValueError):
+        to = 25
+    try:
+        text = watch.http_request(url, headers={
+            "x-api-key": key,
+            "Accept": "application/json",
+        }, timeout=to)
+        payload = json.loads(text or "{}")
+        if not isinstance(payload, dict):
+            return False, None, "响应不是 JSON 对象"
+        return True, payload, ""
+    except urllib.error.HTTPError as exc:
+        return False, None, "HTTP %s %s" % (exc.code, exc.reason)
+    except Exception as exc:  # noqa: BLE001
+        return False, None, "%s: %s" % (type(exc).__name__, exc)
+
+
+def _cito_month_key(now):
+    return "%04d-%02d" % (now.year, now.month)
+
+
+def cito_usage_check(now, path=CITO_USAGE_FILE):
+    """返回 `(本月已用次数, 上限)`；跨月自动归零。
+
+    读不到 / 格式坏了都当 0 —— 守卫失灵的方向必须是「放行」，
+    绝不能因为记账文件坏了就把整条选段链路永久挡住。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:  # noqa: BLE001
+        return 0, CITO_MONTHLY_BUDGET
+    if not isinstance(st, dict) or st.get("month") != _cito_month_key(now):
+        return 0, CITO_MONTHLY_BUDGET
+    try:
+        n = int(st.get("count") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return max(0, n), CITO_MONTHLY_BUDGET
+
+
+def cito_usage_add(n, now, path=CITO_USAGE_FILE):
+    """把用量加上 `n`（**锁内重读 + 写回**），返回加完之后的本月累计。
+
+    写盘失败**不抛异常**：记账失败不该影响战报。
+    """
+    used = 0
+    with file_lock(path):
+        used, _limit = cito_usage_check(now, path)
+        used += max(0, int(n or 0))
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"month": _cito_month_key(now), "count": used}, f)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log("[warn] 选手数据：Cito 用量记账写盘失败（%s），按不记账继续" % exc)
+    return used
+
+
+def attach_cito_players(rows, es):
+    """给一批战报行补选手段（K/D/A + ADR + KAST + Rating）。返回补上的**场次数**。
+
+    **任何一步失败都只是少画一段**：不抛异常、不影响发送、不在群里发错误。
+
+    调用预算：本轮至多 `1 次 recent + N 次 player-stats`（N = 待补的行数），
+    与「一轮最多几场」同量级，远低于免费档 10 次/分钟。
+    本函数**全部在状态锁之外**执行（铁律 ③）—— 唯一碰锁的地方是 `cito_usage_add`
+    的一次数文件读写（毫秒级）。
+    """
+    es = es or {}
+    if not rows:
+        return 0
+    if not es.get("cito_enabled"):
+        log("[info] 选手数据：Cito 未启用（cito_enabled=false），战报不含选段")
+        return 0
+    if not es.get("card_players_enabled", True):
+        # 开关在渲染层 —— 抓了也不会画，就别花 API 额度。
+        log("[info] 选手数据：card_players_enabled=false（渲染层不画选段），不抓 Cito")
+        return 0
+    if not str(es.get("cito_api_key") or "").strip():
+        log("[warn] 选手数据：cito_enabled=true 但没配 cito_api_key → 跳过（战报不含选段）")
+        return 0
+
+    now = datetime.now(CST)
+    used, budget = cito_usage_check(now)
+    if used >= budget:
+        log("[warn] 选手数据：本月 Cito 调用已达守卫上限 %d/%d，跳过（战报不含选段）"
+            % (used, budget))
+        return 0
+
+    tol_h = es.get("cito_match_tolerance_hours", 6)
+    rev = cito_hltv_reverse(es.get("hltv_aliases"))
+
+    ok, data, err = cito_get(es, "/cs2/matches/recent", {"limit": 100})
+    cito_usage_add(1, now)
+    if not ok:
+        log("[warn] 选手数据：拉 Cito 最近战果失败（%s）→ 本轮战报不含选段" % err)
+        return 0
+    cands = []
+    for it in data.get("data") or []:
+        if not isinstance(it, dict):
+            continue
+        it["ts"] = _iso_to_epoch(it.get("startsAt"))
+        if it["ts"]:
+            cands.append(it)
+    log("[info] 选手数据：Cito 最近战果 %d 场，待配对 %d 场" % (len(cands), len(rows)))
+
+    filled = 0
+    for row in rows:
+        used, budget = cito_usage_check(datetime.now(CST))
+        if used >= budget:
+            log("[warn] 选手数据：Cito 调用达到守卫上限 %d，剩余场次本轮不补" % budget)
+            break
+        pair = " vs ".join(list(row.get("teams") or [])[:2])
+        cand, dt, swap = cito_pick_candidate(
+            row.get("teams") or [], row.get("ts") or 0, cands, tol_h, rev)
+        if cand is None:
+            why = ("最近一场差 %.0f 分钟，超容差" % (dt / 60.0)) if dt else "队名对不上"
+            log("[info] 选手数据：%s 在 Cito 最近战果里配不上（%s），这一场不含选段"
+                % (pair, why))
+            continue
+        ok2, d2, err2 = cito_get(es, "/cs2/matches/%s/player-stats" % cand.get("id"))
+        cito_usage_add(1, datetime.now(CST))
+        if not ok2:
+            log("[warn] 选手数据：%s 的 player-stats 拉取失败（%s），这一场不含选段"
+                % (pair, err2))
+            continue
+        played = cito_played_maps(cand)
+        plist = cito_rows_to_players(d2.get("data") or [], played,
+                                     row.get("teams") or [], cand, swap, rev)
+        if not plist:
+            log("[info] 选手数据：%s 的 player-stats 是空的（Cito 还没收上来），"
+                "这一场不含选段" % pair)
+            continue
+        row["players"] = plist
+        filled += 1
+        log("[info] 选手数据：%s ✓ %d 张图 / %d 名选手（Cito %s，时间差 %.0f 分钟）"
+            % (pair, len(plist), sum(len(x["players"]) for x in plist),
+               cand.get("id"), (dt or 0) / 60.0))
+    return filled
+
+
 def run_results(cfg, args):
     """结算一轮战果。
 
@@ -3833,10 +4233,11 @@ def run_results(cfg, args):
     else:
         log("[info] 逐图比分已关闭（card_results_maps_enabled=false），只发系列比分")
 
-    # ---- 选手数据：**当前无可用数据源，抓取层已拆出（2026-10-09）** ----
-    # 曾用 csdb.gg（已改成客户端渲染而失效）与 Liquipedia（不存选手数据），
-    # 详见文件顶部「选手数据」注释块。展示层原地保留，等接上新源即可生效。
-    log("[info] 选手数据：当前无可用数据源，战报不含选手段（展示层已保留）")
+    # ---- 选手数据：Cito（可选步骤，默认关闭）----
+    # 设计见 `deploy/CITO_PLAYERS.md`。**任何失败都只是少画一段**：
+    # 所有异常都在 attach_cito_players 里消化掉了，这里不做任何判断。
+    # ⚠️ 必须在**状态锁之外**调用（铁律 ③）—— 落盘只在下面 `_persist` 里做。
+    attach_cito_players(rows, es)
 
     log("[info] 本轮结算 %d 场（还有 %d 场在打），**一场一条消息**"
         % (len(rows), len(waiting)))
@@ -6578,7 +6979,9 @@ def selftest():
     # 用 AST 而不是字符串 needle —— 自检就在本文件里，needle 会匹配到自己。
     def _net_in_lock(tree):
         net = {"fetch_matches", "fetch_once", "onebot_api", "get_rank",
-               "fetch_event_page"}
+               "fetch_event_page",
+               # Cito（选手数据）：同样必须在锁外 —— 铁律 ③ 对它是同一条。
+               "cito_get", "attach_cito_players"}
         hits = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.With):
@@ -6620,6 +7023,245 @@ def selftest():
             CMD_WATERMARK_FILE.endswith("state_cmd_watermark.json")
             and CMD_WATERMARK_FILE != RESULTS_STATE_FILE
             and CMD_WATERMARK_FILE != PARSE_STAMP_FILE)
+
+    # ---- 选手数据（Cito）--------------------------------------------------
+    # 判据全部来自设计文档 §4.2 / §5 的**实测**结论（匹配率 15/15），不是想当然。
+    # 这一节**绝不联网**：cito_get 只要没配 key 就直接返回失败，所以下面就算走到
+    # 网络那一步也不会真的发包。
+    _rev = cito_hltv_reverse(es.get("hltv_aliases"))
+
+    t.check("Cito：队名归一（大小写 / 标点 / 音标）",
+            cito_norm("Team Spirit") == "teamspirit"
+            and cito_norm("  SAW ") == "saw"
+            and cito_norm("Famalicão") == "famalico")
+    # 实测漏配的头号原因：`FC Famalicão Esports` 要**同时**去掉 `fc ` 和 ` esports`
+    # 才等于 Cito 的 `Famalicão`。只剥一层就永远配不上。
+    t.check("Cito：队名前缀+后缀**组合**剥离（FC Famalicão Esports ↔ Famalicão）",
+            bool(cito_name_variants("FC Famalicão Esports", _rev)
+                 & cito_name_variants("Famalicão", _rev)))
+    t.check("Cito：反向 hltv_aliases 生效（Team Spirit ↔ Spirit）",
+            bool(cito_name_variants("Team Spirit", _rev)
+                 & cito_name_variants("Spirit", _rev))
+            and bool(cito_name_variants("FaZe Clan", _rev)
+                     & cito_name_variants("FaZe", _rev)))
+    t.check("Cito：无法机械推导的别名表生效（3 条）",
+            bool(cito_name_variants("Natus Vincere Junior", _rev)
+                 & cito_name_variants("NAVI Junior", _rev))
+            and bool(cito_name_variants("Rebels Gaming", _rev)
+                     & cito_name_variants("RBLS", _rev))
+            and bool(cito_name_variants("WhiteBIT Team", _rev)
+                     & cito_name_variants("WBT", _rev)))
+    # 这条是「为什么不能用 _team_same（子串包含）」的证据：主队与青训队**绝不许**互配。
+    t.check("Cito：NAVI 与 NAVI Junior 不算同一队（子串判据会张冠李戴）",
+            not (cito_name_variants("NAVI", _rev)
+                 & cito_name_variants("NAVI Junior", _rev))
+            and not (cito_name_variants("Natus Vincere", _rev)
+                     & cito_name_variants("Natus Vincere Junior", _rev))
+            and _team_same("NAVI", "NAVI Junior") is True)
+    t.check("Cito：空队名不产生噪声变体",
+            cito_name_variants("", _rev) == set()
+            and cito_name_variants("   ", _rev) == set())
+
+    t.check("Cito：配对判据 —— 同名对命中 / 顺序无关",
+            cito_pair_match(["Team Spirit", "M80"], ["Spirit", "M80"], _rev) is True
+            and cito_pair_match(["Team Spirit", "M80"], ["M80", "Spirit"], _rev) is True
+            and cito_pair_match(["SAW", "Lazer Cats"], ["Lazer Cats", "SAW"], _rev) is True)
+    t.check("Cito：配对判据 —— 错配必须为假（含主队/青训队、空名）",
+            cito_pair_match(["SAW", "Lazer Cats"], ["SAW", "NAVI Junior"], _rev) is False
+            and cito_pair_match(["SAW", "Lazer Cats"], ["Sangal", "SAW"], _rev) is False
+            and cito_pair_match(["", ""], ["SAW", "Lazer Cats"], _rev) is False)
+
+    _C1 = {"id": "cs2-match-1", "ts": 1000, "team1Id": "t-r", "team1Name": "RBLS",
+           "team2Id": "t-n", "team2Name": "NAVI Junior"}
+    _C2 = {"id": "cs2-match-2", "ts": 4000, "team1Id": "t-r", "team1Name": "RBLS",
+           "team2Id": "t-n", "team2Name": "NAVI Junior"}
+    _C3 = {"id": "cs2-match-3", "ts": 1000, "team1Id": "t-x", "team1Name": "Sangal",
+           "team2Id": "t-y", "team2Name": "SAW"}
+    _pick, _pdt, _pswap = cito_pick_candidate(
+        ["Rebels Gaming", "Natus Vincere Junior"], 1100, [_C2, _C1, _C3], 6, _rev)
+    t.check("Cito：多义取**时间最近**的一场（不是列表里的第一场）",
+            _pick is _C1 and _pdt == 100 and _pswap is False)
+    # 容差 6 小时 = 21600 秒；这里差 36000 秒（10 小时）→ 必须判为配不上。
+    _pick2, _pdt2, _ = cito_pick_candidate(
+        ["Rebels Gaming", "Natus Vincere Junior"], 40000, [_C2], 6, _rev)
+    t.check("Cito：超容差返回 None，但时间差照给（便于日志分辨漏因）",
+            _pick2 is None and _pdt2 == 36000)
+    _pick2b, _pdt2b, _ = cito_pick_candidate(
+        ["Rebels Gaming", "Natus Vincere Junior"], 40000, [_C2], 12, _rev)
+    t.check("Cito：容差放宽到 12 小时后同一场就能配上（容差真的在起作用）",
+            _pick2b is _C2 and _pdt2b == 36000)
+    _pick3, _, _sw3 = cito_pick_candidate(
+        ["Natus Vincere Junior", "Rebels Gaming"], 1000, [_C1], 6, _rev)
+    t.check("Cito：对方左右相反时给出『对调』标志（分左右要靠它）",
+            _pick3 is _C1 and _sw3 is True)
+    _pick4, _pdt4, _ = cito_pick_candidate(["Rebels Gaming", "SAW"], 1000,
+                                           [_C1, _C2], 6, _rev)
+    t.check("Cito：一个候选都对不上时返回 (None, None)",
+            _pick4 is None and _pdt4 is None)
+
+    # ⚠️ 实测：一场 2:0 的 Bo3，第 3 张图是 map_not_played —— 不过滤就会画出一张空图。
+    _C1["maps"] = [
+        {"mapNumber": 1, "mapName": "Dust2", "status": "completed",
+         "resultType": "played", "statsEligible": True},
+        {"mapNumber": 2, "mapName": "Cache", "status": "completed",
+         "resultType": "played", "statsEligible": True},
+        {"mapNumber": 3, "mapName": "Mirage", "status": "map_not_played",
+         "resultType": "not_played", "statsEligible": False},
+    ]
+    _played = cito_played_maps(_C1)
+    t.check("Cito：未打过的图必须被过滤（否则画出一张空的第 3 图）",
+            _played == {1: "Dust2", 2: "Cache"} and 3 not in _played)
+    t.check("Cito：maps 为空 / 字段怪也不炸",
+            cito_played_maps({}) == {} and cito_played_maps({"maps": None}) == {}
+            and cito_played_maps({"maps": [{"mapNumber": None},
+                                           {"mapNumber": 1, "mapName": "X"}]}) == {1: "X"})
+
+    _rows = [
+        {"playerName": "aaa", "teamId": "t-r", "teamName": "RBLS",
+         "mapId": "cs2-match-1-map-1", "kills": 20, "deaths": 10, "assists": 5,
+         "plusMinus": 10, "adr": 90.46, "kast": 0.652, "rating": 1.42},
+        {"playerName": "bbb", "teamId": "t-n", "teamName": "NAVI Junior",
+         "mapId": "cs2-match-1-map-1", "kills": 10, "deaths": 20, "assists": 0},
+        # 打过的图（map-2 = Cache）→ 保留
+        {"playerName": "ddd", "teamId": "t-r", "teamName": "RBLS",
+         "mapId": "cs2-match-1-map-2", "kills": 30, "deaths": 5},
+        # 未打的图（map-3 = map_not_played）→ **必须丢掉**
+        {"playerName": "ccc", "teamId": "t-r", "teamName": "RBLS",
+         "mapId": "cs2-match-1-map-3", "kills": 99, "deaths": 0},
+    ]
+    _pl = cito_rows_to_players(_rows, _played,
+                               ["Rebels Gaming", "Natus Vincere Junior"],
+                               _C1, False, _rev)
+    t.check("Cito：只保留**打过**的图（未打的图上的行被丢掉）",
+            len(_pl) == 2 and [x["map"] for x in _pl] == ["Dust2", "Cache"]
+            and [len(x["players"]) for x in _pl] == [2, 1]
+            and all(p["name"] != "ccc" for x in _pl for p in x["players"]))
+
+    # 🔴 队名必须改写成 Liquipedia 写法：展示层用 `_team_same`（双向子串包含）分左右列，
+    #    Cito 的短写名过不了那一关（RBLS / NAVI Junior / WBT 会整列空着）。
+    _p1 = _pl[0]["players"][0]
+    _p2 = _pl[0]["players"][1]
+    t.check("Cito：队名改写成 Liquipedia 写法（RBLS → Rebels Gaming）",
+            _p1["team"] == "Rebels Gaming" and _p2["team"] == "Natus Vincere Junior")
+    t.check("Cito：不改写就会被 _team_same 判成另一队（这就是必须改写的原因）",
+            _team_same("RBLS", "Rebels Gaming") is False
+            and _team_same(_p1["team"], "Rebels Gaming") is True
+            and _team_same(_p2["team"], "Natus Vincere Junior") is True)
+    t.check("Cito：kast 是 0~1 比例 → 展示层要 ×100",
+            _p1["kast"] == 65.2 and _pl[0]["players"][1]["kast"] == 0.0)
+    t.check("Cito：k / d / a 直取，缺字段按 0（不抛异常）",
+            _p1["k"] == 20 and _p1["d"] == 10 and _p1["a"] == 5
+            and _p2["k"] == 10 and _p2["a"] == 0 and _p2["adr"] == 0.0
+            and _p2["rating"] == 0.0)
+    t.check("Cito：player-stats 的 mapId 尾号对不上任何『已打的图』时整行丢掉",
+            not any(x["map"] == "Mirage" for x in _pl))
+    # 「对调」标志必须是**判别性**的：同一份输入下 True / False 得到相反的两列。
+    _lp_sw = ["Natus Vincere Junior", "Rebels Gaming"]
+    _sw_off = cito_rows_to_players(_rows, _played, _lp_sw, _C1, False, _rev)
+    _sw_on = cito_rows_to_players(_rows, _played, _lp_sw, _C1, True, _rev)
+    t.check("Cito：对调标志生效时左右两队的选手刚好互换",
+            [x["team"] for x in _sw_off[0]["players"]]
+            == ["Natus Vincere Junior", "Rebels Gaming"]
+            and [x["team"] for x in _sw_on[0]["players"]]
+            == ["Rebels Gaming", "Natus Vincere Junior"])
+    # 展示层消费：契约同构，`_aggregate_players` 一行都不用改。
+    _cagg, _cnmap = _aggregate_players({"players": _pl})
+    t.check("Cito：输出可直接喂 _aggregate_players（K/D 累加、ADR/KAST/Rating 取均值）",
+            _cnmap == 2 and len(_cagg) == 3
+            and _cagg[0]["name"] == "aaa" and _cagg[0]["k"] == 20
+            and _cagg[0]["kast"] == 65.2 and _cagg[0]["adr"] == 90.46
+            and {x["name"] for x in _cagg} == {"aaa", "bbb", "ddd"})
+    t.check("Cito：空 player-stats → 0 张图、0 行（不炸）",
+            cito_rows_to_players([], {}, ["A", "B"], _C1, False, _rev) == []
+            and _aggregate_players({"players": []}) == ([], 0))
+    t.check("Cito：ISO UTC → epoch 秒（解析不了返回 0）",
+            _iso_to_epoch("2026-10-09T07:00:00.000Z")
+            == calendar.timegm(time.strptime("2026-10-09T07:00:00", "%Y-%m-%dT%H:%M:%S"))
+            and _iso_to_epoch("") == 0 and _iso_to_epoch(None) == 0)
+
+    # 没配 key 就直接失败 —— 自检因此**永远发不出网络请求**。
+    _ok0, _d0, _e0 = cito_get({"cito_api_key": ""}, "/cs2/matches/recent")
+    t.check("Cito：没配 key 时不发请求，直接返回失败",
+            _ok0 is False and _d0 is None and "key" in _e0)
+    _b0 = [{"ts": 1000, "teams": ["A", "B"]}]
+    t.check("Cito：cito_enabled=false（默认）→ 一场都不补、0 请求",
+            attach_cito_players(_b0, dict(es, cito_enabled=False)) == 0
+            and "players" not in _b0[0])
+    t.check("Cito：开着但没配 key → 返回 0（降级，不炸）",
+            attach_cito_players([{"ts": 1000, "teams": ["A", "B"]}],
+                                dict(es, cito_enabled=True, cito_api_key="")) == 0)
+    t.check("Cito：渲染层不画选段时不去抓（省额度）",
+            attach_cito_players([{"ts": 1000, "teams": ["A", "B"]}],
+                                dict(es, cito_enabled=True, cito_api_key="k",
+                                     card_players_enabled=False)) == 0)
+    t.check("Cito：空 rows 直接返回 0",
+            attach_cito_players([], dict(es, cito_enabled=True, cito_api_key="k")) == 0)
+
+    _uf = os.path.join(tempfile.gettempdir(), "cito_usage_selftest_%d.json" % os.getpid())
+    _un = datetime(2026, 10, 9, 12, 0)
+    try:
+        for _p in (_uf, _uf + ".tmp", _uf + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+        t.check("Cito：用量文件不存在 → 从 0 起，上限 = 预算",
+                cito_usage_check(_un, _uf) == (0, CITO_MONTHLY_BUDGET))
+        cito_usage_add(3, _un, _uf)
+        cito_usage_add(2, _un, _uf)
+        t.check("Cito：用量累加（锁内重读 + 写回，不丢更新）",
+                cito_usage_check(_un, _uf)[0] == 5)
+        t.check("Cito：跨月自动归零",
+                cito_usage_check(datetime(2026, 11, 1, 0, 0), _uf)[0] == 0)
+        with open(_uf, "w", encoding="utf-8") as _f:
+            _f.write("{这不是 JSON")
+        t.check("Cito：用量文件坏了当 0（守卫失灵方向必须『放行』而非『误挡』）",
+                cito_usage_check(_un, _uf)[0] == 0)
+    finally:
+        for _p in (_uf, _uf + ".tmp", _uf + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+
+    # ---- 结构断言（AST）：Cito 只在 `--results` 的结算路径里 ----
+    _rr = _fn_def("run_results")
+    t.check("结构：run_results 调 attach_cito_players（选段唯一接入点）",
+            _rr is not None and "attach_cito_players" in _call_names(_rr))
+    for _f in ("run_daily", "run_announce", "run_once", "run_listen",
+               "backfill_abandoned"):
+        _n = _fn_def(_f)
+        t.check("结构：%s 不碰 Cito（那几条流水线保持零网络）" % _f,
+                _n is not None
+                and not ({"cito_get", "attach_cito_players"} & set(_call_names(_n))))
+
+    def _in_lock(node, fn_name):
+        """`fn_name` 是否被放在 `with file_lock(...)` 里调用。"""
+        for w in ast.walk(node) if node is not None else []:
+            if not isinstance(w, ast.With):
+                continue
+            if not any(isinstance(it.context_expr, ast.Call)
+                       and isinstance(it.context_expr.func, ast.Name)
+                       and it.context_expr.func.id == "file_lock"
+                       for it in w.items):
+                continue
+            if fn_name in _call_names(w):
+                return True
+        return False
+
+    _ua = _fn_def("cito_usage_add")
+    t.check("结构：cito_usage_add 在 file_lock 里做『读—改—写』（不是锁外覆盖）",
+            _ua is not None and _in_lock(_ua, "cito_usage_check")
+            and not _in_lock(_ua, "cito_get"))
+    t.check("结构：attach_cito_players 不在 file_lock 内（联网必须在锁外，铁律 ③）",
+            not _in_lock(_fn_def("attach_cito_players"), "cito_get"))
+    _get_callers = sorted({n.name for n in ast.walk(_ast_tree)
+                           if isinstance(n, ast.FunctionDef)
+                           and "cito_get" in _call_names(n)})
+    t.check("结构：直接调 cito_get 的只有 attach_cito_players（单点出口）"
+            "（自检本身也算一个调用方，故必须显式列出）",
+            _get_callers == ["attach_cito_players", "selftest"])
+    t.check("Cito：cito_enabled 默认必须是 False（关着 = 一次请求都不发）",
+            ESPORT_DEFAULTS.get("cito_enabled") is False)
+    t.check("Cito：用量文件是 state_* 形态（.gitignore 与 pack_deploy 两条守卫都挡得住）",
+            os.path.basename(CITO_USAGE_FILE).startswith("state_")
+            and CITO_USAGE_FILE.endswith(".json"))
 
     return t.done("selftest")
 

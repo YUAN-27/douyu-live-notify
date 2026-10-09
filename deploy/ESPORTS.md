@@ -319,10 +319,11 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 > ⚠️ **但排名页例外**：`/ranking/teams/` 实测 302 → 200、1.1 MB 正常，
 > 所以「世界前 N」那条不受影响。别把这两件事混成「HLTV 全站不可用」。
 >
-> 因此**选手 rating 和全场 MVP 无法自动获取**（Liquipedia 也没有：整页 `Rating` 只命中 4 次，
-> 全是赛事规则文本）。见 §9。
-> **2026-10-05**：曾改从 csdb.gg 拿；**2026-10-09 该源失效、抓取层已整体拆掉**
-> （渲染层保留）。详见 §3.2。
+> 因此**选手 rating 和全场 MVP 不能从 HLTV / Liquipedia 拿**（Liquipedia 整页 `Rating`
+> 只命中 4 次，全是赛事规则文本）。见 §9。
+> **2026-10-05**：曾改从 csdb.gg 拿；**2026-10-09 该源失效、抓取层已整体拆掉**。
+> **2026-10-09 晚**：改用 **Cito API**（免费档，实测可行），抓取层已接上，
+> **默认关闭**（`cito_enabled=false`）。详见 §3.2 与 `deploy/CITO_PLAYERS.md`。
 
 ### 🔍 逐图比分（单场战报用）：从**赛事页**拿，不用上 HLTV
 
@@ -360,27 +361,35 @@ systemctl list-timers douyu-esports.timer        # 确认 NEXT 是你要的时�
 直接抓 `title="…"` 会把同一支队拼三遍（实测拼出过 `AimclubAimclubAimclub`）；
 逐图要按**字面量** `<div class="brkts-popup-body-grid-row">` 切段，否则地图数量会算成 0。
 
-### 🔍 选手数据（单场战报用）：**渲染层保留，抓取层已拆出（无可用数据源）**
+### 🔍 选手数据（单场战报用）：数据源 = **Cito API**（2026-10-09 接入，**默认关闭**）
 
-逐图比分只能说明「这张图几比几」，读者更想知道**谁打得好**。卡片本来会带一段
-5v5 选手数据（K / D / A / ± / ADR / KAST / Rating + 全场 MVP）。
+逐图比分只能说明「这张图几比几」，读者更想知道**谁打得好**。卡片会带一段
+5v5 选手数据（K / D / ADR / KAST / Rating + 全场 MVP）。
 
-> **2026-10-09：抓取层整体拆掉。** 原数据源 csdb.gg 改成 Next.js **客户端渲染**后
-> 单场页只剩约 60 KB 骨架，`Player K D A` / `Rating` 零命中、RSC payload 里也没有
-> 数据，解析器实跑返回 0 张图；`/api/` 被 robots.txt 禁止。同期排除的还有：
-> Liquipedia 不存选手数据、HLTV 全站 403、bo3.gg / escorenews 403、5eplay 阿里云 WAF。
-> PandaScore 官方 API 免费档不含选手统计（要 Historical 档 400€/月/游戏）。
+> **现状（2026-10-09 晚）：抓到数据了。** csdb.gg 失效后逐个复核过一圈，
+> 最后落在 **Cito API**（`citoapi.com`，免费档 500 次/月、无需绑卡）：
+> 实测 `GET /cs2/matches/{id}/player-stats` **比赛刚结束就有数据**，
+> 且**同时给出 K / D / A / ADR / KAST / Rating**（Rating 3.0，与 HLTV 同源）。
+> 配套实测：赛程页 → Cito 的 `matchId` 配对率 **15/15 = 100%**
+> （靠队名前缀后缀**组合**剥离 + 少量别名，不靠 HLTV 的 id）。
+> **完整设计与实测记录见 `deploy/CITO_PLAYERS.md`（唯一权威）。**
+>
+> 同期排除：csdb.gg（改 Next.js 客户端渲染，单场页只剩 ~60 KB 骨架，解析器实跑 0 张图）、
+> Liquipedia（不存选手数据）、HLTV 全站 403、bo3.gg / escorenews 403、5eplay 阿里云 WAF、
+> PandaScore 官方 API 免费档不含选手统计（要 Historical 档 400€/月/游戏）、
+> Parse.bot 的 HLTV 转售（认证后实测单场 `stats` **0/8 场**有数据）。
 > 详见 §9 与文档末尾「数据源结论」。
 
-**现在保留什么、拆了什么：**
+**两层各是什么状态：**
 
 | 层 | 状态 | 具体 |
 |---|---|---|
-| **渲染层** | ✅ 原地保留 | `result_template.html` 的选段（MVP 卡 + 双方统计表）、`build_result_match()` 的 `players` / `mvp` / `mvp_basis` 字段、`_aggregate_players()` 聚合、`_draw_player_block()` 的 Pillow 版式、`_team_same()` 分列 |
-| **抓取层** | ❌ 已删除 | `CSDB_*` 常量、`fetch_csdb` / `parse_csdb_matches` / `locate_csdb_match` / `parse_csdb_players` / `attach_players` 五个函数、`--results` 里的调用点 |
+| **渲染层** | ✅ 原地保留（未改动） | `result_template.html` 的选段（MVP 卡 + 双方统计表）、`build_result_match()` 的 `players` / `mvp` / `mvp_basis` 字段、`_aggregate_players()` 聚合、`_draw_player_block()` 的 Pillow 版式、`_team_same()` 分列 |
+| **抓取层（旧）** | ❌ 已删除 | `CSDB_*` 常量、`fetch_csdb` / `parse_csdb_matches` / `locate_csdb_match` / `parse_csdb_players` / `attach_players` 五个函数 —— 随 csdb.gg 失效一起拆掉 |
+| **抓取层（新）** | ✅ 2026-10-09 接入 | `CITO_*` 常量 + `cito_norm` / `cito_name_variants` / `cito_pair_match` / `cito_pick_candidate` / `cito_played_maps` / `cito_rows_to_players` / `cito_get` / `cito_usage_check` / `cito_usage_add` / `attach_cito_players`；唯一调用点在 `--results`（**锁外**） |
 
-**为什么保留渲染层**：它是「数据 → 卡片」的转换与绘制能力，与数据来源无关。将来接上
-任何可用数据源（官方 API / 新的聚合站），**只需把逐图选手数据填进 `row["players"]`**：
+**为什么渲染层一行都没改**：它是「数据 → 卡片」的转换与绘制能力，与数据来源无关。
+新源只要把逐图选手数据填进 `row["players"]` 即可：
 
 ```python
 row["players"] = [
@@ -392,17 +401,28 @@ row["players"] = [
 ```
 
 卡片就会自动带上选段，**模板一行都不用改**。契约由 `_aggregate_players()` 的
-docstring 固化，自检用一段内嵌的该结构做端到端渲染验证（不依赖任何抓取函数）。
+docstring 固化，自检里端到端验证过（Cito 行 → `_aggregate_players()` → 选手行）。
 
-**降级路径（现在恒走这条）**：战果行上没有 `players` 键 → `build_result_match()`
-返回空选段 → 模板 `hasStats=false` → `<div class="mid">` 居中形态（只有 hero + 逐图
-比分，没有 MVP 卡和统计表）。这是**刻意设计好的正常形态，不是故障**。
+**降级路径**：`cito_enabled=false`（**默认**）/ 没配 key / 配对不上 / 接口失败 ——
+战果行上没有 `players` 键 → `build_result_match()` 返回空选段 → 模板 `hasStats=false`
+→ `<div class="mid">` 居中形态（只有 hero + 逐图比分，没有 MVP 卡和统计表）。
+这是**刻意设计好的正常形态，不是故障**；关闭时**一次网络请求都不发**。
 
-保留的开关语义：`card_players_enabled` 现在**没有消费者**（战果行永远不会有
-`players`，留着供将来接新源时复用）；`card_players_per_team`（默认 3）仍被展示层读取，
-决定每图每队画几名 —— 全画 10 人会让 Bo5 卡片高过 2400px 上限。
+开关语义：`cito_enabled` 是**总线开关**（默认 `false`）—— 关着时连请求都不发，
+回滚 = 改这一行；`card_players_enabled` 是**渲染开关**（不做无谓抓取）；
+`card_players_per_team`（默认 3）决定每图每队画几名 —— 全画 10 人会让
+Bo5 卡片高过 2400px 上限。
 
-**将来接新源时的注意点**（前一轮实现踩过的坑，留着备用）：
+**Cito 特有的三个坑**（完整版见 `CITO_PLAYERS.md` §2）：
+
+- 🔴 `maps[].dataAvailability.playerStats.dataAvailable` **恒为 `false`，完全不可信** ——
+  判「有没有数据」必须**直接请求**，信它会白扔掉整个功能。
+- 🔴 `maps[]` **混着没打过的图**（`status="map_not_played"`）—— 不过滤会画出一张空的图。
+  这也是「Bo3 只回 20 行」的真正原因：**不是接口有上限，是那场 2:0 只打了两张图**。
+- 🔴 队名必须**改写回 Liquipedia 写法**：展示层用 `_team_same()`（双向子串包含）分左右列，
+  Cito 的短名（`RBLS` / `NAVI Junior` / `WBT`）过不了那一关，不改写会**整列空着**。
+
+**旧一轮实现留下的注意点**（换任何源都用得上）：
 
 - 表头文本（如 `+- ADR KAST Rating`）会混进切表后的正文开头，**必须先剥掉**再跑
   选手行正则，否则第一名选手的名字会被污染。
@@ -612,7 +632,9 @@ Stake Ranked Episode 4 · Bo3
 
 - 胜者标识 = 队名胜负色 + 队名下方一小段胜利色短线（**不再用描边假粗体**，
   叠在 30px 字上会显肥）。
-- 选手段是**锦上添花**：现在**无可用数据源**，恒不绘制（渲染层已保留，接上新源即生效）；高度随之动态收缩，Bo1 → Bo5 都适配（每图固定高 + 选手行数可变）。
+- 选手段是**锦上添花**：`cito_enabled=false`（默认）时恒不绘制，卡片自动走「居中无统计」
+  形态（渲染层已保留，接上源即生效）；高度随之动态收缩，Bo1 → Bo5 都适配（每图固定高 +
+  选手行数可变）。
 
 - **胜方队名绿色、负方队名红色**（用户 2026-10-05 明确要求）。胜方**另外**再加一档
   假粗体 —— 红绿对色盲不友好，留一个不依赖颜色的信号，灰度打印也还分得开。
@@ -856,8 +878,11 @@ tail -f /var/log/douyu-watch/esports-daily.log
 | `results_enabled` | `true` | **战果公布总开关**。`false` = 完全回到「只发预告」 |
 | `card_results_enabled` | `true` | 战果卡片开关（单场 + 整合版共用）。`false` = 只发文字 |
 | `card_results_maps_enabled` | `true` | 单场战报要不要带**逐图比分**。带上就多抓赛事页（见 §3.1）；`false` = 少抓请求、只发系列比分 |
-| `card_players_enabled` | `true` | **目前无消费者**（选手数据抓取层已于 2026-10-09 拆出，见 §3.2）。留着供将来接上新数据源时复用开关语义 |
-| `card_players_per_team` | `3` | 每图每队画几名选手（按 rating 取前 N）。**展示层仍读它**，但当前无数据源故无效果；`0` = 不画选手段；调大注意卡片 2400px 高度上限（Bo5 + 每队 5 人 ≈ 1549px，仍安全） |
+| `card_players_enabled` | `true` | **渲染开关**：单场战报画不画选段。`false` = 不画，且 `attach_cito_players` 会**直接跳过抓取**（不花额度） |
+| `card_players_per_team` | `3` | 每图每队画几名选手（按 rating 取前 N）。`0` = 不画选手段；调大注意卡片 2400px 高度上限（Bo5 + 每队 5 人 ≈ 1549px，仍安全） |
+| `cito_enabled` | **`false`** | 选手数据**总线开关**。默认关闭 = 一次 Cito 请求都不发，行为与「没有这个功能」完全一致。回滚 = 改回 `false` |
+| `cito_api_key` | `""` | Cito 的免费 key（`cito_...`）。**只写在服务器的 `config.json` 里**，不进仓库、不进部署包 |
+| `cito_match_tolerance_hours` | `6` | 「队名对 + 时间」配对的容差。实测 15 场里 14 场时间**完全一致**、1 场差 5 分钟，6 小时非常宽裕 |
 | `results_grace_minutes` | `{Bo1:50, Bo3:100, Bo5:170}` | 开赛多久之后才开始查结果（**最重要的安全阀**，也是节流阀） |
 | `results_timeout_minutes` | `{Bo1:150, Bo3:270, Bo5:360}` | 到多久还没结果就放弃（标 `abandoned`）= 最长时长 + 约 90 分钟「迟到 + 页面延迟」余量。**锚点是登记（计划）开赛时刻**，详见 §3.1 |
 | `results_max_age_hours` | `36` | 清单条目最多留多久。**不是 24** —— 整合版次日早上才发，24 会把窗口最早那场清掉 |
@@ -1131,9 +1156,10 @@ cd /opt/douyu-live-notify && python3 esports.py --check
 ## 8. 自检
 
 ```bash
-python3 esports.py --selftest    # 满配 392 项（装了 Pillow + make_card_font.py）：解析器 /
+python3 esports.py --selftest    # 满配 468 项（装了 Pillow + make_card_font.py）：解析器 /
                                  # 四条筛选 / 跨夜窗口 / 正文版式 / 图片卡片 / 战果结算 /
-                                 # 单场战报 / 选手数据（展示层）/ 全天整合版 / 条款节流 /
+                                 # 单场战报 / 选手数据（展示层 + **Cito 抓取层**）/
+                                 # 全天整合版 / 条款节流 / 群内命令交互 /
                                  # 静默计数 / 白名单 / 排名与别名 / 文案
 ```
 
@@ -1146,10 +1172,10 @@ python3 esports.py --selftest    # 满配 392 项（装了 Pillow + make_card_fo
 > |---|---|
 > | 少了 `make_card_font.py` | 少「两张字符表是否一致」那几条 |
 > | 没装 Pillow | 四张卡片的渲染断言换成降级断言 |
-> | 在「装好的机器」上（无 `deploy/`、无 `config.example.json`、无 `*.service`） | 少 3 条（本机 392 → 服务器 389） |
+> | 在「装好的机器」上（无 `deploy/`、无 `config.example.json`、无 `*.service`） | 少 3 条（本机 468 → 服务器 465） |
 >
 > **别照着这里的数字改断言** —— 以实际输出末行「结果：N 项通过，0 项失败」为准。
-> 断言的增删是常态（本次拆 csdb 抓取层就净减了约 16 条）。
+> 断言的增删是常态（接入 Cito 净增了 45 条；更早拆 csdb 抓取层净减约 16 条）。
 >
 > ⚠️ 想把自检搬到别的目录跑（比如量项数）时，**临时目录里必须也放一份 `watch.py`**
 > —— 它在**仓库根**而不是 `deploy/`，忘了它只会看到
@@ -1243,24 +1269,28 @@ python3 esports.py --selftest    # 满配 392 项（装了 Pillow + make_card_fo
 排名抓取的失败**不影响**正常推送：拿不到就用缓存，缓存也没有就只跳过「世界前 N」
 这一条，日志打 `[warn]`，另外三条照常。
 
-### 选手数据源：**结论 = 目前无一可用**（2026-10-09 复核）
+### 选手数据源：**结论 = Cito 可用，已接入（默认关闭）**（2026-10-09 两轮复核）
 
-原方案从 csdb.gg 拿（曾实现 `fetch_csdb` / `parse_csdb_players` 等），2026-10-09 复核后
-确认**该源已失效**，抓取层整体拆出（渲染层保留，见 §3.2）。完整排查记录：
+第一轮（先拆 csdb）：原方案从 csdb.gg 拿（曾实现 `fetch_csdb` / `parse_csdb_players` 等），
+2026-10-09 复核确认**该源已失效**，抓取层整体拆出（渲染层保留，见 §3.2）。
+第二轮（再找源）：逐个实测后落在 **Cito**，并已实现接入。
+完整排查记录：
 
 | 候选源 | 结果 | 实测证据 |
 |---|---|---|
-| **csdb.gg** | ❌ 失效 | 改成 Next.js 客户端渲染：单场页仅 ~60 KB 骨架，`Player K D A` / `Rating` 零命中，RSC payload 无数据，解析器实跑 **0 张图**；`/api/` 被 robots 禁；探测中吃 429 |
+| **csdb.gg**（原实现） | ❌ 失效 | 改成 Next.js 客户端渲染：单场页仅 ~60 KB 骨架，`Player K D A` / `Rating` 零命中，RSC payload 无数据，解析器实跑 **0 张图**；`/api/` 被 robots 禁；探测中吃 429 |
 | **Liquipedia** | ❌ 不存该数据 | `Match:` 命名空间（NS 130）**全站仅 6 页**（全是 `dev=MischiefMS` 实验产物）；那 6 页有 KDA/ADR/HS%/KAST 但**无 Rating**；主流赛事页渲染后 `Match:` 链接 **0 条**；`|hltv=` 与 `|stats=` 都是 **HLTV match id**，Liquipedia 只是转链 |
 | **HLTV** | ❌ 全站 403 | Cloudflare，任何 UA / 头都过不去（见下节） |
 | **bo3.gg / escorenews** | ❌ 403 | 同 Cloudflare 类拦截 |
 | **5eplay** | ❌ 阿里云 WAF | 服务器与本机均被拦 |
 | **PandaScore 官方 API** | ❌ 免费档无选手统计 | Fixtures Only（0€，1000 req/hr）只含赛程/结果；K/D/Rating 需 **Historical 档 €400/月/游戏**。2026-10-09 评估后放弃 |
-| **Parse.bot 的 HLTV API（第三方转售）** | ⚠️ 技术上可行、合规存疑 | `get_match_details`（2 credits/次）确含 per-map `kd`/`adr`/`rating`，免费档 200 credits。但它是**独立第三方对 HLTV 公开数据的 REST 包装**（非官方 API），与项目「只用官方 API / 尊重 robots」的原则冲突 —— 2026-10-09 决定不引入 |
+| **Parse.bot 的 HLTV API（第三方转售）** | ❌ **认证后实测仍不可用** | 免费档可调，但 `get_match_details` 的 `stats` 实测 **0/8 场**有数据（3 场返空 + 4 场超时）；只有聚合端点的 rating/KD，**无 ADR/KAST**。免费 200 credits 也不够 |
+| **Cito API**（`citoapi.com`） | ✅ **可用，已接入** | `GET /cs2/matches/{id}/player-stats` 实测 9/9 场有数据、**含当天刚结束的比赛**；K/D/A + **ADR** + **KAST** + **Rating（3.0）** 齐全。免费档 **500 次/月**、10 次/分钟、30 天历史。**赛程页 → matchId 配对率实测 15/15 = 100%** |
 
-**最终结论：不做自动获取，跑既有的降级路径**（战报无选手段，其余信息完整）。渲染层
-原地保留当接口，将来若出现**官方或授权**的数据源，按 §3.2 的 `row["players"]` 结构
-填数即可生效。
+**最终结论：已接入 Cito，但 `cito_enabled` 默认 `false`。** 关着时行为与「没有这个功能」
+完全一致（0 网络请求），战报走既有的降级路径（无选段，其余信息完整）。要开启就在
+服务器的 `config.json` 里填 `esports.cito_api_key` 并把 `esports.cito_enabled` 改成 `true`；
+回滚就是再改回 `false`。**完整设计 / 实测 / 坑清单 = `deploy/CITO_PLAYERS.md`。**
 
 ### ⚠️ HLTV 的比赛页/结果页对中国大陆 IP 是 403（2026-10-05 实测）
 
@@ -1280,8 +1310,8 @@ python3 esports.py --selftest    # 满配 392 项（装了 Pillow + make_card_fo
 **结论**：
 
 1. 「世界前 N」不受影响（排名页正常，见上一节）。
-2. ~~选手 rating 与全场 MVP 拿不到~~ → **2026-10-05 曾用 csdb.gg 解决，但该源已于
-   2026-10-09 失效**（改客户端渲染），抓取层随之拆出、渲染层保留。完整复核见「§9
-   选手数据源：结论 = 目前无一可用」一节。当前结论：**不做自动获取**，战报无选手段。
+2. 选手 rating 与全场 MVP：**2026-10-05 曾用 csdb.gg 解决 → 该源 2026-10-09 失效
+   → 同日改用 Cito 并已接入（默认关闭）**。完整复核见「§9 选手数据源：结论 = Cito
+   可用，已接入」一节。当前结论：**源可用，但默认不开**（`cito_enabled=false`）。
 3. 逐图比分**改从 Liquipedia 赛事页取**（见 §3.1），本来也不需要 HLTV。
 4. 赛事页弹窗里其实**带**每场的 HLTV 比赛页链接，但既然点不开，就不展示了。
