@@ -343,6 +343,15 @@ if [[ -f "$UNIT_DIR/douyu-esports-announce.service" \
   echo "已安装 douyu-esports-announce.service / .timer（尚未启用）"
 fi
 
+# CS2 群内命令交互单元（@ 机器人 · /赛事）。**只装不 enable**，理由同上面几条 ——
+# 它会在群里回消息，先手工前台跑一次确认行为，再决定开不开。
+# ⚠️ 注意它**没有 .timer**：这是个 Restart=always 的**常驻服务**，不是 oneshot 定时任务。
+#    启用是 `systemctl enable --now douyu-cmd`（不是 enable 一个 timer）。
+if [[ -f "$UNIT_DIR/douyu-cmd.service" ]]; then
+  install -m 644 "$UNIT_DIR/douyu-cmd.service" /etc/systemd/system/douyu-cmd.service
+  echo "已安装 douyu-cmd.service（尚未启用；启用：systemctl enable --now douyu-cmd）"
+fi
+
 # 看门狗的告警通道配置。**已存在绝不覆盖** —— 里面是你要填的 webhook 密钥。
 if [[ ! -f /etc/default/douyu-watchdog && -f "$UNIT_DIR/watchdog.env.example" ]]; then
   install -m 600 "$UNIT_DIR/watchdog.env.example" /etc/default/douyu-watchdog

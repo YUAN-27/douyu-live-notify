@@ -57,6 +57,10 @@ watch.py 是「每 45 秒轮询一个直播间」的常驻逻辑，和「每天�
                                        # 命中提醒窗口才渲染发图；由 announce.timer 每分钟拉起）
     python3 esports.py --check-announce # 同上但只打印/出图，**不发消息、不写状态**
                                         # （清单空着就没东西可看，等预告写过一轮再验收）
+    python3 esports.py --listen        # **常驻**：轮询群消息，看到「@ 机器人 + /赛事」
+                                       # 就回一张今天的总赛程大图（本项目唯一的常驻进程；
+                                       # 由 douyu-cmd.service 拉起，不加 timer。
+                                       # 设计见 deploy/CMD_INTERACT.md）
     python3 esports.py --teams         # 列出页面上的真实队名 + 是否已收录，用来校白名单
     python3 esports.py --test-notify   # 往配置的通道发一条测试消息（验证链路用）
     python3 esports.py --selftest      # 离线自检，不联网、不发消息
@@ -184,6 +188,13 @@ PARSE_STAMP_FILE = os.path.join(HERE, "state_esports_parse.json")
 # 全天整合版的幂等标记：记「哪个赛程日的整合版已经发过了」。
 # 存在理由：这个 job 是「次日早上固定时刻」触发的，重跑（手动 + timer）不能重发。
 DAILY_STATE_FILE = os.path.join(HERE, "state_esports_daily.json")
+# 群内命令交互（`--listen`）的水位线。
+# 结构：{ "last_message_id": int, "last_time": int,
+#         "cooldown": {"<群号>|<命令>": ts}, "retry": {"<message_id>": 尝试次数} }
+# ⚠️ 这是**第 4 个**会写状态文件的进程（另外三个见 file_lock 的 docstring）。
+#    但它写的是**自己这个文件**，与 state_results_pending.json 互不相干 ——
+#    所以「命令进程把结算进程堵死」这类事故在结构上就不会发生。
+CMD_WATERMARK_FILE = os.path.join(HERE, "state_cmd_watermark.json")
 
 # 状态文件落在这个目录；systemd 单元里用 ProtectSystem=full，只读 /usr /etc，
 # /opt 可写，所以和 watch.py 一样直接写在脚本旁边。
@@ -540,6 +551,25 @@ ESPORT_DEFAULTS = {
     "notify_retry_max": 3,
     "notify_retry_backoff_seconds": 15,
     "http_timeout": 25,
+    # ---- 群内命令交互（@ 机器人 · /赛事）----
+    # 见 deploy/CMD_INTERACT.md。**只有 `--listen` 这一个子命令读这些键**，
+    # 其余五条流水线一行都不碰它们 —— 这是「可一键回滚」的一部分：
+    # 停掉 douyu-cmd 后，这些键等于不存在。
+    # 常驻轮询的间隔（秒）。轮询 get_group_msg_history，几秒延迟对查询类命令无感，
+    # 但不碰 NapCat 配置、不重建容器，回滚只需 systemctl stop。
+    "cmd_poll_seconds": 3,
+    # 同群同命令这么多秒内只响应一次。防连点 —— 连点会打满 Liquipedia 请求，
+    # 进而触发来源侧风控，所以这不是「礼貌」，是带宽与风控预算。
+    "cmd_cooldown_seconds": 30,
+    # 每次轮询拉多少条历史。取 30：足够覆盖几秒内的新消息，
+    # 又不至于每次都把整段群历史拖回来。
+    "cmd_history_count": 30,
+    # 机器人的 QQ 号。**留空 = 启动时自动调 get_login_info 拿**（推荐）。
+    # 启动时自动取的好处：换机器人号 / 改配置都不用同步这里，不会静默失配。
+    "cmd_bot_qq": "",
+    # 一条命令最多尝试几次（含首次）。失败时水位线**不推进**（先发后落，宁可重复
+    # 也不丢），但必须有上限 —— 否则 Liquipedia 一直挂着就会变成每几秒一次的高频重试。
+    "cmd_max_attempts": 3,
 }
 
 # 网络层抖动可以重试；4xx 重试没有意义（UA 不合格、被封、页面没了，再试还是一样）。
@@ -6449,7 +6479,627 @@ def selftest():
             and _team_same("NAVI Junior", "NAVI") is True
             and _team_same("", "NAVI") is False)
 
+    # ---- 群内命令交互（@ 机器人 · /赛事）----
+    # 全部是**纯函数 + 结构断言**：不启动常驻循环、不联网、不写状态。
+    print("\n-- 群内命令交互（@ 机器人 · /赛事）--")
+    BOT = "3981665877"
+
+    t.check("命令：@ 机器人 + /赛事（string 形态）能认出",
+            parse_command("[CQ:at,qq=%s] /赛事" % BOT) == "/赛事")
+    t.check("命令：array 形态同样能认出（messagePostFormat 会翻转，坑 4）",
+            parse_command([{"type": "at", "data": {"qq": BOT}},
+                           {"type": "text", "data": {"text": " /赛事"}}]) == "/赛事")
+    t.check("命令：引用旧消息（CQ:reply）+ 前后空格都被剥掉（坑 5）",
+            parse_command("[CQ:reply,id=99][CQ:at,qq=%s]  /赛事  " % BOT) == "/赛事")
+    t.check("命令：多一个词就不算（**绝不做子串匹配**）",
+            parse_command("[CQ:at,qq=%s] /赛事 谢谢" % BOT) is None)
+    t.check("命令：闲聊里出现 /赛事 不算（闸门 1）",
+            parse_command("[CQ:at,qq=%s] 我觉得 /赛事 不错" % BOT) is None)
+    t.check("命令：空 / None / 非字符串都不炸",
+            parse_command("") is None and parse_command(None) is None
+            and parse_command(123) is None)
+
+    t.check("@ 判定：命中机器人 QQ",
+            is_at_bot("[CQ:at,qq=%s] /赛事" % BOT, BOT) is True)
+    t.check("@ 判定：@全体成员（qq=all）**不**算 @ 机器人（坑 3）",
+            is_at_bot("[CQ:at,qq=all] /赛事", BOT) is False)
+    t.check("@ 判定：@ 别人不算；没配 bot_qq 一律不算",
+            is_at_bot("[CQ:at,qq=10001] /赛事", BOT) is False
+            and is_at_bot("[CQ:at,qq=%s] /赛事" % BOT, "") is False)
+
+    _hist = [{"message_id": 10, "time": 100, "group_id": "1"},
+             {"message_id": 11, "time": 101, "group_id": "1"},
+             {"message_id": 12, "time": 102, "group_id": "1"}]
+    _wm0 = wm_init(_hist)
+    t.check("水位线·首跑：只记最大值，**历史一条都不算新**（铁律 ①，坑 1）",
+            _wm0["last_message_id"] == 12 and _wm0["last_time"] == 102
+            and wm_pending(_wm0, _hist) == [], _wm0)
+    _more = _hist + [{"message_id": 13, "time": 103, "group_id": "1"}]
+    t.check("水位线：只有 id 更大的才算新",
+            [_msg_id(m) for m in wm_pending(_wm0, _more)] == [13],
+            wm_pending(_wm0, _more))
+    _reset = [{"message_id": 1, "time": 50, "group_id": "1"},
+              {"message_id": 2, "time": 200, "group_id": "1"}]
+    t.check("水位线：正常「没有新消息」不算重置（time 也没前进）",
+            wm_reset_detected(_wm0, _hist) is False
+            and wm_pending(_wm0, _hist) == [])
+    t.check("水位线：id 被打回（NapCat 重启）**能被识别**（坑 8）",
+            wm_reset_detected(_wm0, _reset) is True)
+    t.check("水位线：识别到重置后一条都不算新（须重新基线化，不重复回复旧命令）",
+            wm_pending(_wm0, _reset) == [])
+    t.check("水位线：新消息正常前进时不算重置",
+            wm_reset_detected(_wm0, _more) is False)
+
+    _w1, _c1 = wm_after_handle(_wm0, _hist[-1], "skip", 3)
+    t.check("水位线·skip：推进且继续扫",
+            _c1 is True and _w1["last_message_id"] == 12, _w1)
+    _w2, _c2 = wm_after_handle(_wm0, {"message_id": 13, "time": 103}, "fail", 3)
+    t.check("水位线·失败未达上限：**不推进**、暂停本轮（铁律 ②，坑 2）",
+            _c2 is False and _w2["last_message_id"] == 12
+            and int(_w2["retry"].get("13") or 0) == 1, _w2)
+    _w3, _c3 = wm_after_handle(_w2, {"message_id": 13, "time": 103}, "fail", 2)
+    t.check("水位线·失败到上限：推进放弃（免得永远卡住）",
+            _c3 is True and _w3["last_message_id"] == 13
+            and "13" not in (_w3.get("retry") or {}), _w3)
+    _w4, _c4 = wm_after_handle(_w2, {"message_id": 13, "time": 103}, "ok", 3)
+    t.check("水位线·成功：推进并清掉重试计数",
+            _c4 is True and _w4["last_message_id"] == 13
+            and not _w4.get("retry"), _w4)
+
+    _wmc = wm_cooldown_touch(_wm0, "1|/赛事", 1000.0)
+    t.check("冷却：窗口内第二次不响应（闸门 2）",
+            wm_cooldown_ok(_wmc, "1|/赛事", 1020.0, 30) is False)
+    t.check("冷却：过了窗口就放行",
+            wm_cooldown_ok(_wmc, "1|/赛事", 1031.0, 30) is True)
+    t.check("冷却：cooldown=0 等于关掉；不同群/不同命令互不影响",
+            wm_cooldown_ok(_wm0, "1|/赛事", 1000.0, 0) is True
+            and wm_cooldown_ok(_wmc, "2|/赛事", 1000.0, 30) is True)
+
+    _tmpwm = os.path.join(tempfile.gettempdir(), "wm_selftest_%d.json" % os.getpid())
+    try:
+        for _p in (_tmpwm, _tmpwm + ".tmp"):
+            try:
+                os.remove(_p)
+            except OSError:
+                pass
+        t.check("水位线：文件不存在时 load_wm 返回 None（= 首跑，不是空 dict）",
+                load_wm(_tmpwm) is None)
+        save_wm(wm_init(_hist), _tmpwm)
+        t.check("水位线：存一次再读，值对得上",
+                int((load_wm(_tmpwm) or {}).get("last_message_id") or 0) == 12)
+    finally:
+        for _p in (_tmpwm, _tmpwm + ".tmp"):
+            try:
+                os.remove(_p)
+            except OSError:
+                pass
+
+    # 结构断言：联网调用**不得**落在 with file_lock(...) 里（铁律 ③ / 难点 3）。
+    # 用 AST 而不是字符串 needle —— 自检就在本文件里，needle 会匹配到自己。
+    def _net_in_lock(tree):
+        net = {"fetch_matches", "fetch_once", "onebot_api", "get_rank",
+               "fetch_event_page"}
+        hits = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.With):
+                continue
+            if not any(isinstance(it.context_expr, ast.Call)
+                       and isinstance(it.context_expr.func, ast.Name)
+                       and it.context_expr.func.id == "file_lock"
+                       for it in node.items):
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    _f = sub.func
+                    _nm = _f.id if isinstance(_f, ast.Name) else (
+                        _f.attr if isinstance(_f, ast.Attribute) else None)
+                    if _nm in net:
+                        hits.append((sub.lineno, _nm))
+        return hits
+
+    t.check("结构：联网调用不在 with file_lock(...) 内（铁律 ③）",
+            _net_in_lock(_ast_tree) == [], _net_in_lock(_ast_tree))
+
+    _rl = _fn_def("run_listen")
+    t.check("结构：run_listen 是常驻（有 while 循环）",
+            _rl is not None and any(isinstance(n, ast.While)
+                                    for n in ast.walk(_rl)))
+    t.check("结构：listen_tick 调 onebot_api 收消息、调 listen 相关落水位线",
+            "onebot_api" in _call_names(_fn_def("listen_tick"))
+            and "save_wm" in _call_names(_fn_def("listen_tick")))
+    t.check("结构：cmd_handle_schedule 复用现成渲染栈（不新写版式）",
+            {"render_card", "format_caption", "format_daily"}
+            <= set(_call_names(_fn_def("cmd_handle_schedule"))))
+    _mn = _fn_def("main")
+    t.check("结构：main 里有 args.listen 的分发",
+            bool(_mn) and any(isinstance(n, ast.Attribute) and n.attr == "listen"
+                              for n in ast.walk(_mn)))
+    t.check("结构：/赛事 已在命令表里注册且可调用",
+            CMD_SCHEDULE in CMD_REGISTRY and callable(CMD_REGISTRY[CMD_SCHEDULE]))
+    t.check("结构：命令进程只碰自己的状态文件（不写别条流水线的）",
+            CMD_WATERMARK_FILE.endswith("state_cmd_watermark.json")
+            and CMD_WATERMARK_FILE != RESULTS_STATE_FILE
+            and CMD_WATERMARK_FILE != PARSE_STAMP_FILE)
+
     return t.done("selftest")
+
+
+# ==========================================================================
+# 群内命令交互（@ 机器人 · /赛事）· 路线 A（轮询）
+# ==========================================================================
+# 设计文档：`deploy/CMD_INTERACT.md`（唯一权威）。这里只写实现，为什么这么做全在文档里。
+#
+# 这个项目原本是**纯单向发送**的（NapCat 的四个事件出口全空），本段是**第一条
+# 「接收」链路**：常驻轮询 `get_group_msg_history`，看到「@ 机器人 + /赛事」就回一张
+# 今天的总预告大图（复用每天 09:30 那套渲染栈，**不新写版式**）。
+#
+# 它是本项目**唯一一个常驻进程**（`Restart=always`）。现有 6 个 timer 一行都没动 ——
+# 所以出问题时 `systemctl stop douyu-cmd` 就回到今天的状态，这就是「可一键回滚」。
+#
+# 三条铁律（每条都有自检断言钉着，见 selftest 的「群内命令交互」一节）：
+#   ① **首跑不响应历史**：水位线初始化为「当前最大 message_id」，历史一条都不回。
+#      否则上线即刷屏 —— 把整段群历史（实测 299 条）当新命令全部重放。
+#   ② **先发后落**：回复成功才推进水位线；失败不推进（下轮重试），最坏重复发一条，
+#      绝不静默丢命令。但必须有尝试上限，否则来源一直挂就变成高频重试。
+#   ③ **联网不落在状态锁内**：`parse_gate` 有 30 秒节流等待，绝不能拿状态锁陪它睡。
+#      （结构断言会扫源码，钉住「with file_lock(...) 里不许有联网调用」。）
+
+# 命令字面量。判定是「剥掉所有 CQ 码 → strip() → **整条恰好等于**」，
+# **绝不做子串匹配**（否则「我觉得 /赛事 不错」这种闲聊也会触发）。
+CMD_SCHEDULE = "/赛事"
+
+# 命令表：{命令: 处理函数}。**加命令只需在这张表里加一行** ——
+# 处理函数签名 (cfg, es, msg, now) -> bool（返回是否**真的回复出去了**）。
+# 将来的 /战报、/选手 等按同一签名接进来即可，水位线 / 冷却 / 重试都不必改。
+CMD_REGISTRY = {}
+
+_CQ_RE = re.compile(r"\[CQ:[^\]]*\]")
+
+
+def strip_cq(message):
+    """剥掉消息里所有 CQ 码，返回剩下的纯文本。"""
+    return _CQ_RE.sub("", message or "")
+
+
+def message_to_cq(message):
+    """把消息统一成「CQ 码字符串」形态。
+
+    `messagePostFormat` 现在是 `"string"`（CQ 码字符串），但**配置是会被改的** ——
+    改成 `"array"` 后 message 会变成 `[{"type":"at","data":{"qq":...}}, ...]`。
+    两种形态都要认，不能写死（文档坑 4）。这里把数组形态**转成等价的 CQ 串**，
+    于是下游只需要处理一种形态。
+    """
+    if isinstance(message, str):
+        return message
+    if not isinstance(message, (list, tuple)):
+        return ""
+    out = []
+    for seg in message:
+        if not isinstance(seg, dict):
+            continue
+        stype = str(seg.get("type") or "")
+        data = seg.get("data") or {}
+        if stype == "text":
+            out.append(str(data.get("text") or ""))
+        elif stype == "at":
+            out.append("[CQ:at,qq=%s]" % (data.get("qq") or ""))
+        elif stype == "reply":
+            out.append("[CQ:reply,id=%s]" % (data.get("id") or ""))
+        elif stype == "image":
+            out.append("[CQ:image,file=%s]" % (data.get("file") or ""))
+        # 其余段（face / 表情 / 语音…）对命令识别没有意义，直接忽略
+    return "".join(out)
+
+
+def is_at_bot(message, bot_qq):
+    """消息里是否**恰好 @ 了机器人**。
+
+    ⚠️ `@全体成员` 的 CQ 是 `[CQ:at,qq=all]` —— 那不是 @ 机器人，必须排除。
+    所以不能写「只要有 `[CQ:at,` 就算」，要**精确匹配机器人 QQ**（文档坑 3）。
+    """
+    qq = str(bot_qq or "").strip()
+    if not qq:
+        return False
+    return ("[CQ:at,qq=%s]" % qq) in message_to_cq(message)
+
+
+def parse_command(message):
+    """从一条消息里认出命令；认不出返回 None。
+
+    `[CQ:reply,id=...]`（引用一条旧消息再 @ 机器人）也会被一起剥掉 ——
+    否则被引用的旧内容会混进判定，表现为「明明 @ 了却毫无反应」（文档坑 5）。
+    """
+    text = strip_cq(message_to_cq(message)).strip()
+    return text if text in CMD_REGISTRY else None
+
+
+def _msg_id(m):
+    try:
+        return int((m or {}).get("message_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _msg_time(m):
+    try:
+        return int((m or {}).get("time") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def wm_init(messages):
+    """首跑的**水位线初始化**：只记当前最大值，**不产生任何待响应消息**（铁律 ①）。"""
+    return {"last_message_id": max((_msg_id(m) for m in messages), default=0),
+            "last_time": max((_msg_time(m) for m in messages), default=0),
+            "cooldown": {}, "retry": {}}
+
+
+def wm_pending(wm, messages):
+    """水位线之后的新消息（保持传入顺序）。
+
+    只用 `message_id` 判定 —— 但**前提是先排除「id 被重置」**（见 `wm_reset_detected`）。
+    正常运行时 id 单调递增，所以「id 比水位线大」就等价于「新消息」。
+    """
+    lid = int(wm.get("last_message_id") or 0)
+    return [m for m in messages if _msg_id(m) > lid]
+
+
+def wm_reset_detected(wm, messages):
+    """是否检测到「`message_id` 被重置」（NapCat 重启后 id 可能从头开始，坑 8）。
+
+    判据：这一批里**没有任何 id 前进**，却有消息的 `time` 明显前进 ——
+    正常「没有新消息」的情况下 time 也不会前进（都 ≤ 水位线）。
+
+    检测到之后**不能**把整批当新消息处理：那会在群里**重复回复一堆旧命令**。
+    正确做法是重新基线化、一条都不响应（与首跑同策略，见 `listen_tick`）。
+    """
+    if not messages:
+        return False
+    if max((_msg_id(m) for m in messages), default=0) > int(wm.get("last_message_id") or 0):
+        return False
+    return max((_msg_time(m) for m in messages), default=0) > int(wm.get("last_time") or 0)
+
+
+def wm_advance(wm, msg):
+    """把水位线推过这条消息，返回**新的** dict（不改传入的）。"""
+    nw = dict(wm)
+    nw["last_message_id"] = max(int(wm.get("last_message_id") or 0), _msg_id(msg))
+    nw["last_time"] = max(int(wm.get("last_time") or 0), _msg_time(msg))
+    return nw
+
+
+_COOLDOWN_MAP_MAX = 50
+
+
+def wm_cooldown_ok(wm, key, now, cooldown_s):
+    """同群同命令的冷却判定（闸门 2）。`cooldown_s <= 0` = 关掉冷却。"""
+    if cooldown_s <= 0:
+        return True
+    last = float((wm.get("cooldown") or {}).get(key) or 0)
+    return (float(now) - last) >= float(cooldown_s)
+
+
+def wm_cooldown_touch(wm, key, now):
+    """记下这次响应时刻；顺带裁剪，避免这个 map 无限长大。返回新的 dict。"""
+    cd = dict(wm.get("cooldown") or {})
+    cd[key] = float(now)
+    if len(cd) > _COOLDOWN_MAP_MAX:
+        cd = dict(sorted(cd.items(), key=lambda kv: kv[1],
+                         reverse=True)[:_COOLDOWN_MAP_MAX])
+    nw = dict(wm)
+    nw["cooldown"] = cd
+    return nw
+
+
+def wm_after_handle(wm, msg, outcome, max_attempts):
+    """一条消息处理完，水位线怎么走。返回 `(新 wm, 是否继续扫后面的)`（铁律 ②）。
+
+    outcome：
+      · `"skip"` —— 不是我们的命令 / 别的群 / 冷却中 → **推进**，继续扫；
+      · `"ok"`   —— 真的回复出去了                   → **推进**，继续扫；
+      · `"fail"` —— 处理失败                         → 未到上限则**不推进**、暂停本轮
+                    （下轮重试，保序），到上限则推进放弃（免得永远卡住）。
+    """
+    mid = str(_msg_id(msg))
+    retry = dict(wm.get("retry") or {})
+    if outcome != "fail":
+        retry.pop(mid, None)
+        nw = wm_advance(wm, msg)
+        nw["retry"] = retry
+        return nw, True
+    tries = int(retry.get(mid) or 0) + 1
+    if tries >= max(1, int(max_attempts)):
+        retry.pop(mid, None)
+        nw = wm_advance(wm, msg)
+        nw["retry"] = retry
+        return nw, True
+    retry[mid] = tries
+    nw = dict(wm)
+    nw["retry"] = retry
+    return nw, False
+
+
+def load_wm(path=CMD_WATERMARK_FILE):
+    """读水位线。**返回 None 表示「没有水位线」= 首跑** —— 这和「空 dict」不同，
+    首跑要专门初始化（铁律 ①），所以这两种状态必须能区分开。"""
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            d = json.load(fp)
+        if isinstance(d, dict) and d:
+            return d
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def save_wm(wm, path=CMD_WATERMARK_FILE):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump(wm, fp, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log("[warn] 命令水位线写不进去（%s）：%s" % (path, exc))
+
+
+def acquire_singleton(path):
+    """常驻进程的**单实例锁**（非阻塞 `flock`）。返回 `(fp, ok)`，`ok=False` = 已有实例。
+
+    为什么需要：手动前台调试时如果 systemd 那份还在跑，两份同时轮询会**双份回复**
+    （同一个 message_id 各回一次）。所以第二个实例应当**立刻退出**而不是排队等。
+    Windows（没有 `fcntl`）退化成不拦 —— 本机自检不启动这个循环，无影响。
+    """
+    fp = None
+    try:
+        d = os.path.dirname(path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        fp = open(path, "a+")
+    except OSError as exc:
+        # 锁文件建不出来就不拦（宁可极小概率重复，也不要完全不干活）
+        log("[warn] 单实例锁文件建不出来（%s）：%s" % (path, exc))
+        return None, True
+    if fcntl is None:
+        return fp, True
+    try:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fp.close()
+        except OSError:
+            pass
+        return None, False
+    return fp, True
+
+
+def onebot_api(cfg, action, payload, timeout=10):
+    """调用 OneBot v11 的一个 action。返回 `(ok, data, err)`。**永不抛错。**
+
+    ⚠️ 与 `watch.OneBotNotifier` 是**同一套鉴权与地址**（base + token），但那个类
+    只负责发消息、失败就 raise；这里要的是「每轮轮询失败也别让常驻进程炸」，
+    所以单独包一层容错。地址走 `watch.http_request` 是因为它对 127.0.0.1 会
+    自动绕开系统代理（本机实测 NapCat 在 127.0.0.1:3000）。
+    """
+    ob = (cfg or {}).get("onebot") or {}
+    base = str(ob.get("base") or "").rstrip("/")
+    if not base:
+        return False, None, "onebot.base 未配置"
+    headers = {}
+    token = ob.get("token")
+    if token:
+        headers["Authorization"] = "Bearer " + str(token)
+    try:
+        text = watch.http_request(base + "/" + action, headers=headers,
+                                  data=(payload or {}), timeout=timeout)
+        resp = json.loads(text or "{}")
+    except Exception as exc:  # noqa: BLE001
+        return False, None, "%s: %s" % (type(exc).__name__, exc)
+    if str(resp.get("status")) != "ok":
+        return False, resp.get("data"), ("OneBot 返回异常：%s"
+                                         % json.dumps(resp, ensure_ascii=False)[:200])
+    return True, resp.get("data"), ""
+
+
+def collect_preview(es, now):
+    """抓 + 解析 + 筛选出「这一期要推的场次」。返回 `(picked, rank_names, err)`。
+
+    与 `run_once` 的前半段**同一套函数**，但**不写任何状态** —— 命令是「看一眼」，
+    不该在服务器上留下痕迹（和 `--check` 同口径）。
+    ⚠️ 里面的 `fetch_matches` 内含 `parse_gate`，可能等最多 30 秒 —— 这是**锁外**的，
+       绝不会堵住结算进程（铁律 ③）。
+    """
+    r = fetch_matches(es)
+    if r is None or not r.get("ok"):
+        return None, None, ((r or {}).get("error") or "抓取失败")
+    html_text, err = extract_html(r["text"])
+    if html_text is None:
+        return None, None, err
+    matches = parse_matches(html_text)
+    if not matches:
+        return None, None, "一个比赛都没解析出来（页面结构可能变了）"
+    rank = get_rank(es, write_cache=False)     # 命令不写排名缓存，只读口径
+    rank_names = (rank or {}).get("names") or []
+    picked, _tk, _rc = select_with_reasons(matches, now, es, rank_names)
+    return picked, rank_names, ""
+
+
+def cmd_handle_schedule(cfg, es, msg, now):
+    """`/赛事`：回一张「今天（到下一次预告为止）的总赛程」大图。返回是否真发出去了。
+
+    失败**静默**（用户拍板的：不在群里广播错误，只写日志）。
+    「今天没有符合推送条件的比赛」是**正常结果**，不是失败 —— 这时回一句文字，
+    否则用户 @ 了一次却什么都没有，看起来像机器人死了。
+    """
+    picked, rank_names, err = collect_preview(es, now)
+    if err:
+        log("[warn] /赛事 取赛程失败：%s —— 静默不回（失败不向群里广播）" % err)
+        return False
+
+    if not picked:
+        card = None
+        body = "接下来这段时间没有符合推送条件的比赛。"
+        log("[info] /赛事：窗口内没有入选场次，回一句文字")
+    else:
+        card = render_card(picked, now, es, rank_names) if es.get("card_enabled", True) else None
+        if card:
+            body = format_caption(picked, now, es)
+            log("[info] /赛事：%d 场，发「一行文字 + 大图」" % len(picked))
+        else:
+            body = format_daily(picked, now, es, rank_names)
+            log("[info] /赛事：%d 场，没有出图，发纯文本" % len(picked))
+
+    # 带 [CQ:reply,id=...] 让群里看得出是回哪条。它必须在**最前面**，QQ 才会渲染成回复。
+    reply = "[CQ:reply,id=%s]\n%s" % (_msg_id(msg), body)
+    notifiers = watch.build_notifiers(cfg)
+    delivered, failed = send_with_retry(with_card_image(notifiers, card), reply, es)
+    if delivered and not failed:
+        log("[sent] /赛事 已回复（%d 条通道）" % len(notifiers))
+        return True
+    log("[warn] /赛事 回复发送失败（%s）—— 水位线不推进，下轮重试"
+        % ("、".join(failed) or "?"))
+    return False
+
+
+# 命令注册：**加命令只改这一行**（处理函数按同一签名写即可）。
+CMD_REGISTRY[CMD_SCHEDULE] = cmd_handle_schedule
+
+
+def handle_cmd_message(cfg, es, wm, msg, group, bot_qq, cooldown_s, now_ts):
+    """处理一条**新**消息。返回 `(outcome, 新 wm)`，outcome ∈ skip / ok / fail。
+
+    `now_ts` 是**墙钟秒**（给冷却用）；渲染要用的北京时间由调用方另算。
+    """
+    raw = msg.get("message")
+    cmd = parse_command(raw)
+    if not cmd:
+        return "skip", wm            # 不是命令
+    if not is_at_bot(raw, bot_qq):
+        return "skip", wm            # 是命令但没 @ 机器人 —— 不响应（避免误触发）
+    key = "%s|%s" % (group, cmd)
+    if not wm_cooldown_ok(wm, key, now_ts, cooldown_s):
+        log("[info] 冷却中（%s 秒内已响应过），忽略 %s" % (cooldown_s, cmd))
+        return "skip", wm
+    handler = CMD_REGISTRY.get(cmd)
+    if handler is None:
+        return "skip", wm
+    log("[info] 收到命令 %s（群 %s，消息 id %s）" % (cmd, group, _msg_id(msg)))
+    try:
+        ok = bool(handler(cfg, es, msg, datetime.now(CST)))
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] 处理 %s 出错（%s: %s）" % (cmd, type(exc).__name__, exc))
+        ok = False
+    if not ok:
+        return "fail", wm
+    # 只有**真的回复出去**才记冷却 —— 失败是要重试的，不该被冷却挡住
+    return "ok", wm_cooldown_touch(wm, key, now_ts)
+
+
+def listen_tick(cfg, es, group, bot_qq, cooldown_s, count, max_attempts):
+    """轮询一轮：拉历史 → 挑新消息 → 逐条处理 → **处理一条落一条水位线**。
+
+    「处理一条落一条」把崩溃重复窗口缩到一条消息（和 `run_results` 同思路）。
+    """
+    ok, data, err = onebot_api(cfg, "get_group_msg_history",
+                               {"group_id": group, "count": count})
+    if not ok:
+        log("[warn] 取群历史失败：%s" % err)
+        return
+    msgs = (data or {}).get("messages") or []
+
+    wm = load_wm()
+    if wm is None:
+        # 铁律 ①：首跑只记水位线，**历史一条都不响应**。
+        wm = wm_init(msgs)
+        save_wm(wm)
+        log("[info] 首跑：水位线初始化为 message_id=%s / time=%s，**历史消息一条都不响应**"
+            % (wm["last_message_id"], wm["last_time"]))
+        return
+
+    if wm_reset_detected(wm, msgs):
+        # id 被重置（NapCat 重启过）：**重新基线化、一条都不响应**，与首跑同策略。
+        # 宁可漏掉重置瞬间的几条，也不要把整批当新命令、在群里重复回复一堆旧命令。
+        wm = wm_init(msgs)
+        save_wm(wm)
+        log("[warn] 检测到 message_id 被重置（NapCat 重启过？），水位线重新基线化为 "
+            "message_id=%s，本轮不响应任何消息" % wm["last_message_id"])
+        return
+
+    pending = wm_pending(wm, msgs)
+    if not pending:
+        return
+    pending.sort(key=_msg_id)        # 保序：早的先处理（免得乱序回复）
+    for m in pending:
+        if str(m.get("group_id") or "") != str(group):
+            wm, _cont = wm_after_handle(wm, m, "skip", max_attempts)
+            save_wm(wm)
+            continue
+        outcome, wm = handle_cmd_message(cfg, es, wm, m, group, bot_qq,
+                                         cooldown_s, time.time())
+        wm, cont = wm_after_handle(wm, m, outcome, max_attempts)
+        save_wm(wm)
+        if not cont:
+            log("[info] 上一条命令还没发出去，本轮暂停、下轮重试（水位线未推进）")
+            break
+
+
+def run_listen(cfg, args):
+    """`--listen`：常驻轮询群消息、响应 @ 机器人的命令。**本项目唯一的常驻进程。**
+
+    退出：Ctrl-C / `systemctl stop douyu-cmd`。它不写任何别的流水线的状态文件。
+    """
+    es = resolve_config(cfg)
+    if not es.get("enabled", True):
+        log("[skip] esports.enabled = false，命令进程不启动")
+        return 0
+    ob = cfg.get("onebot") or {}
+    if str(ob.get("target_type") or "group") != "group":
+        log("[error] 命令交互只支持群聊（onebot.target_type 必须是 group）")
+        return 2
+    group = str(ob.get("target_id") or "").strip()
+    if not group:
+        log("[error] onebot.target_id（群号）没配，命令进程无从下手")
+        return 2
+
+    _fp, ok = acquire_singleton(CMD_WATERMARK_FILE + ".listen")
+    if not ok:
+        log("[error] 已经有一个命令进程在跑（单实例锁被占），本次退出。"
+            "手动调试前先 systemctl stop douyu-cmd")
+        return 3
+
+    # ---- 机器人 QQ：优先配置，其次 get_login_info 自动取（推荐走自动）----
+    bot_qq = str(es.get("cmd_bot_qq") or "").strip()
+    if bot_qq:
+        log("[info] 机器人 QQ = %s（来自配置 cmd_bot_qq）" % bot_qq)
+    else:
+        ok2, data, err = onebot_api(cfg, "get_login_info", {})
+        bot_qq = str((data or {}).get("user_id") or "") if ok2 else ""
+        if not bot_qq:
+            log("[error] 取不到机器人 QQ（get_login_info %s），无法判定 @；"
+                "请在 esports.cmd_bot_qq 里手动填" % (err or "没返回 user_id"))
+            return 2
+        log("[info] 机器人 QQ = %s（get_login_info 自动获取）" % bot_qq)
+
+    poll = max(1, int(es.get("cmd_poll_seconds") or 3))
+    cooldown_s = max(0, int(es.get("cmd_cooldown_seconds") or 30))
+    count = max(1, min(200, int(es.get("cmd_history_count") or 30)))
+    max_attempts = max(1, int(es.get("cmd_max_attempts") or 3))
+
+    log("[start] 群内命令进程 · 群 %s · 机器人 %s · 轮询 %d 秒 · 冷却 %d 秒 · 最多试 %d 次"
+        % (group, bot_qq, poll, cooldown_s, max_attempts))
+    log("        命令表：%s" % ("、".join(sorted(CMD_REGISTRY)) or "（空）"))
+
+    while True:
+        try:
+            listen_tick(cfg, es, group, bot_qq, cooldown_s, count, max_attempts)
+        except KeyboardInterrupt:
+            log("\n[stop] 收到中断，命令进程退出")
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            # 常驻进程绝不能因为一次意外就死 —— Restart=always 会拉起来，
+            # 但瞬时的抖动不该造成重启风暴。记一笔、下一拍继续。
+            log("[warn] 轮询一轮出错（%s: %s），%d 秒后继续"
+                % (type(exc).__name__, exc, poll))
+        time.sleep(poll)
 
 
 # ==========================================================================
@@ -6479,6 +7129,8 @@ def main(argv=None):
                         help="开赛提醒一轮：est 落进提醒窗的场次发 Match Preview 卡（0 网络请求）")
     parser.add_argument("--check-announce", action="store_true",
                         help="同上但只渲染出图到 $TEMP，不发消息、不写状态")
+    parser.add_argument("--listen", action="store_true",
+                        help="常驻：轮询群消息、响应 @ 机器人的命令（唯一的常驻服务）")
     parser.add_argument("--selftest", action="store_true", help="离线自检，不联网")
     args = parser.parse_args(argv)
 
@@ -6517,6 +7169,13 @@ def main(argv=None):
             log("[error] config.json 没配好，开赛提醒会发不出去（见上面的报错）")
             return 2
         return run_announce(cfg, args)
+
+    if args.listen:
+        # 常驻进程：要收消息也要回消息，所以必须校验推送配置（onebot 段）。
+        if not watch.validate_cfg(cfg, args.config):
+            log("[error] config.json 没配好，命令进程收不到也回不了消息（见上面的报错）")
+            return 2
+        return run_listen(cfg, args)
 
     # 与 watch.py 共用同一份 config.json：channels / onebot 段直接沿用。
     # 这里校验一遍，免得配置错了却「什么都没发生」——那正是最难排查的状态。

@@ -18,7 +18,7 @@
 
 ## 两条推送线
 
-五条流水线，各跑各的定时器，互不阻塞：
+五条流水线，各跑各的定时器，互不阻塞；此外还有一个**常驻服务**接群内命令（第 7 个单元）：
 
 | 线        | 流水线     | 触发       | 网络请求           | 发什么                         |
 | -------- | ------- | -------- | -------------- | --------------------------- |
@@ -27,6 +27,7 @@
 | **赛事推送** | 全天整合版   | 每天 09:40 | **零网络**        | 上一个赛程日汇总，一场一行               |
 | **赛事推送** | 开赛提醒    | **每分钟**  | **零网络**        | 开赛前约 5 分钟发 Match Preview 大图 |
 | **开播提醒** | 开播 / 下播 | 每 45 秒   | 斗鱼接口           | 开播、下播各一条（带直播时长）             |
+| **群内命令** | `/赛事` 查询 | **常驻**（无 timer） | 到点才抓 | 群里 @ 机器人 发 `/赛事` → 回今天的总预告大图 |
 
 赛事推送的口径、窗口划分、数据源与排查见 **`deploy/ESPORTS.md`** ——  
 它是这块的主文档，下面只讲结论。开播提醒的原理见下一节。
@@ -63,6 +64,10 @@
 - **出图多级降级，消息一定发得出去**：HTML 1920×1080（Chromium 截图）→  
   PNG（Pillow 直接画）→ 纯文本。缺 Chromium / Pillow / 字体，都只是往下退一级，  
   不会让消息发不出去。四条流水线各自能退到哪一级见「部署」一节
+- **群内按需查询**：群里 @ 机器人 发 **`/赛事`**，就回一张今天的总赛程大图（复用每天 09:30  
+  那套渲染栈，不新写版式）。它是本项目**唯一的常驻进程**（`douyu-cmd.service`），  
+  四道闸门（命令识别 / 群内冷却 / 水位线幂等 / 条款节流）保证不会被闲聊误触发、也不会被连点刷屏；
+  停掉它 = 回到纯推送的老样子。设计见 `deploy/CMD_INTERACT.md`
 - **没比赛就静默**，但连着静默满 7 天会报个平安 ——  
   免得「今天没比赛」和「程序挂了」在群里长得一样
 
@@ -187,6 +192,7 @@ python watch.py --test-notify     # 真的往配置的通道发一条测试消�
 | `python deploy/esports.py --daily`           | 发上一个赛程日的**全天整合版**（一场一行、只有系列比分），由 `douyu-esports-daily.timer` 每天 09:40 拉起。有幂等标记，同一天重复跑不会重发                                                                              |
 | `python deploy/esports.py --check-announce`  | **看开赛提醒会发什么**：只把 Match Preview 卡渲染到 `$TEMP`，不发消息、不写状态。**零网络请求**，随时可跑                                                                                                   |
 | `python deploy/esports.py --announce`        | 开赛提醒一轮：估算的开赛时刻落进提醒窗的场次发一张 Match Preview 卡（`douyu-esports-announce.timer` 每分钟拉起的就是它）。**零网络请求**，只读本地清单 + 锁文件防重                                                           |
+| `python deploy/esports.py --listen`          | **群内命令交互**（**常驻**）：轮询群消息，看到「@ 机器人 + `/赛事`」就回今天的总预告大图。这是本项目**唯一的常驻进程**（`douyu-cmd.service`，**没有 timer**）。四道闸门 + 水位线幂等，设计见 `deploy/CMD_INTERACT.md` |
 | `python deploy/esports.py --test-notify`     | 验证赛程预告用的推送通道                                                                                                                                                           |
 | `python deploy/esports.py --check`（同上）       | 顺带把要发的那张卡片渲染到 `/tmp/esports_card_check.png`，可以下载下来看排版                                                                                                                  |
 | `python pack_deploy.py`                      | 打部署包 `deploy.zip`（自动带上 `watch.py` / `selftest.py` / `watchdog.py` / `esports.py` / **`card_font.otf`** / `install-watch.sh`，并归一为 LF）                                   |
@@ -278,7 +284,7 @@ qq-esports-notify/
 ├── .github/workflows/selftest.yml   CI：3 个 Python 版本 × 三条离线自检 + 凭据体检
 │
 └── deploy/                       部署包 —— 服务器上要用的全部东西
-    ├── esports.py                赛事推送主程序（预告 / 战报 / 整合版 / 开赛提醒四合一）
+    ├── esports.py                赛事推送主程序（预告 / 战报 / 整合版 / 开赛提醒 / 群内命令 五合一）
     ├── watchdog.py               看门狗：体检 + 自愈 + 独立于 QQ 的告警通道
     ├── result_template.html      卡片模板：单场战报
     ├── daily_template.html       卡片模板：总预告大图（文件名是历史包袱，实际喂的是总预告）
@@ -305,10 +311,11 @@ qq-esports-notify/
     ├── douyu-esports-results.{service,timer}   每 10 分钟结算刚打完的场次 → 单场战报
     ├── douyu-esports-daily.{service,timer}     每天 09:40 全天整合版
     ├── douyu-esports-announce.{service,timer}  每分钟看一次要不要发开赛提醒
+    ├── douyu-cmd.service                       常驻：群内命令交互（@ 机器人 / `/赛事`）——**没有 timer**（本项目唯一常驻服务）
     ├── douyu-watch.tmpfiles                    日志与状态目录兜底（装到 /etc/tmpfiles.d/）
     ├── DEPLOY.md                 完整部署手册（先看这个）
     ├── ESPORTS.md                赛事推送主文档：口径、窗口、数据源、排查
-    ├── CMD_INTERACT.md           群内命令交互（@ 机器人 / `/赛事`）设计文档（**尚未实现**）
+    ├── CMD_INTERACT.md           群内命令交互（@ 机器人 / `/赛事`）的设计与实现说明
     ├── WATCHDOG.md               看门狗设计说明 + 「怎么验证它真的会叫」
     ├── SCAN_QR_WITHOUT_SSH.md    扫码登录的替代做法（不必开 SSH 隧道）
     ├── AGENT_PROMPT.md           想让 AI agent 帮你部署？把这份提示词丢给它

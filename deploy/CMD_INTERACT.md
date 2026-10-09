@@ -1,10 +1,11 @@
 # 群内命令交互（@ 机器人 · `/赛事`）—— 设计文档
 
-> **状态：设计已定稿，代码尚未开始写。** 本文回答「要不要做、怎么做、哪里会翻车」，
-> 以及一份可以照着执行的实施与回滚步骤。
+> **状态：已实现（2026-10-09），尚未部署到服务器。** 本文回答「要不要做、怎么做、
+> 哪里会翻车」，以及一份可以照着执行的实施与回滚步骤。
+> 实现落在 **`esports.py --listen`** + **`douyu-cmd.service`**（本项目唯一的常驻服务）。
 > 相关的发送侧原理见 `deploy/ESPORTS.md`；部署环境见 `deploy/DEPLOY.md`。
 >
-> **一句话结论：可行。** 但整条链路是**新增**的 —— 现在这个项目是**纯单向发送**，
+> **一句话结论：可行，已实现。** 整条链路是**新增**的 —— 在此之前项目是**纯单向发送**，
 > 仓库里连一行「接收群消息」的代码都没有。
 
 ---
@@ -30,7 +31,8 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 省内存（这台机器小），也不会因为一个进程僵死而拖垮别的线。
 
 命令交互**天生需要一个常驻的东西**去「听」。所以它是**第 7 个单元**，
-而且是这个项目里**第一个 `Restart=always` 的常驻服务**。
+而且是这个项目里**第一个 `Restart=always` 的常驻服务** —— 落点就是
+**`douyu-cmd.service`**（**没有 `.timer`**，这是个常驻服务不是 oneshot 定时任务）。
 **现有 6 个 timer 一行都不改** —— 出问题时把新单元 `systemctl stop` 掉，
 整条推送线回到今天的状态，这就是「可一键回滚」的含义。
 
@@ -295,9 +297,18 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
             ↑ 这 30 秒里，每 10 分钟一拍的结算进程会被堵在锁外
 ```
 
-**规则：锁只包「读 + 写」，网络请求一律在锁外。**
-（这条和 `ESPORTS.md` §3.1 里 `parse_gate` 的写法一致 —— 它只在「读时间戳 → 写时间戳」
-那一小段里持锁，sleep 和 HTTP 都在锁外。）
+**规则：状态锁只包「读 + 写」，网络请求一律在锁外。**
+
+> **澄清一处最容易记反的地方**：`parse_gate` 的 `time.sleep` **确实在锁内** ——
+> 但它锁的是**自己的专属文件** `state_esports_parse.json.lock`，不是任何状态文件。
+> 它**必须**这样：第二个调用者要在锁内**重读时间戳**才能算出真正的剩余等待时间，
+> 否则「1 次 / 30 秒」的间隔会被两个进程同时读到旧值而白留。
+> 所以「持锁等 30 秒」在这里是**对的** —— 它只阻塞**别的 parse 调用者**，
+> 不阻塞结算 / 整合（那些锁的是 `state_results_pending.json`，另一个文件）。
+>
+> 命令进程要遵守的是：**别拿「水位线的锁」去陪 parse_gate 睡**。而水位线锁
+> （`state_cmd_watermark.json.lock`）与 parse 锁本来就不是同一个文件，结构上天然隔离。
+> 自检里有一条 **AST 断言**扫源码，钉住「`with file_lock(...)` 里不许出现联网调用」。
 
 ### 难点 4：图片体积
 
@@ -389,39 +400,60 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 
 ---
 
-## 9. 实施步骤（照做清单）
+## 9. 实施步骤（照做清单 · 2026-10-09 已完成代码部分）
 
-### 9.1 代码
+### 9.1 代码 —— ✅ 已全部落地（`deploy/esports.py`）
 
-- [ ] 新增 `--listen` 子命令（**暂定名**）：常驻轮询 `get_group_msg_history`
-- [ ] `parse_command(message) -> str | None`：剥 CQ 码 → `strip()` → 精确相等
-      （同时认 `string` / `array` 两种 `messagePostFormat`）
-- [ ] `is_at_bot(message, bot_qq)`：精确匹配 `[CQ:at,qq=<bot_qq>]`（**排除 `qq=all`**）
-- [ ] 水位线状态文件 `state_cmd_watermark.json`：
-      `{ "last_message_id": int, "last_time": int, "cooldown": {群号: ts} }`
-- [ ] 冷却：`cmd_cooldown_seconds`（**新增配置项**，默认建议 30）
-- [ ] 回复走 onebot 通道（**不走 console**），带 `[CQ:reply,id=...]`
-- [ ] 渲染复用 `build_daily_data` + `render_card_html`，**不新写版式**
-- [ ] 所有状态写入走 `file_lock` + 锁内重读；
-      **锁外**做 `parse_gate` 等待与 HTTP
+- [x] `--listen` 子命令：常驻轮询 `get_group_msg_history`（`run_listen`）
+- [x] `parse_command(message) -> str | None`：剥 CQ 码 → `strip()` → **精确相等**
+      （同时认 `string` / `array` 两种 `messagePostFormat`；数组形态由
+      `message_to_cq()` 先转成等价 CQ 串）
+- [x] `is_at_bot(message, bot_qq)`：精确匹配 `[CQ:at,qq=<bot_qq>]`（**排除 `qq=all`**）
+- [x] 水位线状态文件 `state_cmd_watermark.json`：
+      `{ "last_message_id": int, "last_time": int, "cooldown": {群号|命令: ts}, "retry": {id: 次数} }`
+      （比原设计多了 `retry` —— 见下方「实现时的两处偏差」）
+- [x] 冷却：`cmd_cooldown_seconds`（新增配置项，默认 **30**）
+- [x] 回复走 onebot 通道（**不走 console**），带 `[CQ:reply,id=...]`
+- [x] 渲染**复用 `render_card`**（它本身就是「HTML 大图 → 880px → 纯文本」的三级降级，
+      正是设计里要的那套），**不新写版式**
+- [x] 命令表 `CMD_REGISTRY`：**加命令只改一行**（为将来的 `/战报`、`/选手` 留好接口）
+- [x] 单实例锁 `acquire_singleton()`：手动前台调试时若 systemd 那份还在跑，
+      第二个实例**立刻退出**而不是双份回复
+- [x] 机器人 QQ 由 `get_login_info` **启动时自动获取**（可用 `cmd_bot_qq` 覆盖）
 
-### 9.2 自检（**必须两种布局都能跑完**，见 `ESPORTS.md` §8）
+**实现时的两处偏差（都以代码为准）：**
 
-- [ ] `parse_command` 的边界：恰好相等 / 前后空格 / 多一个词 / 子串 / 空消息
-- [ ] @ 判定：`qq=<bot>` 命中、`qq=all` **不**命中、`qq=别人` 不命中
-- [ ] 两种 `messagePostFormat` 各一组用例
-- [ ] `[CQ:reply,...]` 被剥掉后仍能识别命令
-- [ ] **首跑水位线**：给一份「有一堆历史消息」的假输入 → 断言**一条都不响应**
-- [ ] 水位线**先发后落**：断言发送失败时水位线**不前进**
-- [ ] 冷却：N 秒内第二次**不响应**
-- [ ] AST 结构断言：**联网调用不在 `file_lock` 内**（钉住难点 3）
+1. **联网锁**：实际没在命令路径上用 `file_lock` —— 水位线是**单写者**（只有这一个进程写），
+   用不着锁；`save_wm` 走原子写（tmp + `os.replace`）。
+   于是「联网不在锁内」在结构上天然成立，自检用 AST 断言钉住「`with file_lock(...)`
+   里不许出现联网调用」以防将来有人加锁加错地方。
+2. **`retry` 字段**：坑 2 说「先发后落」，但**无限重试会打满来源**。
+   所以加了 `cmd_max_attempts`（默认 3）：失败时水位线**不推进、暂停本轮**（下轮重试），
+   到上限才推进放弃。这是「宁可重复、但别疯狂重试」的折中。
+
+### 9.2 自检 —— ✅ 已全部落地（31 条，`--selftest` 里「群内命令交互」一节）
+
+- [x] `parse_command` 的边界：恰好相等 / 前后空格 / 多一个词 / 子串闲聊 / 空·None·非字符串
+- [x] @ 判定：`qq=<bot>` 命中、`qq=all` **不**命中、`qq=别人` 不命中、没配 bot_qq 不命中
+- [x] 两种 `messagePostFormat` 各一组用例
+- [x] `[CQ:reply,...]` 被剥掉后仍能识别命令
+- [x] **首跑水位线**：有一堆历史消息的假输入 → 断言**一条都不响应**
+- [x] 水位线**先发后落**：断言发送失败（未达上限）时水位线**不前进**、且暂停本轮
+- [x] 水位线失败**到上限**时推进放弃
+- [x] `message_id` 被重置能被识别、且重置后不把整批当新命令（重新基线化）
+- [x] 冷却：N 秒内第二次**不响应**、过了窗口放行、不同群不同命令互不影响
+- [x] `load_wm` 文件不存在返回 `None`（= 首跑，与「空 dict」区分）
+- [x] **AST 结构断言**：联网调用不在 `file_lock` 内（钉住难点 3）
+- [x] AST 结构断言：`run_listen` 是常驻（有 `while`）、`listen_tick` 收消息并落水位线、
+      `cmd_handle_schedule` 复用现成渲染栈、`main` 里有 `args.listen` 分发
+- [x] **变异测试**：把上面每条断言对应的「有 bug 的写法」改回去 → 确认断言真的 FAIL → 还原
 
 ### 9.3 交付与部署
 
 ```bash
 # 1. 三自检 + 凭据体检，全绿
 python  selftest.py                 # 仓库根 100 项
-python  deploy/esports.py --selftest   # 满配 392 项
+python  deploy/esports.py --selftest   # 满配 423 项（本功能新增 31 条）
 python  deploy/watchdog.py --selftest  # 75 项
 python  check-secrets.py
 
@@ -432,9 +464,12 @@ git add -A && git commit -m "feat(cmd): 群内 /赛事 命令 —— 路线 A �
 python  pack_deploy.py
 ```
 
-- [ ] `CMD_INTERACT.md` 加进 `pack_deploy.py` 的 `REQUIRED`（否则服务器上不装）
-- [ ] 新增的 `douyu-cmd.service` 加进 `REQUIRED`（**不加 `.timer`** —— 它是常驻服务）
-- [ ] 刷新 `deploy/UPDATE_PROMPT.md` 第 0 步的指纹表
+- [x] `CMD_INTERACT.md` 加进 `pack_deploy.py` 的 `REQUIRED`（否则服务器上不装）
+- [x] 新增的 `douyu-cmd.service` 加进 `REQUIRED`（**不加 `.timer`** —— 它是常驻服务）
+- [x] `install-watch.sh` 加安装分支（**只装不 enable**，与其余单元一致）
+- [x] 刷新 `deploy/UPDATE_PROMPT.md` 第 0 步的指纹表（`esports.py` / `config.example.json`
+      已更新为命令行版本；`douyu-cmd.service` 的指纹写在正文说明里、**不进表** ——
+      那张表历来只列 代码 / 模板 / 配置样板 / 字体，其余 `.service` 也都不在里面）
 - [ ] 服务器由 agent 用 workbench 部署（路径见 `DEPLOY.md`）
 
 ### 9.4 上线验收

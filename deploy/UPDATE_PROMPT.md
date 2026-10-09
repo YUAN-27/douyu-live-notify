@@ -97,25 +97,37 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `c4fccc42ed25f88f` | 340733 |
+| `esports.py` | `55aa3a883f6d9320` | 372711 |
 | `result_template.html`（V2 单场战报模板） | `b6e87d77330ba710` | 10493 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
-| `config.example.json`（配置样板，含结算超时默认值） | `3d9986c29e8898fb` | 13811 |
+| `config.example.json`（配置样板，含结算超时默认值） | `6960b219096716b7` | 15190 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
 | `card_font.otf`（880px 旧卡字体，降级用） | `15c77181345f84d5` | 68720 |
 | `make_card_font.py`（生成字体的脚本） | `b692eada86ff9cf1` | 5403 |
 
-> **本次还多了一份纯文档**：`CMD_INTERACT.md`（群内 `/赛事` 命令的设计文档，**代码尚未开始写**，
-> 不影响运行）。它是 `REQUIRED` 成员，会随包装上；不过它不是运行必需品，
-> 老机器上不装也一切照常。
-> 同时 `ESPORTS.md` 末尾新增「第 10 节 · 相关文档」并补了一句「若做命令则必须复用
-> `parse_gate`」的合规提示 —— 这两个改动都不影响行为。
+> **本版新增第 7 个单元 `douyu-cmd.service`**（群内命令交互，`esports.py --listen`）——
+> 它是本项目**第一个也是唯一一个常驻服务**（`Restart=always`，**没有 `.timer`**）。
+> `install-watch.sh` 里加了安装分支，**只装不 enable**（与其余单元一致）；要试就先前台
+> `python3 esports.py --listen` 手动跑一次确认行为。
+> 指纹：`douyu-cmd.service` = `811364fdd54b7b00` / 1664 字节
+> （它**不在上表里** —— 上表只列代码 / 模板 / 配置样板 / 字体，其余 `.service` 也都不在里面）。
+> 同时 `CMD_INTERACT.md`（群内 `/赛事` 命令的设计文档）从「纯设计」更新为「已实现」，
+> 它和 `douyu-cmd.service` 都是 `REQUIRED` 成员，会随包装上；两个都不是运行必需品 ——
+> **不启用新单元 = 推送线行为与上一版完全一致**，老机器上不装也一切照常。
 
-本版（commit 见 `git log -1 --oneline`）是一次**外部代码复查后的批量修复**：复查报告基于
+**本版**（commit 见 `git log -1 --oneline`）新增**群内命令交互**（@ 机器人 · `/赛事`）：
+`esports.py` 多了 `--listen`（常驻轮询 `get_group_msg_history`，四道闸门 + 水位线幂等，
+**复用 09:30 那套渲染栈**），并新增第 7 个单元 `douyu-cmd.service`（唯一常驻服务，**无 timer**）。
+**四个模板与字体、`watch.py` / `selftest.py` / `watchdog.py` 一个字都没动**；变的是
+`esports.py` / `config.example.json` / `install-watch.sh` / `pack_deploy.py` / `CMD_INTERACT.md`，
+并新增 `douyu-cmd.service`。命令的完整设计、难点、坑与**一键回滚**见 `CMD_INTERACT.md`；
+这里只讲一句怎么验：**不启用 `douyu-cmd` 就等于没这个功能**（对推送线零影响）。
+
+**上一版**（commit 见 `git log -1 --oneline`）是一次**外部代码复查后的批量修复**：复查报告基于
 旧提交 `172b7d1`（落后 11 个提交），8 条里 2 条已过时/不成立，剩下 **6 条**逐条修掉，
 每条都带自检断言 + 变异验证。**四个模板与字体文件一个字都没动**；
 变的是 `esports.py` / `selftest.py` / `config.example.json` / `douyu-esports-daily.{service,timer}`
@@ -159,10 +171,10 @@ sha256sum ../deploy.zip | cut -c1-16
    （默认 12）是**另一个画布**，刻意不合并（有断言钉住两者是不同的数）。
 ⑦ **两个自检都得能在「装好的机器」上跑完**（本版自己踩出来的一条）。上面 ⑥ 的断言
    顺手读了 `config.example.json` 和 `douyu-esports-daily.service`，可这两个文件
-   `install-watch.sh` **不装**到 `/opt/douyu-live-notify` —— 于是包内 392 项全绿、
+   `install-watch.sh` **不装**到 `/opt/douyu-live-notify` —— 于是包内全绿、
    服务器上第一条路径就 `FileNotFoundError`，**整个自检在中途断掉**。
    现在两处都改成「先 `os.path.isfile` 挡一道，不在就打 `[skip]` 写明原因」：
-   `esports.py --selftest` 在装好的机器上是 **389 项**（少 3 条），
+   `esports.py --selftest` 在装好的机器上会少 3 条（打 `[skip]`），
    `selftest.py` 是 **92 项**（少 8 条，见第 3 步）。并且用**语法树**加了一条断言，
    钉住「那几个 `open()` 必须落在带 `isfile` 的分支里」——
    **别把守卫删掉**。
@@ -171,7 +183,7 @@ sha256sum ../deploy.zip | cut -c1-16
 > `130e41031a4e519c` / 9286）。它**只在开发机/维护时手动跑**，线上任何 timer 都不调用；
 > 对不上也不影响运行，不用为它停下来。
 
-**上一版**（`48051fc`）修的是**整合版少列场次**：结算的放弃时刻锚在
+**再上一版**（`48051fc`）修的是**整合版少列场次**：结算的放弃时刻锚在
 「登记（计划）开赛时刻」上，而前一档打满三图会把下一档拖后 30~60 分钟，
 于是「打满三图的 Bo3」经常在放弃时刻前后才出结果 —— 2026-10-05 因此丢掉
 `M80 vs TYLOO` 2:1 与 `Aurora Gaming vs BetBoom` 2:1 两场，次日整合版只剩 6 场。
@@ -179,8 +191,8 @@ sha256sum ../deploy.zip | cut -c1-16
 `{Bo1:150, Bo3:270, Bo5:360}`（= 最长时长 + 约 90 分钟迟到/页面延迟余量）；
 ② 新增 `backfill_abandoned()`：整合版出图前把该赛程日所有 `abandoned` 的场次
 再捞一次，配上就改回 `reported` 补进汇总。**只在真有 abandoned 条目时才抓页面**，
-正常日仍是 0 网络请求。**再上一版**（`8c6c4d8`）修的是开赛提醒的级联判据
-（「同一赛事」→「同一赛事且共用队伍」）。**再往前**（`4bdb153`）新增
+正常日仍是 0 网络请求。**更早**（`8c6c4d8`）修的是开赛提醒的级联判据
+（「同一赛事」→「同一赛事且共用队伍」）。**再更早**（`4bdb153`）新增
 **V2 全天整合版模板** `daily_results_template.html`，并同步 `esports.py`
 （新增 `build_daily_results_data` / `render_daily_results_card_html` /
 `render_daily_results_card`，`run_daily` 改走三级降级）与 `result_template.html` /
@@ -289,17 +301,17 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **408** |
-  | 少了 `make_card_font.py` | 406（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **423** |
+  | 少了 `make_card_font.py` | 421（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
-  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **405**（少 3 条，打 `[skip]`） |
+  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **420**（少 3 条，打 `[skip]`） |
 
   ⚠️ 最后那一行是新加的：`config.example.json` 和 `douyu-esports-daily.service`
   只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。
   所以那 3 条要**先 `os.path.isfile` 挡一道**再读 —— 否则服务器上第一条路径就
   `FileNotFoundError`，整个自检**在中途断掉**（2026-10-06 首次部署这一版真的崩过一次，
-  包内 392 项全绿、服务器上直接抛异常）。现在有断言用语法树钉着这个守卫，
+  包内全绿、服务器上直接抛异常）。现在有断言用语法树钉着这个守卫，
   别把它删掉。
 
   **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow / 浏览器那两行、
@@ -463,7 +475,10 @@ sudo cat /opt/douyu-live-notify/state_6979222.json
 1. 第 0 步**六行** `sha256sum` 输出（原样）
 2. 第 2 步 `install-watch.sh` 的**完整输出**（含它打印的指纹、以及 Pillow 那两行结论）；
    确认里面出现过 `已安装 douyu-esports-results.service / .timer（尚未启用）`
-   **和** `已安装 douyu-esports-daily.service / .timer（尚未启用）`（**两个都要有**）
+   **和** `已安装 douyu-esports-daily.service / .timer（尚未启用）`（**两个都要有**），
+   以及 `已安装 douyu-cmd.service（尚未启用）`（本版新增的**常驻**单元）。
+   ⚠️ `douyu-cmd` **只装不启用** —— 它会在群里回消息，**先前台** `python3 esports.py --listen`
+   手动跑一次确认行为，再决定要不要 `systemctl enable --now douyu-cmd`。
 3. 第 3 步三个自检的**最后一行 + 退出码**（有 `[FAIL]` 就附全文），外加 `card_font.otf` 是否就位、Pillow 是否可用
 4. 第 4 步改前 / 改后那两行配置对照（**token 不要打印**）
 5. 第 5 步离线格式验证的输出原文

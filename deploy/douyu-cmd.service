@@ -1,0 +1,36 @@
+[Unit]
+Description=斗鱼开播提醒 · CS2 群内命令交互（@ 机器人 · /赛事）—— 常驻
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ⚠️ 这是本项目**唯一一个常驻服务**（`Restart=always`）。其余 6 个单元都是
+#    oneshot + timer —— 跑完就退、常态 inactive(dead)，这是刻意省内存。
+#    它常驻轮询 NapCat 的 get_group_msg_history，看到「@ 机器人 + /赛事」
+#    就回一张今天的总赛程大图（复用每天 09:30 那套渲染栈）。
+#    为什么必须常驻：命令交互天然需要一个「一直在听」的东西。
+#    设计见 deploy/CMD_INTERACT.md。
+Type=simple
+
+# esports.py 用 __file__ 定位 config.json 和 state 文件，
+# WorkingDirectory 只是为了排错时路径直观。
+WorkingDirectory=/opt/douyu-live-notify
+
+ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py --listen
+
+# 进程自己不会正常退出（--listen 是个 while True）。所以任何退出都是异常，一律拉起来。
+# RestartSec 给 10 秒：配置错（比如群号没填）时不会变成重启风暴，日志里看得清原因。
+Restart=always
+RestartSec=10
+
+# 单独一个日志文件 —— 它是常驻的，日志会长得比一次性任务快，别混进别条流水线。
+#   tail -f /var/log/douyu-watch/cmd.log
+StandardOutput=append:/var/log/douyu-watch/cmd.log
+StandardError=append:/var/log/douyu-watch/cmd.log
+
+# 最小权限。和 douyu-watch.service / douyu-esports*.service 保持一致。
+# /opt 可写（水位线落在那儿），/usr /etc 只读。
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
