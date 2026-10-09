@@ -190,8 +190,12 @@ PARSE_STAMP_FILE = os.path.join(HERE, "state_esports_parse.json")
 # 存在理由：这个 job 是「次日早上固定时刻」触发的，重跑（手动 + timer）不能重发。
 DAILY_STATE_FILE = os.path.join(HERE, "state_esports_daily.json")
 # 群内命令交互（`--listen`）的水位线。
-# 结构：{ "last_message_id": int, "last_time": int,
-#         "cooldown": {"<群号>|<命令>": ts}, "retry": {"<message_id>": 尝试次数} }
+# 结构：{ "last_seq": int, "last_time": int,
+#         "cooldown": {"<群号>|<命令>": ts}, "retry": {"<real_seq>": 尝试次数} }
+# 🔴 `last_seq` 来自 NapCat 的 **`real_seq`**（真正的群消息序号，严格 +1），
+#    **绝不是 `message_id`** —— 后者是随机 32 位数、不单调，拿它当水位线会让
+#    ~95% 的命令被静默吞掉（2026-10-09 上线前实测发现，详见 `_msg_id` 的 docstring）。
+#    `load_wm` 对「只有 `last_message_id` 的旧文件」会当首跑处理，不会误重放。
 # ⚠️ 这是**第 4 个**会写状态文件的进程（另外三个见 file_lock 的 docstring）。
 #    但它写的是**自己这个文件**，与 state_results_pending.json 互不相干 ——
 #    所以「命令进程把结算进程堵死」这类事故在结构上就不会发生。
@@ -6433,10 +6437,12 @@ def selftest():
     #    自检必须在两种布局下都能跑完，这是硬要求。
     _ex_path = os.path.join(HERE, "config.example.json")
     _svc_path = os.path.join(HERE, "douyu-esports-daily.service")
-    if not (os.path.isfile(_ex_path) and os.path.isfile(_svc_path)):
-        t.note("示例配置 / daily.service 不在本目录（装好的机器就是这样）—— "
+    _cmd_svc_path = os.path.join(HERE, "douyu-cmd.service")
+    if not (os.path.isfile(_ex_path) and os.path.isfile(_svc_path)
+            and os.path.isfile(_cmd_svc_path)):
+        t.note("示例配置 / daily.service / cmd.service 不在本目录（装好的机器就是这样）—— "
                "「示例配置的 daily_max_rows」「示例配置的 card_max_rows」"
-               "「service 注释写的是 %d 行」这 3 条跳过。"
+               "「service 注释写的是 %d 行」「cmd.service 有 [Install] 段」这 4 条跳过。"
                "想跑满就在仓库或解开 deploy.zip 的目录里跑。" % HTML_IMG_MAX_ROWS)
     else:
         _cfg_ex = json.load(open(_ex_path, encoding="utf-8")).get("esports") or {}
@@ -6452,6 +6458,37 @@ def selftest():
         t.check("⚑ daily.service 的注释也说的是这个数，且不再说「24 行」"
                 "（注释里的数是排查时唯一能看到的线索）",
                 ("%d 行" % HTML_IMG_MAX_ROWS) in _svc and "24 行" not in _svc)
+        # ---- douyu-cmd.service 的 [Install] 段（2026-10-09 上线前发现缺了）----
+        # 其余 6 个单元是 oneshot + timer：timer 有 [Install]（WantedBy=timers.target），
+        # 被拉起的 service 不需要；但 douyu-cmd 是**独立常驻服务、没有 timer**，
+        # 少了 [Install] 就直接导致：
+        #   · `systemctl is-enabled douyu-cmd` → `static`
+        #   · `systemctl enable douyu-cmd` → 报「unit files have no installation config」
+        #   · **服务器重启后它不会自己起来**，只能人手 `systemctl start`
+        # 所以这一条必须钉住。（校验只认 `[Install]` 段里真的有 WantedBy。）
+        _cmd_svc = open(_cmd_svc_path, encoding="utf-8").read()
+        # 按「整行形如 [Section]」切段 —— **不能**用 `split("[Install]")`：
+        # 注释里也会出现 `[Install]` 字样，朴素的字符串切分会把段内容切碎。
+        # （第一版就是这么写的，被自检自己抓出来了。）
+        _cmd_secs = {}
+        _cmd_cur = None
+        for _ln in _cmd_svc.splitlines():
+            _s = _ln.strip()
+            if _s.startswith("[") and _s.endswith("]"):
+                _cmd_cur = _s
+                _cmd_secs[_cmd_cur] = ""
+            elif _cmd_cur:
+                _cmd_secs[_cmd_cur] += _ln + "\n"
+        t.check("⚑ douyu-cmd.service 必须有自己的 [Install] 段 + WantedBy"
+                "（它是**没有 timer 的常驻服务**，缺了就没法 enable、重启后不会自启）",
+                any(_l.strip().startswith("WantedBy=")
+                    for _l in (_cmd_secs.get("[Install]") or "").splitlines()),
+                sorted(_cmd_secs))
+        t.check("douyu-cmd.service 仍是 Restart=always 的常驻服务"
+                "（Type=simple，没有 timer 兜底）",
+                "Type=simple" in _cmd_svc and "Restart=always" in _cmd_svc
+                and "ExecStart=/usr/bin/python3 /opt/douyu-live-notify/esports.py --listen"
+                in _cmd_svc)
 
     # ---- 把上面那层守卫本身也钉住 ----
     # 规则：凡是「读只在仓库/包里才有的文件」的 open()，都必须落在带 `isfile` 判定的分支里。
@@ -6462,7 +6499,8 @@ def selftest():
     #      凡是 open() 的实参用到①那些变量、却不在这种分支里的，就记一笔。
     # 第①步特意**不看 isfile** —— 否则守卫一改名（isfile→exists）两条会一起消失，
     # 断言又变成恒真。第一版写成「在 open() 片段里搜文件名」就是这么废掉的（变异测试抓到）。
-    _repo_only_files = ("config.example.json", "douyu-esports-daily.service")
+    _repo_only_files = ("config.example.json", "douyu-esports-daily.service",
+                        "douyu-cmd.service")
     _st_def = _fn_def("selftest")
 
     _repo_path_vars = set()
@@ -6942,23 +6980,46 @@ def selftest():
             is_at_bot("[CQ:at,qq=10001] /赛事", BOT) is False
             and is_at_bot("[CQ:at,qq=%s] /赛事" % BOT, "") is False)
 
-    _hist = [{"message_id": 10, "time": 100, "group_id": "1"},
-             {"message_id": 11, "time": 101, "group_id": "1"},
-             {"message_id": 12, "time": 102, "group_id": "1"}]
+    # ⚠️ 这组消息**刻意让 `message_id` 是随机数、`real_seq` 才是序号** ——
+    #    这就是 NapCat 的真实形态（实测 id：426368513 → 890222142 → 66787878，
+    #    time 递增而 id 忽大忽小）。第一版自检按理想模型（id 单调）写，
+    #    所以压根没测出这个 bug；下面这组就是钉住别退回去。
+    _hist = [{"message_id": 900, "real_seq": "10", "time": 100, "group_id": "1"},
+             {"message_id": 30, "real_seq": "11", "time": 101, "group_id": "1"},
+             {"message_id": 777, "real_seq": "12", "time": 102, "group_id": "1"}]
     _wm0 = wm_init(_hist)
     t.check("水位线·首跑：只记最大值，**历史一条都不算新**（铁律 ①，坑 1）",
-            _wm0["last_message_id"] == 12 and _wm0["last_time"] == 102
+            _wm0["last_seq"] == 12 and _wm0["last_time"] == 102
             and wm_pending(_wm0, _hist) == [], _wm0)
-    _more = _hist + [{"message_id": 13, "time": 103, "group_id": "1"}]
-    t.check("水位线：只有 id 更大的才算新",
-            [_msg_id(m) for m in wm_pending(_wm0, _more)] == [13],
+
+    t.check("序号解析：str/int/缺失/垃圾都不炸（NapCat 的 `real_seq` 是**字符串**）",
+            _msg_seq({"real_seq": "1388"}) == 1388
+            and _msg_seq({"real_seq": 1388}) == 1388
+            and _msg_seq({"real_seq": "abc"}) == 0
+            and _msg_seq({}) == 0 and _msg_seq(None) == 0)
+
+    # 新消息：`real_seq` 前进（13）、但随机 `message_id` 反而**更小**（5）。
+    _more = _hist + [{"message_id": 5, "real_seq": "13", "time": 103,
+                      "group_id": "1"}]
+    t.check("⚑ 水位线判据是 `real_seq`，**不是**随机 `message_id`"
+            "（新消息 message_id=5 比水位线小得多，仍必须算新 ——"
+            " 按 id 判会让 ~95% 的命令被静默吞掉，2026-10-09 上线前实测抓到的致命 bug）",
+            [_msg_seq(m) for m in wm_pending(_wm0, _more)] == [13],
             wm_pending(_wm0, _more))
-    _reset = [{"message_id": 1, "time": 50, "group_id": "1"},
-              {"message_id": 2, "time": 200, "group_id": "1"}]
+    # 反向：一条**旧**消息，随机 `message_id` 恰好极大（2^31-1）、`real_seq` 在水位线下
+    # —— 必须**不**算新。只测正向的话，残留的「按 id 判」写法有可能蒙混过关。
+    _old_big_id = _hist + [{"message_id": 2 ** 31 - 1, "real_seq": "9",
+                            "time": 99, "group_id": "1"}]
+    t.check("⚑ 反向：旧消息哪怕 `message_id` 大到 2^31-1 也**不算新**"
+            "（否则每次都会把历史当新命令重放）",
+            wm_pending(_wm0, _old_big_id) == [], wm_pending(_wm0, _old_big_id))
+
+    _reset = [{"message_id": 8, "real_seq": "1", "time": 50, "group_id": "1"},
+              {"message_id": 9, "real_seq": "2", "time": 200, "group_id": "1"}]
     t.check("水位线：正常「没有新消息」不算重置（time 也没前进）",
             wm_reset_detected(_wm0, _hist) is False
             and wm_pending(_wm0, _hist) == [])
-    t.check("水位线：id 被打回（NapCat 重启）**能被识别**（坑 8）",
+    t.check("水位线：序号被打回（NapCat 重启）**能被识别**（坑 8）",
             wm_reset_detected(_wm0, _reset) is True)
     t.check("水位线：识别到重置后一条都不算新（须重新基线化，不重复回复旧命令）",
             wm_pending(_wm0, _reset) == [])
@@ -6967,19 +7028,52 @@ def selftest():
 
     _w1, _c1 = wm_after_handle(_wm0, _hist[-1], "skip", 3)
     t.check("水位线·skip：推进且继续扫",
-            _c1 is True and _w1["last_message_id"] == 12, _w1)
-    _w2, _c2 = wm_after_handle(_wm0, {"message_id": 13, "time": 103}, "fail", 3)
+            _c1 is True and _w1["last_seq"] == 12, _w1)
+    _new5 = {"message_id": 5, "real_seq": "13", "time": 103}
+    _w2, _c2 = wm_after_handle(_wm0, _new5, "fail", 3)
     t.check("水位线·失败未达上限：**不推进**、暂停本轮（铁律 ②，坑 2）",
-            _c2 is False and _w2["last_message_id"] == 12
+            _c2 is False and _w2["last_seq"] == 12
             and int(_w2["retry"].get("13") or 0) == 1, _w2)
-    _w3, _c3 = wm_after_handle(_w2, {"message_id": 13, "time": 103}, "fail", 2)
+    _w3, _c3 = wm_after_handle(_w2, _new5, "fail", 2)
     t.check("水位线·失败到上限：推进放弃（免得永远卡住）",
-            _c3 is True and _w3["last_message_id"] == 13
+            _c3 is True and _w3["last_seq"] == 13
             and "13" not in (_w3.get("retry") or {}), _w3)
-    _w4, _c4 = wm_after_handle(_w2, {"message_id": 13, "time": 103}, "ok", 3)
+    _w4, _c4 = wm_after_handle(_w2, _new5, "ok", 3)
     t.check("水位线·成功：推进并清掉重试计数",
-            _c4 is True and _w4["last_message_id"] == 13
+            _c4 is True and _w4["last_seq"] == 13
             and not _w4.get("retry"), _w4)
+    t.check("⚑ 重试计数的 key 用**序号**（`last_seq` 同源）",
+            "13" in (_w2.get("retry") or {}), _w2.get("retry"))
+
+    # ---- 结构断言：判据必须是 `_msg_seq`，一个 `_msg_id` 都不许留 ----
+    # 行为断言已经覆盖了主路径，但「顺手把某个函数改回 id」这种回退最容易漏，
+    # 所以四个函数逐个 AST 查调用名。
+    _wm_fns = ("wm_init", "wm_pending", "wm_reset_detected", "wm_advance")
+    _wm_by_id = [n for n in _wm_fns if "_msg_id" in _call_names(_fn_def(n))]
+    t.check("⚑ 结构：水位线四个函数里**一个都不许**调 `_msg_id`"
+            "（那就是退回「按随机数判新消息」的老 bug）",
+            not _wm_by_id, _wm_by_id)
+    _wm_no_seq = [n for n in _wm_fns if "_msg_seq" not in _call_names(_fn_def(n))]
+    t.check("⚑ 结构：水位线四个函数都必须调 `_msg_seq`"
+            "（不能改成按 time / 内容判断 —— 那要么漏要么重）",
+            not _wm_no_seq, _wm_no_seq)
+
+    # `[CQ:reply,id=...]` 要的**就是** `message_id`，不能跟着水位线一起换掉。
+    # 用 AST 找「左边是含 `[CQ:reply,id=` 的字符串字面量的 `%` 运算」，
+    # 再看它有没有用到 `_msg_id` —— 字符串 needle 在本文件里会自指，不可用。
+    _reply_uses_id = False
+    for _n in (ast.walk(_fn_def("cmd_handle_schedule"))
+               if _fn_def("cmd_handle_schedule") is not None else []):
+        if (isinstance(_n, ast.BinOp) and isinstance(_n.op, ast.Mod)
+                and isinstance(_n.left, ast.Constant)
+                and isinstance(_n.left.value, str)
+                and "[CQ:reply,id=" in _n.left.value):
+            _reply_uses_id = any(
+                isinstance(_a, ast.Call) and isinstance(_a.func, ast.Name)
+                and _a.func.id == "_msg_id" for _a in ast.walk(_n))
+    t.check("⚑ 回复引用（`[CQ:reply,id=...]`）仍然用 `message_id`"
+            "（QQ 只认它；水位线换成 real_seq 时不能顺手把它也换了）",
+            _reply_uses_id)
 
     _wmc = wm_cooldown_touch(_wm0, "1|/赛事", 1000.0)
     t.check("冷却：窗口内第二次不响应（闸门 2）",
@@ -6991,8 +7085,9 @@ def selftest():
             and wm_cooldown_ok(_wmc, "2|/赛事", 1000.0, 30) is True)
 
     _tmpwm = os.path.join(tempfile.gettempdir(), "wm_selftest_%d.json" % os.getpid())
+    _tmpold = os.path.join(tempfile.gettempdir(), "wm_legacy_%d.json" % os.getpid())
     try:
-        for _p in (_tmpwm, _tmpwm + ".tmp"):
+        for _p in (_tmpwm, _tmpwm + ".tmp", _tmpold):
             try:
                 os.remove(_p)
             except OSError:
@@ -7001,9 +7096,17 @@ def selftest():
                 load_wm(_tmpwm) is None)
         save_wm(wm_init(_hist), _tmpwm)
         t.check("水位线：存一次再读，值对得上",
-                int((load_wm(_tmpwm) or {}).get("last_message_id") or 0) == 12)
+                int((load_wm(_tmpwm) or {}).get("last_seq") or 0) == 12)
+        # 旧格式（只有 `last_message_id`，没有 `last_seq`）：必须当首跑，
+        # 否则会拿一个随机数当水位线 → 整段历史被当新消息重放。
+        with open(_tmpold, "w", encoding="utf-8") as _lf:
+            json.dump({"last_message_id": 2 ** 31 - 1, "last_time": 999999,
+                       "cooldown": {}, "retry": {}}, _lf)
+        t.check("⚑ 旧格式水位线（只有 `last_message_id`）**当首跑处理**"
+                "（沿用它会按随机 id 判定 → 历史被当新命令重放）",
+                load_wm(_tmpold) is None)
     finally:
-        for _p in (_tmpwm, _tmpwm + ".tmp"):
+        for _p in (_tmpwm, _tmpwm + ".tmp", _tmpold):
             try:
                 os.remove(_p)
             except OSError:
@@ -7396,8 +7499,40 @@ def parse_command(message):
 
 
 def _msg_id(m):
+    """`message_id` —— **只用于 `[CQ:reply,id=...]`**，绝不拿来判新消息！
+
+    🔴 2026-10-09 上线前实测（NapCat 4.18.28 / OneBot v11，`get_group_msg_history`
+    拉 99 条）：`message_id` == `message_seq` == `real_id`，是一个**随机 32 位数、
+    完全不单调**（time 递增而 id 忽大忽小：`426368513 → 890222142 → 66787878`）。
+
+    拿它当水位线的后果是**功能基本不可用**：
+      · `wm_init` 取一批里的**最大** id（随机数的最大值 ≈ 2^31 附近）；
+      · 新消息要「比水位线大」才算新 → 通过率只有 ~5%，
+        **约 95% 的 `/赛事` 会被静默吞掉**；
+      · 而且每处理一条就把水位线顶到新的最大值，**越跑越聋**；
+      · 还会顺带把 `wm_reset_detected` 打成误报（max id 不前进、time 前进 →
+        被判「id 被重置」→ 重新基线化 → 一条都不响应）。
+
+    所以判新消息**一律**用 `_msg_seq`。这里保留 `_msg_id` 只因为 QQ 的
+    `[CQ:reply,id=...]`（引用回复）要的就是这个 `message_id` —— 换不得。
+    """
     try:
         return int((m or {}).get("message_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _msg_seq(m):
+    """群消息**序号** —— 水位线的唯一判据。
+
+    NapCat 把真正的群消息序号放在 **`real_seq`**：实测 1332 → 1430 **严格 +1**、
+    99/99 条都在、**字符串**形态（所以要 `int()` 转）。
+
+    ⚠️ 别被字段名骗了：`message_seq` / `real_id` 跟 `message_id` 是**同一个随机数**，
+    只有 `real_seq` 是序号（2026-10-09 实测）。
+    """
+    try:
+        return int((m or {}).get("real_seq") or 0)
     except (TypeError, ValueError):
         return 0
 
@@ -7411,7 +7546,7 @@ def _msg_time(m):
 
 def wm_init(messages):
     """首跑的**水位线初始化**：只记当前最大值，**不产生任何待响应消息**（铁律 ①）。"""
-    return {"last_message_id": max((_msg_id(m) for m in messages), default=0),
+    return {"last_seq": max((_msg_seq(m) for m in messages), default=0),
             "last_time": max((_msg_time(m) for m in messages), default=0),
             "cooldown": {}, "retry": {}}
 
@@ -7419,17 +7554,17 @@ def wm_init(messages):
 def wm_pending(wm, messages):
     """水位线之后的新消息（保持传入顺序）。
 
-    只用 `message_id` 判定 —— 但**前提是先排除「id 被重置」**（见 `wm_reset_detected`）。
-    正常运行时 id 单调递增，所以「id 比水位线大」就等价于「新消息」。
+    判据是 **`real_seq`**（严格递增的群消息序号）——
+    单靠 `message_id` 挡不住 NapCat 重启（id 是随机数、会回退），见 `_msg_id`。
     """
-    lid = int(wm.get("last_message_id") or 0)
-    return [m for m in messages if _msg_id(m) > lid]
+    lid = int(wm.get("last_seq") or 0)
+    return [m for m in messages if _msg_seq(m) > lid]
 
 
 def wm_reset_detected(wm, messages):
-    """是否检测到「`message_id` 被重置」（NapCat 重启后 id 可能从头开始，坑 8）。
+    """是否检测到「序号被重置」（NapCat 重启 / 换了群，序号可能从头开始，坑 8）。
 
-    判据：这一批里**没有任何 id 前进**，却有消息的 `time` 明显前进 ——
+    判据：这一批里**没有任何序号前进**，却有消息的 `time` 明显前进 ——
     正常「没有新消息」的情况下 time 也不会前进（都 ≤ 水位线）。
 
     检测到之后**不能**把整批当新消息处理：那会在群里**重复回复一堆旧命令**。
@@ -7437,7 +7572,7 @@ def wm_reset_detected(wm, messages):
     """
     if not messages:
         return False
-    if max((_msg_id(m) for m in messages), default=0) > int(wm.get("last_message_id") or 0):
+    if max((_msg_seq(m) for m in messages), default=0) > int(wm.get("last_seq") or 0):
         return False
     return max((_msg_time(m) for m in messages), default=0) > int(wm.get("last_time") or 0)
 
@@ -7445,7 +7580,7 @@ def wm_reset_detected(wm, messages):
 def wm_advance(wm, msg):
     """把水位线推过这条消息，返回**新的** dict（不改传入的）。"""
     nw = dict(wm)
-    nw["last_message_id"] = max(int(wm.get("last_message_id") or 0), _msg_id(msg))
+    nw["last_seq"] = max(int(wm.get("last_seq") or 0), _msg_seq(msg))
     nw["last_time"] = max(int(wm.get("last_time") or 0), _msg_time(msg))
     return nw
 
@@ -7482,20 +7617,22 @@ def wm_after_handle(wm, msg, outcome, max_attempts):
       · `"fail"` —— 处理失败                         → 未到上限则**不推进**、暂停本轮
                     （下轮重试，保序），到上限则推进放弃（免得永远卡住）。
     """
-    mid = str(_msg_id(msg))
+    # 重试计数按**序号**记（序号才唯一且稳定；随机 message_id 也能区分，
+    # 但没理由跟水位线用两套判据）。
+    skey = str(_msg_seq(msg))
     retry = dict(wm.get("retry") or {})
     if outcome != "fail":
-        retry.pop(mid, None)
+        retry.pop(skey, None)
         nw = wm_advance(wm, msg)
         nw["retry"] = retry
         return nw, True
-    tries = int(retry.get(mid) or 0) + 1
+    tries = int(retry.get(skey) or 0) + 1
     if tries >= max(1, int(max_attempts)):
-        retry.pop(mid, None)
+        retry.pop(skey, None)
         nw = wm_advance(wm, msg)
         nw["retry"] = retry
         return nw, True
-    retry[mid] = tries
+    retry[skey] = tries
     nw = dict(wm)
     nw["retry"] = retry
     return nw, False
@@ -7503,11 +7640,17 @@ def wm_after_handle(wm, msg, outcome, max_attempts):
 
 def load_wm(path=CMD_WATERMARK_FILE):
     """读水位线。**返回 None 表示「没有水位线」= 首跑** —— 这和「空 dict」不同，
-    首跑要专门初始化（铁律 ①），所以这两种状态必须能区分开。"""
+    首跑要专门初始化（铁律 ①），所以这两种状态必须能区分开。
+
+    🔴 没有 `last_seq` 的文件（= 「按随机 `message_id` 记水位线」的旧格式）
+    **一律当首跑**，返回 None。直接沿用会让整段历史被当成新消息重放 ——
+    宁可重新基线化（一条都不响应，与首跑同策略）。上线前 `state_cmd_watermark.json`
+    本就从未存在过，这条只是防止有人手上有调试残留。
+    """
     try:
         with open(path, "r", encoding="utf-8") as fp:
             d = json.load(fp)
-        if isinstance(d, dict) and d:
+        if isinstance(d, dict) and d and "last_seq" in d:
             return d
     except (OSError, json.JSONDecodeError):
         pass
@@ -7664,7 +7807,8 @@ def handle_cmd_message(cfg, es, wm, msg, group, bot_qq, cooldown_s, now_ts):
     handler = CMD_REGISTRY.get(cmd)
     if handler is None:
         return "skip", wm
-    log("[info] 收到命令 %s（群 %s，消息 id %s）" % (cmd, group, _msg_id(msg)))
+    log("[info] 收到命令 %s（群 %s，序号 %s / 消息 id %s）"
+        % (cmd, group, _msg_seq(msg), _msg_id(msg)))
     try:
         ok = bool(handler(cfg, es, msg, datetime.now(CST)))
     except Exception as exc:  # noqa: BLE001
@@ -7693,23 +7837,23 @@ def listen_tick(cfg, es, group, bot_qq, cooldown_s, count, max_attempts):
         # 铁律 ①：首跑只记水位线，**历史一条都不响应**。
         wm = wm_init(msgs)
         save_wm(wm)
-        log("[info] 首跑：水位线初始化为 message_id=%s / time=%s，**历史消息一条都不响应**"
-            % (wm["last_message_id"], wm["last_time"]))
+        log("[info] 首跑：水位线初始化为 real_seq=%s / time=%s，**历史消息一条都不响应**"
+            % (wm["last_seq"], wm["last_time"]))
         return
 
     if wm_reset_detected(wm, msgs):
-        # id 被重置（NapCat 重启过）：**重新基线化、一条都不响应**，与首跑同策略。
+        # 序号被重置（NapCat 重启过）：**重新基线化、一条都不响应**，与首跑同策略。
         # 宁可漏掉重置瞬间的几条，也不要把整批当新命令、在群里重复回复一堆旧命令。
         wm = wm_init(msgs)
         save_wm(wm)
-        log("[warn] 检测到 message_id 被重置（NapCat 重启过？），水位线重新基线化为 "
-            "message_id=%s，本轮不响应任何消息" % wm["last_message_id"])
+        log("[warn] 检测到群消息序号被重置（NapCat 重启过？），水位线重新基线化为 "
+            "real_seq=%s，本轮不响应任何消息" % wm["last_seq"])
         return
 
     pending = wm_pending(wm, msgs)
     if not pending:
         return
-    pending.sort(key=_msg_id)        # 保序：早的先处理（免得乱序回复）
+    pending.sort(key=_msg_seq)       # 保序：早的先处理（免得乱序回复）
     for m in pending:
         if str(m.get("group_id") or "") != str(group):
             wm, _cont = wm_after_handle(wm, m, "skip", max_attempts)

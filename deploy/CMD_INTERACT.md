@@ -134,7 +134,7 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 │        │                    │                                        │
 │        │                    └─ 拿回最近 M 条（含别人发的）             │
 │        │                                                             │
-│        ├─ 按 message_id 去重（水位线）                                │
+│        ├─ 按 real_seq 去重（水位线）                                 │
 │        ├─ 匹配 [CQ:at,qq=...] + /赛事                                 │
 │        └─ POST /send_group_msg 回消息                                │
 │                                                                      │
@@ -196,8 +196,8 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
    └───────────┬────────────┘
                ▼
    ┌────────────────────────┐
-   │ 闸门 3 · 水位线幂等     │  按 message_id 去重；**先发成功、后落盘**
-   │                        │  重启 / 时间回拨都不重发
+   │ 闸门 3 · 水位线幂等     │  按 real_seq 去重；**先发成功、后落盘**   │
+   │                        │  重启 / 时间回拨都不重发                    │
    └───────────┬────────────┘
                ▼
    ┌────────────────────────┐
@@ -331,13 +331,13 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 常驻进程第一次跑时，如果水位线初始值是 `0`：
 它会把群历史（299 条）**全部当成新命令重放** → 群里瞬间被塞满图。
 
-**必须：首跑只记「当前最大 `message_id`」、不响应任何历史消息。**
+**必须：首跑只记「当前最大 `real_seq`」、不响应任何历史消息。**
 
 ```
 首次启动：
-    max_id = max(所有历史 message_id)
-    落盘水位线 = max_id
-    然后才开始响应 id > max_id 的新消息
+    max_seq = max(所有历史 real_seq)
+    落盘水位线 = max_seq
+    然后才开始响应 seq > max_seq 的新消息
 ```
 
 ### 坑 2 · 🟠 水位线必须在「发送成功之后」落盘
@@ -379,9 +379,10 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 ### 坑 8 · 🟡 冷却参数别写死
 
 - 冷却是**配置项**（`cmd_cooldown_seconds`），别硬编码秒数。
-- 去重按 **`message_id` + `time` 双水位线** ——
-  单靠 `message_id` 挡不住 NapCat 重启（id 可能回退），
-  单靠 `time` 挡不住同一秒的多条消息（且有时间回拨风险）。
+- 去重按 **`real_seq` 单水位线**（NapCat 的群消息序号，严格递增、稳定）。
+  ⚠️ **绝不能用 `message_id`** —— 2026-10-09 上线前实测发现它是
+  **随机 32 位数、完全不单调**（`message_id` == `message_seq` == `real_id`），
+  拿它当水位线会让约 **95% 的命令被静默吞掉**。详见 `_msg_id` 的 docstring。
 
 ---
 
@@ -410,8 +411,10 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
       `message_to_cq()` 先转成等价 CQ 串）
 - [x] `is_at_bot(message, bot_qq)`：精确匹配 `[CQ:at,qq=<bot_qq>]`（**排除 `qq=all`**）
 - [x] 水位线状态文件 `state_cmd_watermark.json`：
-      `{ "last_message_id": int, "last_time": int, "cooldown": {群号|命令: ts}, "retry": {id: 次数} }`
+      `{ "last_seq": int, "last_time": int, "cooldown": {群号|命令: ts}, "retry": {seq: 次数} }`
       （比原设计多了 `retry` —— 见下方「实现时的两处偏差」）
+      🔴 `last_seq` 来自 NapCat 的 `real_seq`（严格递增的群消息序号），
+         **不是** `message_id`（后者是随机数）—— 见坑 8。
 - [x] 冷却：`cmd_cooldown_seconds`（新增配置项，默认 **30**）
 - [x] 回复走 onebot 通道（**不走 console**），带 `[CQ:reply,id=...]`
 - [x] 渲染**复用 `render_card`**（它本身就是「HTML 大图 → 880px → 纯文本」的三级降级，
@@ -431,7 +434,7 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
    所以加了 `cmd_max_attempts`（默认 3）：失败时水位线**不推进、暂停本轮**（下轮重试），
    到上限才推进放弃。这是「宁可重复、但别疯狂重试」的折中。
 
-### 9.2 自检 —— ✅ 已全部落地（31 条，`--selftest` 里「群内命令交互」一节）
+### 9.2 自检 —— ✅ 已全部落地（含 2026-10-09 上线前补的 9 条水位线/服务断言）
 
 - [x] `parse_command` 的边界：恰好相等 / 前后空格 / 多一个词 / 子串闲聊 / 空·None·非字符串
 - [x] @ 判定：`qq=<bot>` 命中、`qq=all` **不**命中、`qq=别人` 不命中、没配 bot_qq 不命中
@@ -440,20 +443,32 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 - [x] **首跑水位线**：有一堆历史消息的假输入 → 断言**一条都不响应**
 - [x] 水位线**先发后落**：断言发送失败（未达上限）时水位线**不前进**、且暂停本轮
 - [x] 水位线失败**到上限**时推进放弃
-- [x] `message_id` 被重置能被识别、且重置后不把整批当新命令（重新基线化）
+- [x] `real_seq` 被重置（NapCat 重启）能被识别、且重置后不把整批当新命令（重新基线化）
 - [x] 冷却：N 秒内第二次**不响应**、过了窗口放行、不同群不同命令互不影响
 - [x] `load_wm` 文件不存在返回 `None`（= 首跑，与「空 dict」区分）
+- [x] 🔴 **2026-10-09 补**：`_msg_seq` 解析（str/int/缺失/垃圾都不炸 —— `real_seq` 是字符串）
+- [x] 🔴 **2026-10-09 补**：判据是 `real_seq` **不是**随机 `message_id`
+      （构造 `message_id` 反向更小的新消息，仍必须算新；反向构造 `message_id=2^31-1` 的旧消息，必须不算新）
+- [x] 🔴 **2026-10-09 补**：重试计数的 key 用序号（与 `last_seq` 同源）
+- [x] 🔴 **2026-10-09 补**：旧格式水位线（只有 `last_message_id`）**当首跑处理**
+- [x] 🔴 **2026-10-09 补**：回复引用 `[CQ:reply,id=...]` 仍用 `message_id`（AST 断言，防顺手改错）
+- [x] 🔴 **2026-10-09 补**：结构断言 —— 水位线四个函数**一个都不许**调 `_msg_id`、
+      **都必须**调 `_msg_seq`
+- [x] 🔴 **2026-10-09 补**：`douyu-cmd.service` 必须有自己的 `[Install]` + `WantedBy`
+      （缺了 `enable` 会失败、重启后不自启）
 - [x] **AST 结构断言**：联网调用不在 `file_lock` 内（钉住难点 3）
 - [x] AST 结构断言：`run_listen` 是常驻（有 `while`）、`listen_tick` 收消息并落水位线、
       `cmd_handle_schedule` 复用现成渲染栈、`main` 里有 `args.listen` 分发
 - [x] **变异测试**：把上面每条断言对应的「有 bug 的写法」改回去 → 确认断言真的 FAIL → 还原
+      （2026-10-09 这次共 11 条变异全部被抓；含「水位线四函数逐一改回 `_msg_id`」、
+      「`douyu-cmd.service` 删 `[Install]` / 删 `WantedBy`」、「`[CQ:reply,id=]` 改用 `_msg_seq`」）
 
 ### 9.3 交付与部署
 
 ```bash
 # 1. 三自检 + 凭据体检，全绿
 python  selftest.py                 # 仓库根 100 项
-python  deploy/esports.py --selftest   # 满配 423 项（本功能新增 31 条）
+python  deploy/esports.py --selftest   # 满配 483 项（本功能相关约 40 条）
 python  deploy/watchdog.py --selftest  # 75 项
 python  check-secrets.py
 
@@ -467,12 +482,20 @@ python  pack_deploy.py
 - [x] `CMD_INTERACT.md` 加进 `pack_deploy.py` 的 `REQUIRED`（否则服务器上不装）
 - [x] 新增的 `douyu-cmd.service` 加进 `REQUIRED`（**不加 `.timer`** —— 它是常驻服务）
 - [x] `install-watch.sh` 加安装分支（**只装不 enable**，与其余单元一致）
+      + 2026-10-09 补了 `[Install]` 段 + 回滚说明里加 `douyu-cmd`
 - [x] 刷新 `deploy/UPDATE_PROMPT.md` 第 0 步的指纹表（`esports.py` / `config.example.json`
       已更新为命令行版本；`douyu-cmd.service` 的指纹写在正文说明里、**不进表** ——
       那张表历来只列 代码 / 模板 / 配置样板 / 字体，其余 `.service` 也都不在里面）
-- [ ] 服务器由 agent 用 workbench 部署（路径见 `DEPLOY.md`）
+- [x] 服务器由 agent 用 workbench 部署（2026-10-09 已部署，详见日志）
 
 ### 9.4 上线验收
+
+> ⚠️ 2026-10-09 上线前核查发现两个阻塞项，**都已修**才部署：
+> ① `douyu-cmd.service` 缺 `[Install]` 段（其余 6 个 service 靠 timer 拉起所以不需要，
+>    但 douyu-cmd 是常驻、没 timer）→ `enable` 会失败、重启不自启 → 已加 `[Install]` + `WantedBy=multi-user.target`。
+> ② 🔴 **致命**：水位线按 `message_id` 判，但实测 NapCat 的 `message_id` 是随机数、不单调
+>    （`message_id` == `message_seq` == `real_id`）→ 约 **95% 的命令会被静默吞掉**。
+>    改判 `real_seq`（真正的群消息序号，严格 +1）后 + 9 条断言 + 11 条变异测试全过。
 
 - [ ] **先前台手动跑**，在群里敲一次 `/赛事`，确认收到今天的大图
 - [ ] 确认「发历史消息**不**触发」：翻群历史，没有重放

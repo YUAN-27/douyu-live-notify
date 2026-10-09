@@ -34,3 +34,13 @@ ProtectSystem=full
 ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
+
+[Install]
+# ⚠️ **这一段不能省** —— 其余 6 个单元都是 oneshot + timer，靠 timer 拉起，
+#    所以它们的 .service 都不需要 [Install]（[Install] 写在 .timer 上）。
+#    但 douyu-cmd 是**独立常驻服务、没有 timer**，缺了这一段会直接导致：
+#      · `systemctl is-enabled douyu-cmd` → `static`
+#      · `systemctl enable douyu-cmd` → 「unit files have no installation config」失败
+#      · **服务器重启后它不会自己起来**，只能人手 `systemctl start`
+#    自检里有一条断言专门钉这个（`douyu-cmd.service 必须有自己的 [Install] 段`）。
+WantedBy=multi-user.target

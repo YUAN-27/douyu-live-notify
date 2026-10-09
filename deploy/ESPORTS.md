@@ -1156,7 +1156,7 @@ cd /opt/douyu-live-notify && python3 esports.py --check
 ## 8. 自检
 
 ```bash
-python3 esports.py --selftest    # 满配 474 项（装了 Pillow + make_card_font.py）：解析器 /
+python3 esports.py --selftest    # 满配 483 项（装了 Pillow + make_card_font.py）：解析器 /
                                  # 四条筛选 / 跨夜窗口 / 正文版式 / 图片卡片 / 战果结算 /
                                  # 单场战报 / 选手数据（展示层 + **Cito 抓取层**）/
                                  # 全天整合版 / 条款节流 / 群内命令交互 /
@@ -1172,7 +1172,7 @@ python3 esports.py --selftest    # 满配 474 项（装了 Pillow + make_card_fo
 > |---|---|
 > | 少了 `make_card_font.py` | 少「两张字符表是否一致」那几条 |
 > | 没装 Pillow | 四张卡片的渲染断言换成降级断言 |
-> | 在「装好的机器」上（无 `deploy/`、无 `config.example.json`、无 `*.service`） | 少 3 条（本机 474 → 服务器 471） |
+> | 在「装好的机器」上（无 `deploy/`、无 `config.example.json`、无 `*.service`） | 少 5 条（本机 483 → 服务器 478） |
 >
 > **别照着这里的数字改断言** —— 以实际输出末行「结果：N 项通过，0 项失败」为准。
 > 断言的增删是常态（接入 Cito 净增了 45 条；更早拆 csdb 抓取层净减约 16 条）。

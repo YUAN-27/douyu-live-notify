@@ -101,7 +101,7 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `fcfcac0a0bc37f91` | 408601 |
+| `esports.py` | `114684ab1d6eb990` | 417897 |
 | `result_template.html`（V2 单场战报模板，**RTG 三档配色**） | `8da45799d1fc5b78` | 11120 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
@@ -117,13 +117,32 @@ sha256sum ../deploy.zip | cut -c1-16
 > 它是本项目**第一个也是唯一一个常驻服务**（`Restart=always`，**没有 `.timer`**）。
 > `install-watch.sh` 里加了安装分支，**只装不 enable**（与其余单元一致）；要试就先前台
 > `python3 esports.py --listen` 手动跑一次确认行为。
-> 指纹：`douyu-cmd.service` = `811364fdd54b7b00` / 1664 字节
+> 指纹：`douyu-cmd.service` = `d38765c93298c7d8` / 2332 字节
 > （它**不在上表里** —— 上表只列代码 / 模板 / 配置样板 / 字体，其余 `.service` 也都不在里面）。
+> 2026-10-09 上线前补了 `[Install]` + `WantedBy=multi-user.target` 段 ——
+> 它是**没有 timer 的常驻服务**，缺这一段 `enable` 会失败、重启不自启。
 > 同时 `CMD_INTERACT.md`（群内 `/赛事` 命令的设计文档）从「纯设计」更新为「已实现」，
 > 它和 `douyu-cmd.service` 都是 `REQUIRED` 成员，会随包装上；两个都不是运行必需品 ——
 > **不启用新单元 = 推送线行为与上一版完全一致**，老机器上不装也一切照常。
 
-**本版**（commit 见 `git log -1 --oneline`）新增**群内命令交互**（@ 机器人 · `/赛事`）：
+**本版**（commit 见 `git log -1 --oneline`）修**两个上线阻塞项**（2026-10-09 上线前核查发现）：
+
+① 🔴 **致命**：群内命令的水位线原来按 `message_id` 判，实测 NapCat（4.18.28 / OneBot v11）
+   返回的 `message_id` 是**随机 32 位数、完全不单调**（`message_id` == `message_seq` == `real_id`，
+   time 递增而 id 忽大忽小）。拿它当水位线的后果：`wm_init` 取一批里的最大 id（≈ 接近 2^31），
+   新消息的随机 id 要「比它大」才算新 → **约 95% 的 `/赛事` 会被静默吞掉**，而且越跑越聋。
+   **判据改用 `real_seq`**（NapCat 把真正的群消息序号放在这儿：实测 1332→1430 严格 +1、
+   99/99 条都在、字符串形态）。`[CQ:reply,id=...]` 仍用 `message_id`（QQ 只认它）。
+   配套 9 条断言 + **11 条变异测试**全过（含「水位线四函数逐一改回 `_msg_id`」、
+   「删 `douyu-cmd.service` 的 `[Install]`」、「`[CQ:reply,id=]` 改用 `_msg_seq`」）。
+② `douyu-cmd.service` 缺 `[Install]` 段 —— 其余 6 个 service 靠 timer 拉起所以不需要，
+   但 douyu-cmd 是**唯一常驻服务、没 timer**，缺了 `enable` 会失败、重启不自启。
+   补上 `[Install]` + `WantedBy=multi-user.target`。`install-watch.sh` 回滚说明里也补了 douyu-cmd。
+变的是 `esports.py` / `douyu-cmd.service` / `install-watch.sh` / `CMD_INTERACT.md`（设计文档
+里把「`message_id` 水位线」全部改成 `real_seq`、坑 8 重写）；
+**四个模板与字体、`watch.py` / `selftest.py` / `watchdog.py` 一个字都没动**。
+
+**上一版**（commit 见 `git log -1 --oneline`）新增**群内命令交互**（@ 机器人 · `/赛事`）：
 `esports.py` 多了 `--listen`（常驻轮询 `get_group_msg_history`，四道闸门 + 水位线幂等，
 **复用 09:30 那套渲染栈**），并新增第 7 个单元 `douyu-cmd.service`（唯一常驻服务，**无 timer**）。
 **四个模板与字体、`watch.py` / `selftest.py` / `watchdog.py` 一个字都没动**；变的是
@@ -305,15 +324,15 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **474** |
-  | 少了 `make_card_font.py` | 472（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **483** |
+  | 少了 `make_card_font.py` | 481（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
-  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **471**（少 3 条，打 `[skip]`） |
+  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **478**（少 5 条，打 `[skip]`） |
 
-  ⚠️ 最后那一行是新加的：`config.example.json` 和 `douyu-esports-daily.service`
+  ⚠️ 最后那一行：`config.example.json` / `douyu-esports-daily.service` / `douyu-cmd.service`
   只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。
-  所以那 3 条要**先 `os.path.isfile` 挡一道**再读 —— 否则服务器上第一条路径就
+  所以那 5 条要**先 `os.path.isfile` 挡一道**再读 —— 否则服务器上第一条路径就
   `FileNotFoundError`，整个自检**在中途断掉**（2026-10-06 首次部署这一版真的崩过一次，
   包内全绿、服务器上直接抛异常）。现在有断言用语法树钉着这个守卫，
   别把它删掉。

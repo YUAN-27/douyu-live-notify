@@ -559,16 +559,22 @@ cat <<'EOF'
     systemctl disable --now douyu-watchdog.timer
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     systemctl daemon-reload
+    # 只回滚群内命令交互（@ 机器人 · /赛事）—— **一行就够**，
+    # 不动 NapCat、也不动上面 6 个 timer：
+    systemctl disable --now douyu-cmd
+    # （想彻底删干净再补：rm -f /etc/systemd/system/douyu-cmd.service && systemctl daemon-reload）
     # 全部回滚：
     systemctl disable --now douyu-watch.timer douyu-watchdog.timer \
         douyu-esports.timer douyu-esports-results.timer douyu-esports-daily.timer \
         douyu-esports-announce.timer
+    systemctl disable --now douyu-cmd
     rm -f /etc/systemd/system/douyu-watch.{service,timer}
     rm -f /etc/systemd/system/douyu-watchdog.{service,timer}
     rm -f /etc/systemd/system/douyu-esports.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-results.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-daily.{service,timer}
     rm -f /etc/systemd/system/douyu-esports-announce.{service,timer}
+    rm -f /etc/systemd/system/douyu-cmd.service
     systemctl daemon-reload
     # 注意：不回滚 /var/log/douyu-watch（日志留着排错）和
     #       /var/lib/douyu-watchdog（告警历史留着）、/etc/default/douyu-watchdog（你的密钥）、
@@ -576,8 +582,12 @@ cat <<'EOF'
     #       /opt/douyu-live-notify/state_results_pending.json（待结算清单）、
     #       /opt/douyu-live-notify/state_esports_parse.json（条款节流时间戳）、
     #       /opt/douyu-live-notify/state_esports_daily.json（整合版幂等标记）、
-    #       /opt/douyu-live-notify/state_esports_announce.json（开赛提醒锁）
+    #       /opt/douyu-live-notify/state_esports_announce.json（开赛提醒锁）、
+    #       /opt/douyu-live-notify/state_cmd_watermark.json（命令水位线）
     #       确认不再用的时候自己删。
+    #       ⚠️ 只在 douyu-cmd 停掉之后才删水位线 —— 删了等于「首跑」，
+    #          下一次启动会重新基线化（历史一条都不响应），不会刷屏，但会漏掉
+    #          这期间的新命令。
 
 ===============================================================
 EOF
