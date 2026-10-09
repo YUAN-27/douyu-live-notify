@@ -48,6 +48,8 @@
 | **（本次）** | **新增开赛提醒（STARTING SOON）** | 比赛快开打时推一张 Match Preview 大图（1920×1080）。**新增 3 个文件**：`preview_template.html`、`douyu-esports-announce.{service,timer}`（只装不启用）。**零网络请求** —— 开赛时刻是同赛事前一场结果串场级联估算的（Bo1 80 / Bo3 140 / Bo5 240 分钟 + 中场 30 分钟），timer 每分钟看一眼清单，估算时刻落入未来 5 分钟窗口且没提醒过才发；提醒锁在 `state_esports_announce.json`，同一场只发一次，估算漂移超 10 分钟补发一次「时间有调整」。前提：`douyu-esports.timer` 在跑（预告写清单，提醒才有料） |
 | **（本次）** `d069699` 之后的清理 | **拆出选手数据抓取层**（csdb.gg 已失效） | csdb.gg 改成 Next.js 客户端渲染后，原 `fetch_csdb` / `parse_csdb_matches` / `locate_csdb_match` / `parse_csdb_players` / `attach_players` 五个函数 + `CSDB_*` 常量 + `--results` 里的抓取调用点**全部删除**。**展示层原地保留**：`result_template.html` 选段、`build_result_match()` 的 `players`/`mvp` 字段、`_aggregate_players()`、`_draw_player_block()`、`_team_same()` —— 将来接上新数据源只需把逐图选手数据填进 `row["players"]`，模板一行不改。模板页脚把「Liquipedia · csdb.gg」改回「Liquipedia」。配置键 `card_players_enabled` 暂**无消费者**（保留备用）、`card_players_per_team` 展示层仍读。**行为变化：单场战报不再有选段（此前也基本抓不到，等于把空转拆掉），其余一切照旧、零新增网络请求** |
 
+| **（本次）** `bebc639` | **选手数据源换成 Cito API（默认关闭）** | 单场战报卡片底部那段 5v5（K-D / ADR / KAST / Rating + 全场 MVP）**重新有数据了**。csdb.gg 已失效，这次改用 **Cito API**（`citoapi.com`，免费档 500 次/月，实测配对率 15/15）。**默认关闭**：`esports.cito_enabled=false` 时**一次请求都不发**，卡片自动走「居中无统计」形态 —— 行为与上一版完全一致。要开启：在服务器 `config.json` 的 `esports` 段填 `cito_api_key`（形如 `cito_xxx`）并把 `cito_enabled` 改成 `true`；回滚就是把这两处改回去。**四个模板与字体、`watch.py` / `selftest.py` / `watchdog.py` 一个字都没动**；变的是 `esports.py` / `config.example.json`，并新增 `CITO_PLAYERS.md`（设计与实测的唯一权威，`REQUIRED` 成员）。⚠️ 选手数据只出现在**单场战报**，**不进全天整合版**（快照不存 `players`、整合模板也没有选段区块） |
+
 下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 
 ---
@@ -97,12 +99,12 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `55aa3a883f6d9320` | 372711 |
+| `esports.py` | `dbdd8e573740799f` | 405531 |
 | `result_template.html`（V2 单场战报模板） | `b6e87d77330ba710` | 10493 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
-| `config.example.json`（配置样板，含结算超时默认值） | `6960b219096716b7` | 15190 |
+| `config.example.json`（配置样板，含 Cito 开关与结算超时默认值） | `179328b8a8dffe81` | 16535 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
@@ -301,11 +303,11 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **423** |
-  | 少了 `make_card_font.py` | 421（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **468** |
+  | 少了 `make_card_font.py` | 466（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
-  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **420**（少 3 条，打 `[skip]`） |
+  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **465**（少 3 条，打 `[skip]`） |
 
   ⚠️ 最后那一行是新加的：`config.example.json` 和 `douyu-esports-daily.service`
   只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。
