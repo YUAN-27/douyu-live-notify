@@ -97,12 +97,12 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `d86b45fbfbaf24fa` | 348733 |
-| `result_template.html`（V2 单场战报模板） | `82638848c4a48a07` | 10494 |
+| `esports.py` | `c4fccc42ed25f88f` | 340733 |
+| `result_template.html`（V2 单场战报模板） | `b6e87d77330ba710` | 10493 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
-| `config.example.json`（配置样板，含结算超时默认值） | `09d39720904e3568` | 13662 |
+| `config.example.json`（配置样板，含结算超时默认值） | `3d9986c29e8898fb` | 13811 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
@@ -159,10 +159,10 @@ sha256sum ../deploy.zip | cut -c1-16
    （默认 12）是**另一个画布**，刻意不合并（有断言钉住两者是不同的数）。
 ⑦ **两个自检都得能在「装好的机器」上跑完**（本版自己踩出来的一条）。上面 ⑥ 的断言
    顺手读了 `config.example.json` 和 `douyu-esports-daily.service`，可这两个文件
-   `install-watch.sh` **不装**到 `/opt/douyu-live-notify` —— 于是包内 408 项全绿、
+   `install-watch.sh` **不装**到 `/opt/douyu-live-notify` —— 于是包内 392 项全绿、
    服务器上第一条路径就 `FileNotFoundError`，**整个自检在中途断掉**。
    现在两处都改成「先 `os.path.isfile` 挡一道，不在就打 `[skip]` 写明原因」：
-   `esports.py --selftest` 在装好的机器上是 **405 项**（少 3 条），
+   `esports.py --selftest` 在装好的机器上是 **389 项**（少 3 条），
    `selftest.py` 是 **92 项**（少 8 条，见第 3 步）。并且用**语法树**加了一条断言，
    钉住「那几个 `open()` 必须落在带 `isfile` 的分支里」——
    **别把守卫删掉**。
@@ -299,7 +299,7 @@ python3 esports.py --selftest; echo "退出码=$?"
   只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。
   所以那 3 条要**先 `os.path.isfile` 挡一道**再读 —— 否则服务器上第一条路径就
   `FileNotFoundError`，整个自检**在中途断掉**（2026-10-06 首次部署这一版真的崩过一次，
-  包内 408 项全绿、服务器上直接抛异常）。现在有断言用语法树钉着这个守卫，
+  包内 392 项全绿、服务器上直接抛异常）。现在有断言用语法树钉着这个守卫，
   别把它删掉。
 
   **唯一要盯的是「0 项失败」**。项数对不上就去看上面 Pillow / 浏览器那两行、

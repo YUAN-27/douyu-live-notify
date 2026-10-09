@@ -421,7 +421,7 @@ timer 到点 → 拉起一个进程 → 干一件事 → 退出
 ```bash
 # 1. 三自检 + 凭据体检，全绿
 python  selftest.py                 # 仓库根 100 项
-python  deploy/esports.py --selftest   # 满配 408 项
+python  deploy/esports.py --selftest   # 满配 392 项
 python  deploy/watchdog.py --selftest  # 75 项
 python  check-secrets.py
 
